@@ -53,10 +53,11 @@ v2 had a raw UART on D13/D14, which caused contention; it was removed in v3.
 
 | cmd | frame | meaning |
 |---|---|---|
-| `01` | cmd, dummy, 16 status bytes | 'M' 'e' ver flags seq lba[4] rxcnt[2] txfree[2] sdcmds lastcmd ctrl |
+| `01` | cmd, dummy, 16 status bytes | 'M' 'e' ver flags seq lba[4] rxcnt[2] txfree[2] sdcmds lastcmd ctrl (flags b0 rd_req b1 rd_ready b2 wr_req b3 inited b4 rx overflow b5 rd_error) |
 | `10` | cmd, 512 bytes | data for the pending SD read |
 | `11` | cmd, dummy, 512 bytes | captured SD write block |
 | `12` | cmd | write consumed → release card busy |
+| `13` | cmd | pending read is past the end of the card → data-error token `0x08` (out of range) |
 | `20` | cmd, N bytes | → monitor RX (2.025 Mbaud internally) |
 | `21` | cmd, dummy, N bytes | ← monitor TX FIFO (16 KiB) |
 | `30` | cmd, ctrl, joyA, joyB, col0..8 | ctrl b0 reset, b1 RESTORE, b2 CAPS, b3 physical SD |
@@ -84,9 +85,13 @@ scripts/program.sh      # JTAG → SRAM via ~/qmtech/scripts/03_program.sh
 scripts/capture.sh      # MS2130 HDMI capture → captures/
 scripts/smoke_test.sh   # plug → program → m65d → RUN/STOP → SD boot → type → joystick → capture
 scripts/make_sdimage.sh # sparse 2 GiB MBR+FAT32 image with the core's system files (+ sdimage/extra/*)
-scripts/m65ctl.py       # control client: status | type <text> | key <K> | joy a b | reset | mon <cmd>
+scripts/m65ctl.py       # control client: status | type <text> | typecase <Text> | key <K> | joy a b |
+                        #   reset | restore 0/1 | mon <cmd>   (typecase = capitals with SHIFT, for ASCII apps)
+scripts/sd_populate.sh  # copy system files + ROM + extra dirs into an existing (FDISK-made) card image
 rockchip/m65d.py        # Rockchip daemon (root): SD server, monitor pipe :4510, control :4511
-rockchip/m65d_restart.sh, rockchip/rk_pins.py
+rockchip/m65d_restart.sh, rockchip/m65d_stop.sh, rockchip/rk_pins.py
+# m65d ignores any status without the bridge magic: while the FPGA is reprogrammed, MISO floats
+# and every field reads 0xFF (an old daemon wrote a garbage sector at LBA 0xFFFFFFFF that way).
 ```
 
 Host prerequisites already installed: `brew install exomizer`; libpng is found via
@@ -94,9 +99,29 @@ Host prerequisites already installed: `brew install exomizer`; libpng is found v
 
 ## SD card and ROM
 
-The SD image (`scripts/make_sdimage.sh`) is a sparse 2 GiB MBR + FAT32 card holding the core's system
-files plus everything in `sdimage/extra/`. Without `MEGA65.ROM`, HYPPO keeps the OpenROMs
-built into the bitstream.
+**Card = image file on the Rockchip** (`/root/m65/card.img`, the default for `m65d`, sparse).
+Card capacity = file size: reads past the end get an SD "out of range" error token, so FDISK
+and HYPPO see the real size.
+
+**Factory-style card, as used on the board (4 GiB):**
+1. `truncate -s 4G card.img` on the Rockchip, then boot: HYPPO finds no partitions and shows the
+   utility menu. Press `2` (SDCARD FDISK+FORMAT), select card `0`, then
+   `m65ctl.py typecase 'DELETE EVERYTHING\n'`. FDISK writes MBR + FAT32 (2 GiB at `$800`) + MEGA65
+   System partition (type `41`, 1022 freeze/service slots) in about 10k sector writes.
+   A copy of that blank card is kept as `sdimage/card_fdisk_blank.img`.
+2. Pull the image back (`tar -cS` on the Rockchip + `adb pull`) and run
+   `scripts/sd_populate.sh card.img ext/filehost/intros/sdcard-files`. That copies the 13 system
+   `.M65` files built from this tree, `MEGA65.ROM`, and the public "ALL INTRO DISKS" collection
+   (Filehost, 701 MB, MEGA65.D81 menu + intro disks 1-4 + about 100 programs).
+3. Push it back, restart `m65d`, reload the FPGA ("power-cycle"). First boot runs ONBOARD
+   (time, video mode, CRT emulation). Choose **Enhanced (with sound), PAL 50Hz** to match the
+   core's fixed 576p50 HDMI output, then RETURN to save to the system partition.
+
+Verified on hardware: the settings persist across a power-cycle; the card autoboots the MEGA65.D81
+menu; Intro Disk #1 mounts; MAND65 renders; the Freezer (hold RESTORE) freezes to a slot
+(about 900 sector writes), shows thumbnail/ROM/drive info, and F3 resumes the program intact.
+
+`scripts/make_sdimage.sh` (mtools-formatted, no system partition) is kept for quick tests only.
 
 **MEGA65.ROM (BASIC 65) from public sources**: `scripts/make_rom.sh <910828.bin> <patch.zip>`
 - Base: original C65 ROM **910828** (SHA-1 `b63d9707…`). It's in Cloanto's free C64 Forever 11 Express

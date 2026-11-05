@@ -11,7 +11,9 @@ Talks to rk_bridge.vhdl over spi3-m1 (/dev/spidev3.0) and provides:
         status                     bridge + SD statistics
         reset                      pulse the CPU reset (200 ms)
         hold_reset 0|1
-        type <text>                type text via the keyboard matrix (\\n = RETURN)
+        type <text>                type text via the keyboard matrix (\\n = RETURN); letters unshifted
+                                   (uppercase on the C64/C65 BASIC screen)
+        typecase <text>            case-sensitive: capitals typed with SHIFT (ASCII apps, e.g. FDISK)
         key <NAME> [ms]            tap one key (RETURN, SPACE, F1, RUNSTOP, ...)
         keys <c0> .. <c8>          raw matrix state, 9 hex bytes (bit = row, 1 = down)
         joy <a> <b>                joystick bits (b0 up b1 down b2 left b3 right b4 fire)
@@ -95,6 +97,9 @@ class Bridge:
     def sd_wack(self):
         self.x([0x12])
 
+    def sd_rerr(self):
+        self.x([0x13])
+
     def uart_put(self, data):
         self.x(b"\x20" + data)
 
@@ -115,6 +120,7 @@ class Daemon:
             sys.exit("m65d: no rk_bridge on spidev3.0 (magic %r) - wrong bitstream?" % st["magic"])
         print("m65d: rk_bridge v%d found" % st["ver"], flush=True)
         self.img = open(args.image, "r+b")
+        self.img_sectors = os.path.getsize(args.image) // 512   # card size = image size
         self.ctrl = 0
         self.ja = self.jb = 0
         self.cols = [0] * 9
@@ -142,7 +148,13 @@ class Daemon:
     # ---- SD
     def serve_sd(self, st):
         f = st["flags"]
-        if f & 0x01 and not f & 0x02:
+        if f & 0x01 and not f & 0x22:
+            if st["lba"] >= self.img_sectors:
+                # Past the end of the "card": answer like a real card (error token),
+                # so FDISK and HYPPO see the true capacity.
+                self.br.sd_rerr()
+                self.stats["rd_err"] = self.stats.get("rd_err", 0) + 1
+                return True
             self.img.seek(st["lba"] * 512)
             data = self.img.read(512)
             data += b"\x00" * (512 - len(data))
@@ -153,6 +165,9 @@ class Daemon:
             return True
         if f & 0x04:
             data = self.br.sd_get()
+            if st["lba"] >= self.img_sectors:     # never grow the image past the card size
+                self.br.sd_wack()
+                return True
             self.img.seek(st["lba"] * 512)
             self.img.write(data)
             self.img.flush()
@@ -169,12 +184,26 @@ class Daemon:
             self.br.set_input(self.ctrl, self.ja, self.jb, self.cols)
             self.input_dirty = False
 
+    MODIFIERS = None
+
     def queue_keys(self, combos, hold=0.06, gap=0.04):
+        if Daemon.MODIFIERS is None:
+            Daemon.MODIFIERS = {KEYPOS[k] for k in ("LSHIFT", "RSHIFT", "CTRL", "MEGA", "ALT")}
         for combo in combos:
-            cols = [0] * 9
+            mods = [k for k in combo if k in Daemon.MODIFIERS]
+            cols, mcols = [0] * 9, [0] * 9
             for c, r in combo:
                 cols[c] |= 1 << r
-            self.keyq.append((hold, cols))
+            for c, r in mods:
+                mcols[c] |= 1 << r
+            if mods and len(mods) < len(combo):
+                # Like a typist: modifier down first, released last, so the key
+                # scanner never sees the key without its modifier.
+                self.keyq.append((0.04, mcols))
+                self.keyq.append((hold, cols))
+                self.keyq.append((0.04, mcols))
+            else:
+                self.keyq.append((hold, cols))
             self.keyq.append((gap, [0] * 9))
 
     def run_keys(self, now):
@@ -224,6 +253,19 @@ class Daemon:
             hold = int(a[1]) / 1000.0 if len(a) > 1 else 0.06
             self.queue_keys([key_combo(a[0])], hold=hold)
             return "ok"
+        if cmd == "typecase":
+            text = rest.replace("\\n", "\n")
+            combos = []
+            try:
+                for ch in text:
+                    c = key_combo(ch)
+                    if ch.isalpha() and ch.isupper():
+                        c = [KEYPOS["LSHIFT"]] + c
+                    combos.append(c)
+            except KeyError as e:
+                return "err no key for %r" % e.args[0]
+            self.queue_keys(combos)
+            return "ok %d keys" % len(text)
         if cmd == "type":
             text = rest.replace("\\n", "\n")
             try:
@@ -249,6 +291,12 @@ class Daemon:
             self.push_input()
 
             st = self.br.status()
+            if st["magic"] != b"\x4d\x65":
+                # No bridge answering (FPGA being reprogrammed / other bitstream):
+                # MISO floats and every field would read as 0xFF. Act on nothing.
+                self.bridge_down = getattr(self, "bridge_down", 0) + 1
+                time.sleep(0.05)
+                continue
             busy |= self.serve_sd(st)
 
             # monitor output
@@ -316,7 +364,7 @@ class Daemon:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--image", default="/root/m65/sd.img")
+    ap.add_argument("--image", default="/root/m65/card.img")
     ap.add_argument("--hz", type=int, default=4000000)
     ap.add_argument("--mon-port", type=int, default=4510)
     ap.add_argument("--ctl-port", type=int, default=4511)

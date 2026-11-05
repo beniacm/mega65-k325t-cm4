@@ -28,7 +28,7 @@ architecture sim of tb_rk_sd is
   signal cs_n, sclk, mosi, miso : std_logic;
 
   -- emu <-> bridge
-  signal rd_req, wr_req, rd_ready, wr_ack, inited : std_logic;
+  signal rd_req, wr_req, rd_ready, wr_ack, inited, rd_error : std_logic;
   signal lba : unsigned(31 downto 0);
   signal seq, ccnt, lcmd : unsigned(7 downto 0);
   signal rba, wba : unsigned(8 downto 0);
@@ -73,7 +73,7 @@ begin
   emu : entity work.sd_emu
     port map (clk => clk, sd_cs_n => cs_n, sd_sclk => sclk, sd_mosi => mosi, sd_miso => miso,
               rd_req => rd_req, wr_req => wr_req, req_lba => lba, req_seq => seq,
-              rd_ready => rd_ready, wr_ack => wr_ack, rbuf_addr => rba, rbuf_data => rbd,
+              rd_ready => rd_ready, rd_error => rd_error, wr_ack => wr_ack, rbuf_addr => rba, rbuf_data => rbd,
               wbuf_we => wbwe, wbuf_addr => wba, wbuf_data => wbd, inited => inited,
               cmd_count => ccnt, last_cmd => lcmd);
 
@@ -81,7 +81,7 @@ begin
     port map (clk => clk, spi_sck => sck, spi_cs_n => scs, spi_mosi => smosi, spi_miso => smiso,
               sd_rd_req => rd_req, sd_wr_req => wr_req, sd_lba => lba, sd_seq => seq,
               sd_inited => inited, sd_cmd_cnt => ccnt, sd_last_cmd => lcmd,
-              sd_rd_ready => rd_ready, sd_wr_ack => wr_ack, rbuf_addr => rba, rbuf_data => rbd,
+              sd_rd_ready => rd_ready, sd_rd_error => rd_error, sd_wr_ack => wr_ack, rbuf_addr => rba, rbuf_data => rbd,
               wbuf_we => wbwe, wbuf_addr => wba, wbuf_data => wbd,
               mon_rx => mon_rx, mon_tx => mon_tx,
               matrix_col_idx => col_idx, matrix_col => col, joya => joya, joyb => joyb,
@@ -146,7 +146,10 @@ begin
     while not stop_server loop
       status(rx);
       l := to_integer(unsigned(std_logic_vector'(rx(5) & rx(6) & rx(7) & rx(8))));
-      if rx(3)(0) = '1' and rx(3)(1) = '0' then
+      if rx(3)(0) = '1' and rx(3)(1) = '0' and rx(3)(5) = '0' and l >= 1000000 then
+        cmd1(x"13");                         -- beyond the "card": error token
+        report "rejected read lba " & integer'image(l);
+      elsif rx(3)(0) = '1' and rx(3)(1) = '0' and rx(3)(5) = '0' then
         scs <= '0'; wait for TSPI;
         xfer(x"10", b);
         for i in 0 to 511 loop xfer(pat(l, i), b); end loop;
@@ -257,10 +260,23 @@ begin
     write_block(101, 101, '1', '0', '0');
     write_block(102, 102, '1', '0', '1');   -- last block + stop token
     read_block(5, 5);
+    -- read past the end of the card: controller must report an error
+    addr_i <= std_logic_vector(to_unsigned(2000000, 32));
+    wait until rising_edge(clk);
+    rd_i <= '1';
+    wait until rising_edge(clk) and busy_o = '1';
+    rd_i <= '0';
+    wait_ready;
+    assert err_o /= x"0000" report "out-of-range read did not error" severity failure;
+    report "out-of-range read -> error " & integer'image(to_integer(unsigned(err_o)));
+    -- recover the way sdcardio does: reset the controller, then read again
+    reset_i <= '1'; wait for 200 ns; reset_i <= '0'; wait for 1 us;
+    wait_ready;
+    read_block(7, 7);
     wait for 20 us;
     assert uart_seen = x"3C" report "UART monitor->RK FAIL" severity failure;
     report "UART monitor->RK byte ok (3C)";
-    assert served = 4 and written = 4 report "count mismatch" severity failure;
+    assert served = 5 and written = 4 report "count mismatch" severity failure;
     report "TB_RK_SD_PASS";
     stop_server <= true;
     done <= true;
