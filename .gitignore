@@ -1,0 +1,14 @@
+# upstream core is its own git repo (branch qmtech-k325t-cm4)
+/mega65-core/
+/ext/
+/logs/
+/captures/
+/sdimage/*.img
+/sdimage/extra/*
+# GHDL build products
+/sim/*.cf
+/sim/*.o
+/sim/tb_rk_sd
+/sim/e~*
+__pycache__/
+/sim/sdcard_simcopy.vhdl
