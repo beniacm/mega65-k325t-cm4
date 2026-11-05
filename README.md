@@ -92,11 +92,27 @@ rockchip/m65d_restart.sh, rockchip/rk_pins.py
 Host prerequisites already installed: `brew install exomizer`; libpng is found via
 `PKG_CONFIG_PATH` (linuxbrew's pkg-config shadows the system one).
 
-## SD card
+## SD card and ROM
 
-FAT32 card in the J12 Pmod. Without a card, or without `MEGA65.ROM` on it, the core boots
-the embedded OpenROMs. For the full experience, put the MEGA65 system files and your own
-`MEGA65.ROM` on the card (or run the built-in FDISK utility from the HYPPO menu).
+The SD image (`scripts/make_sdimage.sh`) is a sparse 2 GiB MBR + FAT32 card holding the core's system
+files plus everything in `sdimage/extra/`. Without `MEGA65.ROM`, HYPPO keeps the OpenROMs
+built into the bitstream.
+
+**MEGA65.ROM (BASIC 65) from public sources**: `scripts/make_rom.sh <910828.bin> <patch.zip>`
+- Base: original C65 ROM **910828** (SHA-1 `b63d9707…`). It's in Cloanto's free C64 Forever 11 Express
+  MSI (`Data1.cab` → `file_Shared_54` = `c-65-19910828.rom`) and is byte-identical to zimmers.net
+  `firmware/computers/c65/910828.bin`. **911001 does not work as a base.**
+- Patch: Filehost "C65/MEGA65 Kernal ROM diff files - Stable", currently **920413**
+  (`https://files.mega65.org/files/other/920413_Sn7YEw.zip`, public). The search API is
+  `POST /php/readpagesearch.php search=…`, and details come from `POST /php/readfiledetail.php fileid=…`.
+- The zip carries the same patch twice (`.rdf` romdiff and `.bdf` bsdiff). `make_rom.sh` applies both
+  (`scripts/rdfpatch.py`, `scripts/bspatch.py`) and only accepts the ROM if they agree byte-for-byte.
+  Result: `MEGA65.ROM` V920413, SHA-1 `4214ba46…`.
+- ROM images are never committed (`.gitignore`).
+
+This board has no I²C RTC, so the ROM reports `NO-RTC` and calibrates its clock with the
+CIA2 32-bit timer. With the core's old CIA power-on latch values (`$0001`) that loop never
+ended. `cia6526.vhdl` now powers up with `$FFFF`, as the MOS 6526 does.
 
 ## Build status / hardware results
 

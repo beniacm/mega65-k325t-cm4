@@ -34,6 +34,13 @@ echo "SD sectors served: $rd"
 [ "${rd:-0}" -gt 500 ] || fail "HYPPO did not boot from the SD image"
 sleep 4
 
+# The CPU must be running, not parked in a known hang (e.g. the ROM's RTC-less clock
+# calibration loop at $56E6-$56ED when CIA latches power up as $0001).
+pcs=$(for i in 1 2 3; do "$CTL" mon r | grep -oE '^[0-9A-F]{4} ' ; sleep 0.3; done | tr -d ' ' | tr '\n' ' ')
+echo "CPU PC samples: $pcs"
+hung=1; for pc in $pcs; do [ $((16#$pc)) -lt $((16#56E6)) ] || [ $((16#$pc)) -gt $((16#56ED)) ] && hung=0; done
+[ -n "$pcs" ] && [ $hung -eq 0 ] || fail "CPU stuck in the ROM clock-calibration loop (\$56E6)"
+
 "$CTL" type 'PRINT 6*7\n' >/dev/null; sleep 2
 "$CTL" joy 0 16 >/dev/null; sleep 0.3                   # fire on port 2
 pa=$("$CTL" mon 'mffd3c00' | grep -o ':0FFD3C00:..' | cut -c11-12)

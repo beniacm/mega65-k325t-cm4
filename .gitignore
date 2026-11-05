@@ -12,3 +12,8 @@
 /sim/e~*
 __pycache__/
 /sim/sdcard_simcopy.vhdl
+/sdimage/rompatch/
+# copyrighted ROM images never go into git
+*.ROM
+*.rom
+*.bin
