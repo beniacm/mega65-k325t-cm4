@@ -56,12 +56,18 @@ architecture sim of tb_rk_sd is
   begin
     return std_logic_vector(to_unsigned((l * 7 + i * 13 + i / 256) mod 256, 8));
   end function;
+  -- prefetched sectors carry a different pattern, so a wrong cache answer is visible
+  function ppat(l : integer; i : integer) return std_logic_vector is
+  begin
+    return std_logic_vector(to_unsigned((l * 11 + i * 3 + 7) mod 256, 8));
+  end function;
   function wpat(l : integer; i : integer) return std_logic_vector is
   begin
     return std_logic_vector(to_unsigned((l * 3 + i * 5 + 1) mod 256, 8));
   end function;
 
   signal stop_server : boolean := false;
+  signal pf_phase, pf_done, hits_seen : integer := 0;   -- read-cache (v4) test steps
   signal uart_seen : std_logic_vector(7 downto 0) := x"00";
 begin
   clk  <= not clk after TCLK/2 when not done;
@@ -95,6 +101,7 @@ begin
   -- Model Rockchip: SPI master + sector server + UART checks
   rk : process
     variable rx : bytes_t(0 to 17);
+    variable h  : integer;
     variable b  : std_logic_vector(7 downto 0);
     variable l  : integer;
 
@@ -121,6 +128,40 @@ begin
         xfer(x"00", v); r(i) := v;
       end loop;
       wait for TSPI; scs <= '1'; wait for 4*TSPI;
+    end procedure;
+
+    -- STATUS bytes 56..57: prefetch hit counter (BE)
+    procedure status_hits(hits : out integer) is
+      variable v, hi : std_logic_vector(7 downto 0);
+    begin
+      scs <= '0'; wait for TSPI;
+      xfer(x"01", v); xfer(x"00", v);
+      for i in 0 to 57 loop
+        xfer(x"00", v);
+        if i = 56 then hi := v; end if;
+      end loop;
+      wait for TSPI; scs <= '1'; wait for 4*TSPI;
+      hits := to_integer(unsigned(hi)) * 256 + to_integer(unsigned(v));
+    end procedure;
+
+    -- SD_PREF: count sectors lba.. into slots slot.. (pattern ppat)
+    procedure pref(slot, count, l0 : integer) is
+      variable v : std_logic_vector(7 downto 0);
+      variable lv : unsigned(31 downto 0);
+    begin
+      lv := to_unsigned(l0, 32);
+      scs <= '0'; wait for TSPI;
+      xfer(x"14", v);
+      xfer(std_logic_vector(to_unsigned(slot, 8)), v);
+      xfer(std_logic_vector(to_unsigned(count, 8)), v);
+      xfer(std_logic_vector(lv(31 downto 24)), v); xfer(std_logic_vector(lv(23 downto 16)), v);
+      xfer(std_logic_vector(lv(15 downto 8)), v);  xfer(std_logic_vector(lv(7 downto 0)), v);
+      for k in 0 to count - 1 loop
+        for i in 0 to 511 loop xfer(ppat(l0 + k, i), v); end loop;
+      end loop;
+      wait for TSPI; scs <= '1'; wait for 4*TSPI;
+      report "prefetched lba " & integer'image(l0) & ".." & integer'image(l0 + count - 1) &
+             " into slots " & integer'image(slot) & "..";
     end procedure;
 
     procedure cmd1(c : std_logic_vector(7 downto 0)) is
@@ -158,6 +199,18 @@ begin
 
     -- sector server loop
     while not stop_server loop
+      if pf_phase > pf_done then
+        case pf_phase is
+          when 1 => pref(0, 7, 1000); pref(7, 7, 1007);
+          when 2 => pref(0, 3, 2000);          -- slot 0 is being read: must be skipped
+          when 3 => status_hits(h);            -- hit counter
+                    hits_seen <= h;
+          when 4 => cmd1(x"15");               -- SD_INVAL
+                    report "invalidated all slots";
+          when others => null;
+        end case;
+        pf_done <= pf_phase;
+      end if;
       status(rx);
       l := to_integer(unsigned(std_logic_vector'(rx(5) & rx(6) & rx(7) & rx(8))));
       if rx(3)(0) = '1' and rx(3)(1) = '0' and rx(3)(5) = '0' and l >= 1000000 then
@@ -223,7 +276,8 @@ begin
     begin
       wait until rising_edge(clk) and busy_o = '0';
     end procedure;
-    procedure read_block(a : integer; l : integer) is
+    procedure read_block(a : integer; l : integer; pf : boolean := false; sig : integer := 0) is
+      variable exp : std_logic_vector(7 downto 0);
     begin
       addr_i <= std_logic_vector(to_unsigned(a, 32));
       wait until rising_edge(clk);
@@ -233,14 +287,20 @@ begin
       for i in 0 to 511 loop
         wait until rising_edge(clk) and hs_o = '1';
         got := data_o;
-        assert got = pat(l, i) report "READ MISMATCH lba " & integer'image(l) & " byte " &
+        if pf then exp := ppat(l, i); else exp := pat(l, i); end if;
+        assert got = exp report "READ MISMATCH lba " & integer'image(l) & " byte " &
           integer'image(i) & " got " & integer'image(to_integer(unsigned(got))) severity failure;
+        if i = 10 and sig /= 0 then pf_phase <= sig; end if;   -- start a server step mid-read
         hs_i <= '1';
         wait until rising_edge(clk) and hs_o = '0';
         hs_i <= '0';
       end loop;
       wait_ready;
-      report "host read OK lba " & integer'image(l);
+      if pf then
+        report "host read OK lba " & integer'image(l) & " (from the read cache)";
+      else
+        report "host read OK lba " & integer'image(l);
+      end if;
     end procedure;
     procedure write_block(a : integer; l : integer; m, f, last : std_logic) is
     begin
@@ -291,6 +351,41 @@ begin
     assert uart_seen = x"3C" report "UART monitor->RK FAIL" severity failure;
     report "UART monitor->RK byte ok (3C)";
     assert served = 5 and written = 4 report "count mismatch" severity failure;
+
+    -- ---------------- read cache (bridge v4) ----------------
+    -- 1: prefetch 1000..1013 and read them at once: the first answer comes as soon as its
+    --    slot is complete (the server is busy prefetching and cannot serve on demand)
+    pf_phase <= 1;
+    for l in 1000 to 1013 loop read_block(l, l, true); end loop;
+    assert served = 5 report "prefetched sectors were served on demand" severity failure;
+    -- 2: re-read 1000 (slot 0); mid-read the server prefetches 2000..2002 into slots 0..2:
+    --    slot 0 is busy -> skipped, the data being read stays intact
+    wait until pf_done = 1 for 200 ms;
+    assert pf_done = 1 report "TIMEOUT waiting for server step 1" severity failure;
+    read_block(1000, 1000, true, 2);
+    wait until pf_done = 2 for 200 ms;
+    assert pf_done = 2 report "TIMEOUT waiting for server step 2" severity failure;
+    read_block(2001, 2001, true);
+    read_block(2002, 2002, true);
+    read_block(2000, 2000);                    -- slot 0 was skipped: a miss, served on demand
+    assert served = 6 report "skipped slot was used" severity failure;
+    -- 3: a write invalidates the cached copy: reading it back comes from the card
+    write_block(1005, 1005, '0', '0', '0');
+    read_block(1005, 1005);
+    assert served = 7 and written = 5 report "write did not invalidate the cache" severity failure;
+    -- 4: hit counter: 14 + 1000 again + 2001 + 2002 = 17
+    pf_phase <= 3;
+    wait until pf_done = 3 for 200 ms;
+    assert pf_done = 3 report "TIMEOUT waiting for server step 3" severity failure;
+    assert hits_seen = 17 report "hit counter " & integer'image(hits_seen) & " /= 17" severity failure;
+    report "read cache: 17 hits, skip protection, write invalidation ok";
+    -- 5: SD_INVAL: everything is a miss again
+    pf_phase <= 4;
+    wait until pf_done = 4 for 200 ms;
+    assert pf_done = 4 report "TIMEOUT waiting for server step 4" severity failure;
+    read_block(1001, 1001);
+    assert served = 8 report "SD_INVAL did not invalidate" severity failure;
+    report "SD_INVAL ok";
     report "TB_RK_SD_PASS";
     stop_server <= true;
     done <= true;

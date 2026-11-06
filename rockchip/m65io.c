@@ -58,11 +58,15 @@
 #define DOZE_US 10000           /* ... and every 10 ms after that (idle: module cool) */
 
 static int spi_fd, img_fd, verbose;
-static uint32_t spi_hz = 25000000;   /* verified clean; 33 MHz fails (linktest.py) */
+/* 40 MHz: linktest.py clean at 25/33/40 MHz (50 MHz fails), and sdlinktest.py: 300 random sectors
+ * read by the MEGA65's SD controller through the whole path, 0 mismatches (2026-11-06) */
+static uint32_t spi_hz = 40000000;
 static uint64_t img_sectors;
 static struct {
 	unsigned long rd, wr, rd_err, wr_drop, mon_in, mon_out, bridge_down, polls;
 	unsigned long eth_out, eth_in, eth_badfcs, eth_big, eth_fpga_drops;
+	unsigned long pf, pf_tx, pf_hits;         /* read cache (bridge v4) */
+	unsigned pf_valid;
 } st;
 static uint8_t m65_mac[6];
 static int m65_mac_known;
@@ -278,6 +282,147 @@ static double now(void)
 	return t.tv_sec + t.tv_nsec * 1e-9;
 }
 
+/* ---- read cache (bridge v4): sequential read-ahead into the bridge's 16 prefetch slots, for up
+ * to PF_STREAMS interleaved streams (e.g. a demo reading its video and its music file in turns).
+ * A stream starts with two consecutive sector numbers (random accesses -- FAT, directories --
+ * prefetch nothing) and follows the reads within its window; re-reads of a sector change nothing.
+ * The slots are split among the active streams (1: 16, 2: 8 each, 3-4: 4 each); within its part
+ * a stream maps sector L to slot base + L mod size and stays <= size - 2 sectors ahead, so the
+ * slot being read and the one before (re-reads) are never targets (the bridge refuses to
+ * overwrite the slot being read anyway, and it matches all 16 tags on every request, so data
+ * left in another part by a repartition still hits).  Misses are always served first; each round
+ * prefetches for the stream that is furthest behind. */
+#define PF_STREAMS 4
+#define PF_CHUNK 7                   /* 7 x 512 + 7 header bytes fit spidev's 4096-byte buffer */
+static int pf_on;
+static struct pfs {
+	int used, active;            /* entry in use / two consecutive reads seen */
+	uint32_t last, next;         /* last sector read, next sector to prefetch */
+	unsigned long age;           /* for LRU replacement */
+} pfs[PF_STREAMS];
+static unsigned long pf_clock;
+static uint32_t pf_seen = 0xFFFFFFFFu;
+
+static int pf_nactive(void)
+{
+	int n = 0;
+	for (int i = 0; i < PF_STREAMS; i++)
+		n += pfs[i].active;
+	return n;
+}
+
+/* the slot part of active stream number idx (0..nactive-1) */
+static void pf_part(int idx, int nact, unsigned *base, unsigned *size)
+{
+	unsigned sz = nact <= 1 ? 16 : nact == 2 ? 8 : 4;
+	*size = sz;
+	*base = (idx * sz) & 15;
+}
+
+static void pf_track(uint32_t cur)
+{
+	int i, n0 = pf_nactive();
+	pf_clock++;
+	for (i = 0; i < PF_STREAMS; i++)              /* continues a known stream? */
+		if (pfs[i].used && cur >= pfs[i].last && cur - pfs[i].last <= 16 + 2)
+			break;
+	if (i < PF_STREAMS) {
+		if (cur != pfs[i].last && !pfs[i].active) {
+			pfs[i].active = 1;
+			pfs[i].next = cur + 1;
+		}
+		pfs[i].last = cur;
+		pfs[i].age = pf_clock;
+	} else {                                      /* new candidate: replace the LRU entry */
+		int v = 0;
+		for (i = 1; i < PF_STREAMS; i++)
+			if (!pfs[i].used || (pfs[v].used && pfs[i].age < pfs[v].age))
+				v = i;
+		pfs[v].used = 1;
+		pfs[v].active = 0;
+		pfs[v].last = cur;
+		pfs[v].next = cur + 1;
+		pfs[v].age = pf_clock;
+	}
+	if (pf_nactive() != n0)                       /* parts changed: refill within the new windows */
+		for (i = 0; i < PF_STREAMS; i++)
+			if (pfs[i].active)
+				pfs[i].next = pfs[i].last + 1;
+}
+
+static int prefetch_step(const struct bstat *b)
+{
+	if (!pf_on)
+		return 0;
+	if ((b->lastcmd & 0x7f) == 17 && b->lba != pf_seen) {   /* a read command we have not seen */
+		pf_seen = b->lba;
+		pf_track(b->lba);
+	}
+	if ((b->flags & 0x01) && !(b->flags & 0x22))   /* a read is waiting: serve_sd first */
+		return 0;
+	int nact = pf_nactive(), idx = 0, best = -1;
+	unsigned bbase = 0, bsize = 16;
+	uint32_t best_ahead = 0xFFFFFFFFu;
+	for (int i = 0; i < PF_STREAMS; i++) {        /* the stream furthest behind its window */
+		if (!pfs[i].active)
+			continue;
+		unsigned base, size;
+		pf_part(idx++, nact, &base, &size);
+		struct pfs *p = &pfs[i];
+		if (p->next < p->last + 1)
+			p->next = p->last + 1;
+		uint32_t ahead = p->next - (p->last + 1);
+		if (ahead >= size - 2 || p->next >= img_sectors)
+			continue;
+		if (ahead < best_ahead) {
+			best_ahead = ahead;
+			best = i;
+			bbase = base;
+			bsize = size;
+		}
+	}
+	if (best < 0)
+		return 0;
+	struct pfs *p = &pfs[best];
+	uint32_t n = (p->last + 1 + bsize - 2) - p->next;   /* room in the window */
+	unsigned off = p->next % bsize;
+	if (n > PF_CHUNK)
+		n = PF_CHUNK;
+	if (n > bsize - off)                                 /* stay inside the part (no wrap) */
+		n = bsize - off;
+	if (p->next + n > img_sectors)
+		n = img_sectors - p->next;
+	static uint8_t tx[XFER_MAX], rx[XFER_MAX];
+	tx[0] = 0x14;
+	tx[1] = bbase + off;
+	tx[2] = n;
+	tx[3] = p->next >> 24; tx[4] = p->next >> 16; tx[5] = p->next >> 8; tx[6] = p->next;
+	ssize_t got = pread(img_fd, tx + 7, n * 512, (off_t)p->next * 512);
+	if (got < (ssize_t)(n * 512))
+		memset(tx + 7 + (got > 0 ? got : 0), 0, n * 512 - (got > 0 ? got : 0));
+	if (xfer(tx, rx, 7 + n * 512))
+		return 1;
+	p->next += n;
+	st.pf += n;
+	st.pf_tx++;
+	return 1;
+}
+
+/* long STATUS: prefetch valid bitmap and the bridge's 16-bit hit counter */
+static void cache_stats(void)
+{
+	static int prev = -1;
+	uint8_t tx[62] = { 0x01 }, rx[62];
+	if (!pf_on || xfer(tx, rx, sizeof tx) || rx[2] != 0x4D || rx[3] != 0x65)
+		return;
+	const uint8_t *r = rx + 2;
+	int h = r[56] << 8 | r[57];
+	if (prev >= 0)
+		st.pf_hits += (uint16_t)(h - prev);
+	prev = h;
+	st.pf_valid = r[54] << 8 | r[55];
+}
+
 static void write_stats(const char *path, const struct bstat *b)
 {
 	char tmp[256];
@@ -288,11 +433,12 @@ static void write_stats(const char *path, const struct bstat *b)
 	fprintf(f, "rd=%lu wr=%lu rd_err=%lu wr_drop=%lu mon_in=%lu mon_out=%lu "
 		"bridge_down=%lu polls=%lu spi_hz=%u bridge_ver=%u flags=%u seq=%u lba=%u "
 		"eth_out=%lu eth_in=%lu eth_badfcs=%lu eth_big=%lu eth_fpga_drops=%lu "
-		"m65_mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+		"m65_mac=%02x:%02x:%02x:%02x:%02x:%02x pf=%lu pf_tx=%lu pf_hits=%lu pf_valid=%04x\n",
 		st.rd, st.wr, st.rd_err, st.wr_drop, st.mon_in, st.mon_out,
 		st.bridge_down, st.polls, spi_hz, b->ver, b->flags, b->seq, b->lba,
 		st.eth_out, st.eth_in, st.eth_badfcs, st.eth_big, st.eth_fpga_drops,
-		m65_mac[0], m65_mac[1], m65_mac[2], m65_mac[3], m65_mac[4], m65_mac[5]);
+		m65_mac[0], m65_mac[1], m65_mac[2], m65_mac[3], m65_mac[4], m65_mac[5],
+		st.pf, st.pf_tx, st.pf_hits, st.pf_valid);
 	fclose(f);
 	rename(tmp, path);
 }
@@ -337,6 +483,12 @@ int main(int argc, char **argv)
 	bridge_status(&b);
 	printf("m65io: %s at %u Hz, image %s (%llu sectors), bridge %s v%u\n", dev, spi_hz,
 	       image, (unsigned long long)img_sectors, b.ok ? "found" : "NOT found", b.ver);
+	if (b.ok && b.ver >= 4) {
+		uint8_t tx[1] = { 0x15 }, rx[1];      /* SD_INVAL: nothing cached from a previous image */
+		xfer(tx, rx, 1);
+		pf_on = 1;
+		printf("m65io: read cache on (%d streams, 16 slots)\n", PF_STREAMS);
+	}
 	fflush(stdout);
 
 	crc_init();
@@ -363,6 +515,7 @@ int main(int argc, char **argv)
 			continue;
 		}
 		busy |= serve_sd(&b);
+		busy |= prefetch_step(&b);
 		if (pkt >= 0 && b.ver >= 3)
 			busy |= serve_eth(&b, pkt, ifindex);
 
@@ -441,6 +594,7 @@ int main(int argc, char **argv)
 
 		double t = now();
 		if (t >= next_stats) {
+			cache_stats();
 			write_stats(stats, &b);
 			next_stats = t + 0.5;
 		}

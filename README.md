@@ -324,6 +324,44 @@ This board has no I²C RTC, so the ROM reports `NO-RTC` and calibrates its clock
 CIA2 32-bit timer. With the core's old CIA power-on latch values (`$0001`) that loop never
 ended. `cia6526.vhdl` now powers up with `$FFFF`, as the MOS 6526 does.
 
+## SD read cache in the bridge (v4) and 40 MHz SPI
+
+Streaming demos (Hyperballad: "needs an SD card with a read speed of 10 MB/s or more"; MEGApple:
+"audio-playback issues with a slow card") stuttered: every sector was one Rockchip round trip.
+Measured per sector ~585 us = ~300 us on our side (notice the request by polling + transfer) +
+~300 us on the MEGA65 side (its SdCardCtrl runs the SD bus at cpuclock / 2 = 20 MHz). 40 MHz SPI
+alone gained nothing (854 KB/s); disabling the SPI controller's runtime PM gave +34 % SPI
+transactions/s (+5 % SD rate). A fast real card helps a real MEGA65 by its short access time per
+CMD17 -- the cache gives us the same.
+
+- **`rk_bridge` v4**: 16 prefetch slots + the SD_PUT slot in one 16 KB block RAM, a 32-bit LBA tag
+  + valid bit per slot. A pending read is compared with all 16 tags; on a hit the emulator is
+  switched to that slot and `rd_ready` rises < 1 us later, no Rockchip involved. `0x14 SD_PREF`
+  (slot, count 1..7, LBA, data; spidev moves <= 4096 bytes per transaction), `0x15 SD_INVAL`.
+  The slot being read is never overwritten; slots tagged in the last two cycles are not used yet
+  (the tag compare is registered); writes stay synchronous and invalidate a slot holding that LBA
+  (a sector the MEGA65 is writing is not validated by a prefetch). STATUS 54-55 valid bitmap,
+  56-57 hit counter, 58 active slot. `sd_emu` is unchanged.
+- **`m65io`**: SPI at 40 MHz (linktest clean up to 40, fails at 50; `scripts/sdlinktest.py`:
+  0 mismatches); up to 4 interleaved sequential streams (a stream starts with two consecutive
+  sectors; 1 stream: all 16 slots, 2: 8 each, 3-4: 4 each; window = part - 2); misses always
+  first; `SD_INVAL` at start; `pf`, `pf_hits`, `pf_valid` in m65io.stats. `m65io.service` keeps
+  the SPI controller's clock on (runtime PM off).
+- Simulation `sim/tb_rk_sd.vhdl` (real MEGA65 SdCardCtrl + sd_emu + bridge + Rockchip model):
+  hits while the prefetch transaction is still running, skip protection of the slot being read,
+  write invalidation, SD_INVAL, hit counter -- TB_RK_SD_PASS.
+- Hardware (`scripts/sdlinktest.py`: the MEGA65's SD controller reads sectors, compared with
+  card.img): 200 random + 2 x 300 consecutive sectors, 0 mismatches, 298/300 hits.
+
+| | before | v4 cache |
+|---|---|---|
+| Hyperballad: sectors to the MEGA65 | ~1,700/s | **3,745/s** (1.87 MB/s), ~100 % hits |
+| Hyperballad: new data the demo reads | ~690 KB/s | **917 KB/s**, steady |
+| MEGApple (video + music file in turns), 1 stream / 4 streams | 90 % hits | **100 %** hits |
+
+Audio recorded through the capture dongle: no gaps or repeated buffers in the music. The C64 core
+uses the same bridge and needs its own build to get the cache.
+
 ## 8 MB attic RAM (DDR3)
 
 The board's 256 MB DDR3 (MT41K128M16, bank 34) provides the MEGA65's **8 MB attic RAM**
