@@ -1,4 +1,4 @@
 #!/bin/sh
-# stop m65io + m65d (anchored patterns: never match the calling shell)
-for p in $(pgrep -f "^python3 m65d.py") $(pgrep -f "^\./m65io"); do kill "$p"; done
-sleep 0.5; sync
+# stop m65d + m65io (e.g. before mounting card.img on the Rockchip); start: m65d_restart.sh
+systemctl stop m65d.service m65io.service
+sync

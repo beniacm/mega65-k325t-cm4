@@ -1,0 +1,13 @@
+[Unit]
+Description=Reset the FPGA core once at boot, when the SD card is served
+# At power-on the FPGA boots (~1 s) long before m65io serves the card, so the MEGA65's HYPPO
+# finds none ("SD CARD IS NOT SDHC").  Wants (not Requires): restarting m65d never resets the core.
+Wants=m65d.service
+After=m65d.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /root/m65/m65_bootreset.py
+
+[Install]
+WantedBy=multi-user.target

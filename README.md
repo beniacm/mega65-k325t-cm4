@@ -100,8 +100,34 @@ stay dark); cable out → host mode, hub, ports powered. Use SSH / `m65ctl` whil
 
 **USB keyboard and USB gamepads** plugged into the carrier's USB ports (the CM4 module's USB) are
 forwarded by `m65d.py` + `rockchip/m65input.py`. It reads evdev directly (no python-evdev), grabs the
-devices exclusively, hot-plugs them (rescan every 2 s), and ORs them with scripted input from the
-control port.
+devices exclusively and ORs them with scripted input from the control port. Keyboards, mice and pads
+can all be plugged at once (4 ports; more with a hub).
+
+- **Hot-plug** via inotify on `/dev/input`: a new device is used ~30 ms after the kernel creates it
+  (was: rescan every 2 s); the 2 s rescan stays as a fallback (it only re-parses
+  `/proc/bus/input/devices` when that changed: parsing costs ~2 ms of input latency).
+- Devices are classified by capability and **one node can have several roles** (`kbd+mouse` for
+  keyboard/touchpad combos and dongles); events are dispatched by type.
+- **State is re-read from the kernel** at plug-in (a key held while plugging works) and after an
+  evdev buffer overrun (`SYN_DROPPED`), so no key or button stays stuck; keys are tracked per device
+  (unplugging one keyboard does not release keys held on another).
+- `status` lists each input with its role, its effective **USB polling interval**, and its
+  joystick port, e.g. `kbd:Primax_HP_Wired_Desktop_320K_Keyboard@8ms`.
+
+**Latency** (`m65d latency`: USB event kernel timestamp → INPUT register written over SPI,
+`rockchip/input_bench.py`): p50 0.46 ms, p99 0.7 ms, max ~1–2 ms, unchanged under heavy SD traffic.
+That needs the `performance` cpufreq governor (p50 0.86 ms with `ondemand`; no measurable
+temperature difference, ~57 °C) and SCHED_FIFO (removes 5–10 ms spikes); `m65d.service` sets both.
+The FPGA side adds < 0.3 ms (MEGA65: widget matrix; C64: one keyboard-emulator scan).
+**The dominant term is the device's USB polling interval**: xHCI schedules a low/full-speed
+interrupt endpoint at its descriptor interval rounded down to a power of two and ignores usbhid's
+`kbpoll`/`mousepoll`/`jspoll` (verified in the xHCI endpoint context: the HP office keyboard stays at
+8000 µs). So an office keyboard/mouse adds up to 8 ms, gaming keyboards/mice and most pads 1–4 ms —
+pick devices accordingly. Then the program itself reads the keyboard/joystick once per frame.
+
+**Gamepad support depends on the vendor kernel**: generic USB HID pads (DirectInput / "Android" /
+"PC" modes, DS4 over USB) work; there is no `xpad` (Xbox 360/One pads, 8BitDo in X-input mode),
+no `hid-sony` (DS3) and no `hid-nintendo` (Switch Pro) — such pads are not seen at all.
 
 | PC key | MEGA65 | | PC key | MEGA65 |
 |---|---|---|---|---|
@@ -115,10 +141,21 @@ control port.
 | cursor keys | cursor; up/left = the MEGA65's dedicated keys (INPUT ctrl b4/b5) | | keypad | digits, + - * / . RETURN |
 | `` ` `` - = [ ] ; ' \ | ← + - @ * : ; = | | letters, digits, , . / | positional |
 
-Gamepads: **first pad → joystick port 2** (most C64 games), second → port 1. D-pad, hat or left stick
-(30 % dead zone) give directions; A/B/X/Y, shoulders and triggers fire. Start = SPACE,
-Select = RETURN, Mode/Home = RUN/STOP. The optional DS2x2 Pmod on J13 and the `joy` control
-command are OR'd in as well.
+Gamepads: **first pad → joystick port 2** (most C64 games), second → port 1; a pad keeps its port
+while connected (unplugging pad 1 does not move pad 2). **Ctrl+Alt+J swaps ports 1 ↔ 2** (pads and
+mouse; also the `joyswap` command). D-pad, hat or left stick (30 % dead zone) give directions;
+A/B/X/Y, shoulders and triggers fire. Start = SPACE, Select = RETURN, Mode/Home = RUN/STOP. The
+optional DS2x2 Pmod on J13 and the `joy` control command are OR'd in as well.
+
+Mouse: Commodore 1351 (proportional, POT X/Y = position mod 64) on port 2, left = fire, right = up.
+A 1351 driver reads the position once per frame and takes a change of more than 31 counts as the
+other direction, which a modern mouse moved fast exceeded (pointer jumping back). The POT values
+now move at most 1100 counts/s with a burst of 8 (≤ 30 per PAL frame); normal movement passes at
+once, a fling is queued up to 40 counts and the rest dropped, like a real 1351 at its limit.
+
+Tests: `rockchip/input_selftest.py` (on the Rockchip, virtual devices) checks combo devices,
+`SYN_DROPPED` recovery, port stability + Ctrl+Alt+J, the 1351 rate limit and keys held at plug-in
+(all fail with the previous code, pass now).
 
 Test without hardware: `rockchip/uinput_test.py` creates a virtual keyboard or gamepad via
 `/dev/uinput` (run it with a host-side `adb shell` in the background; processes backgrounded
@@ -149,7 +186,10 @@ rockchip/m65d.py        # Rockchip daemon (root): SD server, monitor pipe :4510,
 rockchip/m65d_restart.sh, rockchip/m65d_stop.sh, rockchip/rk_pins.py
 rockchip/m65input.py    # USB keyboard/gamepad/1351-mouse bridge (imported by m65d.py); uinput_test.py = virtual devices
 rockchip/m65flash.py    # configuration flash: id | backup | write <slot> <bit> | verify | boot <slot>
-rockchip/m65d.service   # systemd unit (enabled): m65io + m65d at boot, then m65_bootreset.py
+rockchip/m65d.service   # systemd (enabled): m65d, SCHED_FIFO, performance governor, Restart=always;
+rockchip/m65io.service  #   pulls in m65io (PartOf m65d: stop/restart m65d covers both), Restart=always;
+rockchip/m65-bootreset.service  # once per boot: reset the core when the card is served (never on restarts)
+rockchip/input_bench.py, rockchip/input_selftest.py   # input latency / functional tests (virtual devices)
 rockchip/deploy/        # setup_rockchip.sh check|install + the board's /boot/config.txt
 scripts/c64_run.sh      # C64 core: load, mount k325t.d64, LOAD+RUN a program, capture
 scripts/mkd64.py        # BASIC V2 text / PRG files -> D64;  scripts/crt_banksum.py: expected CRT bank sums
@@ -343,7 +383,9 @@ check` compares a board with this list (read-only) and passed on the current boa
 4. **This repo's files**: `rockchip/deploy/setup_rockchip.sh install` copies the scripts and
    `m65io.c` to `/root/m65`, builds `m65io`, installs `/boot/config.txt` (`deploy/config.txt`:
    `spi3cs1=on` enables SPI3 → `/dev/spidev3.0`, the rest switches stock overlays off; the old file is
-   kept as `config.txt.pre-m65`), installs and enables `m65d.service` (mode 644). Then reboot.
+   kept as `config.txt.pre-m65`), installs `m65d.service`, `m65io.service` and
+   `m65-bootreset.service` (mode 644) and enables them. Then reboot: both daemons run ~6 s after
+   the kernel starts, the core is reset once the card is served.
 5. **SD card**: create `/root/m65/card.img` as in "SD card and ROM" above (format with HYPPO, then
    `scripts/sd_populate.sh`), add `/c64` for the C64 core and the games. Not in git (copyrighted
    ROMs and games); back it up separately.

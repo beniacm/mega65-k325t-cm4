@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""m65_bootreset.py -- run by m65d.service after start: at power-on the FPGA boots (~1 s)
+"""m65_bootreset.py -- run once at boot by m65-bootreset.service: at power-on the FPGA boots (~1 s)
 long before m65io serves the SD card, so the MEGA65's HYPPO finds no card and stops
 ("SD CARD IS NOT SDHC").  Reset the core once, now that the card is served."""
 import socket

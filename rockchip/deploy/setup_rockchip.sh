@@ -5,7 +5,8 @@
 #   rockchip/deploy/setup_rockchip.sh check   [root@HOST]   read-only: compare the board with the repo
 #   rockchip/deploy/setup_rockchip.sh install [root@HOST]   copy files, install + enable the service
 #
-# Default host: root@192.168.1.143.  The boot partition (BT1120 + sdmmc2 DTB) is NOT written by this
+# Default host: root@192.168.1.143.  Units: m65d.service (+ m65io.service), m65-bootreset.service.
+# The boot partition (BT1120 + sdmmc2 DTB) is NOT written by this
 # script -- see README.md "Rebuilding the Rockchip from scratch", step 2.  card.img is not created
 # either (README "SD card image").  install does not restart anything; reboot afterwards.
 set -u
@@ -15,8 +16,9 @@ HERE=$(cd "$(dirname "$0")/.." && pwd)            # .../rockchip
 DEST=/root/m65
 # files deployed to /root/m65 (everything the service and the PC-side tools call)
 FILES="m65d_restart.sh m65d_stop.sh m65_bootreset.py m65io.c m65d.py m65input.py m65flash.py
-       rk_pins.py uinput_test.py linktest.py usbtest.sh"
-UNIT=m65d.service
+       rk_pins.py uinput_test.py input_bench.py input_selftest.py linktest.py usbtest.sh"
+UNITS="m65d.service m65io.service m65-bootreset.service"
+ENABLE="m65d.service m65-bootreset.service"        # m65io.service comes with m65d (Wants)
 # sha256 of the deployed boot image (~/qmtech: rockchip/boot_dtb/boot_sd.img, 24863744 bytes) and
 # of the factory p3 dump (~/qmtech: rockchip/p3_boot_backup.img.xz)
 BOOT_LEN=24863744
@@ -31,8 +33,8 @@ md5l() { md5sum "$1" | cut -d' ' -f1; }
 check() {
   local bad=0 out f
   out=$(rsh "cd $DEST 2>/dev/null; md5sum $(echo $FILES) 2>/dev/null; echo CFG \$(md5sum < /boot/config.txt | cut -d' ' -f1);
-    echo UNIT \$(md5sum < /etc/systemd/system/$UNIT 2>/dev/null | cut -d' ' -f1) \$(stat -c %a /etc/systemd/system/$UNIT 2>/dev/null);
-    echo ENABLED \$(systemctl is-enabled $UNIT 2>/dev/null) \$(systemctl is-active $UNIT 2>/dev/null);
+    for u in $UNITS; do echo UNIT \$u \$(md5sum < /etc/systemd/system/\$u 2>/dev/null | cut -d' ' -f1) \$(stat -c %a /etc/systemd/system/\$u 2>/dev/null) \$(systemctl is-enabled \$u 2>/dev/null) \$(systemctl is-active \$u 2>/dev/null); done;
+    echo GOV \$(cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor);
     echo BOOT \$(head -c $BOOT_LEN /dev/block/by-name/boot | sha256sum | cut -d' ' -f1);
     echo FACT \$(sha256sum < /dev/block/by-name/boot | cut -d' ' -f1);
     echo SPIDEV \$(ls /dev/spidev3.0 2>/dev/null) \$(python3 -c 'import spidev; print(\"py-ok\")' 2>/dev/null);
@@ -43,11 +45,16 @@ check() {
   done
   [ "$(echo "$out" | awk '/^CFG/{print $2}')" = "$(md5l "$HERE/deploy/config.txt")" ] \
     && echo "ok    /boot/config.txt" || { echo "DIFF  /boot/config.txt"; bad=1; }
-  set -- $(echo "$out" | awk '/^UNIT/{print $2, $3}')
-  [ "${1:-}" = "$(md5l "$HERE/$UNIT")" ] && echo "ok    $UNIT content" || { echo "DIFF  $UNIT content"; bad=1; }
-  [ "${2:-}" = 644 ] && echo "ok    $UNIT mode 644" || { echo "WARN  $UNIT mode ${2:-missing} (want 644)"; }
-  echo "$out" | grep -q "^ENABLED enabled" && echo "ok    $UNIT enabled ($(echo "$out" | awk '/^ENABLED/{print $3}'))" \
-    || { echo "DIFF  $UNIT not enabled"; bad=1; }
+  local u
+  for u in $UNITS; do
+    set -- $(echo "$out" | awk -v u=$u '$1=="UNIT" && $2==u {print $3, $4, $5, $6}')
+    [ "${1:-}" = "$(md5l "$HERE/$u")" ] && echo "ok    $u (mode ${2:-?}, ${3:-?}, ${4:-?})" \
+      || { echo "DIFF  $u content"; bad=1; }
+    [ "${2:-}" = 644 ] || echo "WARN  $u mode ${2:-missing} (want 644)"
+    case " $ENABLE " in *" $u "*) [ "${3:-}" = enabled ] || { echo "DIFF  $u not enabled"; bad=1; };; esac
+  done
+  [ "$(echo "$out" | awk '/^GOV/{print $2}')" = performance ] && echo "ok    cpufreq governor performance" \
+    || echo "WARN  cpufreq governor $(echo "$out" | awk '/^GOV/{print $2}') (m65d.service sets performance)"
   case "$(echo "$out" | awk '/^BOOT/{print $2}')" in
     $BOOT_SHA) echo "ok    boot partition = boot_sd.img (BT1120 + sdmmc2 DTB)";;
     *) if [ "$(echo "$out" | awk '/^FACT/{print $2}')" = "$FACTORY_SHA" ]; then
@@ -65,14 +72,14 @@ check() {
 
 install() {
   echo "copying to $HOST:$DEST"
-  tar -C "$HERE" -cf - $FILES $UNIT deploy/config.txt | \
+  tar -C "$HERE" -cf - $FILES $UNITS deploy/config.txt | \
     rsh "mkdir -p $DEST && tar -C $DEST -xf - && cd $DEST && chmod 644 $(echo $FILES) && rm -f m65io &&
-         install -m 644 $UNIT /etc/systemd/system/$UNIT && rm $UNIT &&
+         for u in $UNITS; do install -m 644 \$u /etc/systemd/system/\$u && rm \$u || exit 1; done &&
          if ! cmp -s deploy/config.txt /boot/config.txt; then cp /boot/config.txt /boot/config.txt.pre-m65 &&
            cp deploy/config.txt /boot/config.txt && echo 'config.txt replaced (old: /boot/config.txt.pre-m65)'; fi &&
          rm -r deploy && gcc -O2 -Wall -o m65io m65io.c &&
-         systemctl daemon-reload && systemctl enable $UNIT" || { echo "install FAILED"; exit 1; }
-  echo "installed; m65io built.  Reboot the Rockchip (m65d.service starts at boot), then: $0 check $HOST"
+         systemctl daemon-reload && systemctl enable $ENABLE" || { echo "install FAILED"; exit 1; }
+  echo "installed; m65io built.  Reboot the Rockchip (or: ssh ... sh $DEST/m65d_restart.sh), then: $0 check $HOST"
 }
 
 case "$MODE" in
