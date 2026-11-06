@@ -29,10 +29,10 @@ monitor are all **terminated on the Rockchip** (Luckfox Core3566 in the CM4 sock
 through one SPI link:
 
 ```
-MEGA65 SD controller ─ sd_emu ─┐                                  ┌─ /root/m65/sd.img (sparse, FAT32)
-MEGA65 UART monitor  ──────────┼─ rk_bridge ═ spi3-m1 (4 MHz) ═ m65d.py ─┼─ TCP 4510  serial monitor pipe
-widget kbd matrix / joysticks ─┤   (FPGA)     CM4 BCM18-21       (RK)    └─ TCP 4511  control (type/key/joy/reset/status)
-CPU reset ─────────────────────┘
+MEGA65 SD controller ─ sd_emu ─┐                                    ┌ m65io (C):  /root/m65/card.img (SD sectors)
+MEGA65 UART monitor  ──────────┼─ rk_bridge ═ spi3-m1 (25 MHz) ═ RK ─┤             TCP 4510 serial-monitor pipe
+widget kbd matrix / joysticks ─┤  (162 MHz)   CM4 BCM18-21           └ m65d.py:    TCP 4511 control (type/key/joy/
+CPU reset ─────────────────────┘                                                   reset/status/temps)
 ```
 
 | Connector | Use |
@@ -61,6 +61,12 @@ v2 had a raw UART on D13/D14, which caused contention; it was removed in v3.
 | `20` | cmd, N bytes | → monitor RX (2.025 Mbaud internally) |
 | `21` | cmd, dummy, N bytes | ← monitor TX FIFO (16 KiB) |
 | `30` | cmd, ctrl, joyA, joyB, col0..8 | ctrl b0 reset, b1 RESTORE, b2 CAPS, b3 physical SD |
+
+**Speed:** the bridge's SPI front end runs at 162 MHz (4 × cpuclock, same MMCM) and the link at
+**25 MHz**. `rockchip/linktest.py`: 0 errors at 10/16.7/25 MHz, failures from 33 MHz up (MISO setup).
+The hot loop is C (`m65io`): status poll → pread/pwrite → SD_PUT/GET. It spins while sectors flow and
+sleeps 200 µs per poll when idle. MEGA65 FDISK "SD card read speed": 335 KB/s (v5, 4 MHz, Python)
+→ 517 KB/s (25 MHz) → **951 KB/s** (25 MHz + spin-while-active). No FPGA-side caching.
 
 `sd_emu` is an SPI-mode SDHC card in the controller's own clock domain (CMD0/8/55/41/58/17/24/25,
 FE/FC/FD tokens). Reads stall with 0xFF until the Rockchip delivers the sector; HYPPO's

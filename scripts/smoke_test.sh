@@ -18,8 +18,8 @@ fi
 adb get-state >/dev/null 2>&1 || fail "Rockchip not reachable over adb"
 "$ROOT/scripts/program.sh" "$BIT" | grep -q "PROGRAMMED=" || fail "JTAG programming"
 
-adb push "$ROOT"/rockchip/{m65d.py,m65d_restart.sh,rk_pins.py} /root/m65/ >/dev/null
-adb shell sh /root/m65/m65d_restart.sh | grep -q "rk_bridge v" || fail "rk_bridge not answering on spidev3.0"
+adb push "$ROOT"/rockchip/{m65io.c,m65d.py,m65d_restart.sh,m65d_stop.sh,rk_pins.py} /root/m65/ >/dev/null
+adb shell sh /root/m65/m65d_restart.sh | grep -q "bridge found" || fail "rk_bridge not answering on spidev3.0"
 
 # MEGAFLASH: "slot messed up, press any key" + slot menu; RUN/STOP answers both and
 # then HYPPO boots from SD.  Keep tapping until SD reads start (harmless afterwards).
@@ -41,6 +41,9 @@ echo "CPU PC samples: $pcs"
 hung=1; for pc in $pcs; do [ $((16#$pc)) -lt $((16#56E6)) ] || [ $((16#$pc)) -gt $((16#56ED)) ] && hung=0; done
 [ -n "$pcs" ] && [ $hung -eq 0 ] || fail "CPU stuck in the ROM clock-calibration loop (\$56E6)"
 
+# A full card autoboots MEGA65.D81 into the intro menu: '/' = "exit to BASIC 65"
+# (at a plain READY. prompt it is just a harmless syntax error).
+"$CTL" key / 150 >/dev/null; sleep 4
 "$CTL" type 'PRINT 6*7\n' >/dev/null; sleep 2
 "$CTL" joy 0 16 >/dev/null; sleep 0.3                   # fire on port 2
 pa=$("$CTL" mon 'mffd3c00' | grep -o ':0FFD3C00:..' | cut -c11-12)

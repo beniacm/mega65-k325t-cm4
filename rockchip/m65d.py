@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
-"""m65d.py -- Rockchip-side service daemon for the MEGA65 on the QMTech K325T.
+"""m65d.py -- control side of the Rockchip MEGA65 service (QMTech K325T board).
 
-Talks to rk_bridge.vhdl over spi3-m1 (/dev/spidev3.0) and provides:
-  * SD card: every sector the MEGA65 reads/writes is served from/to a raw
-    image file (default /root/m65/sd.img, sparse).
-  * Serial monitor: TCP port 4510 is a transparent byte pipe to the MEGA65
-    UART monitor (like the FTDI port of a real MEGA65).  From the x86 host:
-        socat pty,link=/tmp/m65tty,raw,echo=0 tcp:rock:4510   (then m65 -l /tmp/m65tty)
-  * Control: TCP port 4511, one text command per line, reply "ok ..."/"err ...":
-        status                     bridge + SD statistics
-        reset                      pulse the CPU reset (200 ms)
-        hold_reset 0|1
-        type <text>                type text via the keyboard matrix (\\n = RETURN); letters unshifted
-                                   (uppercase on the C64/C65 BASIC screen)
-        typecase <text>            case-sensitive: capitals typed with SHIFT (ASCII apps, e.g. FDISK)
-        key <NAME> [ms]            tap one key (RETURN, SPACE, F1, RUNSTOP, ...)
-        keys <c0> .. <c8>          raw matrix state, 9 hex bytes (bit = row, 1 = down)
-        joy <a> <b>                joystick bits (b0 up b1 down b2 left b3 right b4 fire)
-        restore 0|1  capslock 0|1  sd emu|phys
-        log [n]                    last n bytes of monitor output (as text)
+The hot paths (SD sector serving, serial-monitor pipe on TCP 4510) live in the
+C daemon m65io; this process only drives the INPUT register of rk_bridge.vhdl
+(keyboard matrix, joysticks, reset, RESTORE, CAPS LOCK, SD source) over the
+same /dev/spidev3.0 -- each ioctl is one complete CS transaction, the kernel
+serialises the two processes.
+
+Control: TCP port 4511, one text command per line, reply "ok ..."/"err ...":
+    status                     bridge status + m65io counters
+    temps                      Rockchip thermal zones + FPGA die temperature (XADC)
+    reset                      pulse the CPU reset (200 ms)
+    hold_reset 0|1
+    type <text>                type text via the keyboard matrix (\\n = RETURN); letters unshifted
+                               (uppercase on the C64/C65 BASIC screen)
+    typecase <text>            case-sensitive: capitals typed with SHIFT (ASCII apps, e.g. FDISK)
+    key <NAME> [ms]            tap one key (RETURN, SPACE, F1, RUNSTOP, ...)
+    keys <c0> .. <c8>          raw matrix state, 9 hex bytes (bit = row, 1 = down)
+    joy <a> <b>                joystick bits (b0 up b1 down b2 left b3 right b4 fire)
+    restore 0|1  capslock 0|1  sd emu|phys
 Run as root (spidev3.0 is root-only).
 """
 import argparse
-import os
+import glob
 import select
 import socket
 import sys
@@ -50,16 +50,14 @@ SHIFTED = {"!": "1", '"': "2", "#": "3", "$": "4", "%": "5", "&": "6", "'": "7",
            "(": "8", ")": "9", "[": ":", "]": ";", "<": ",", ">": ".", "?": "/",
            "UP": "DOWN", "LEFT": "RIGHT", "CLR": "HOME", "F2": "F1", "F4": "F3",
            "F6": "F5", "F8": "F7"}
+MODIFIERS = {KEYPOS[k] for k in ("LSHIFT", "RSHIFT", "CTRL", "MEGA", "ALT")}
 
 
 def key_combo(name):
     """name or single character -> list of (col,row) to hold together."""
-    if len(name) == 1:
-        ch = name.upper()
-        if ch == "\n":
-            return [KEYPOS["RETURN"]]
-    else:
-        ch = name.upper()
+    ch = name.upper()
+    if name == "\n":
+        return [KEYPOS["RETURN"]]
     if ch in KEYPOS:
         return [KEYPOS[ch]]
     if ch in SHIFTED:
@@ -76,11 +74,8 @@ class Bridge:
         self.spi.bits_per_word = 8
         self.spi.max_speed_hz = hz
 
-    def x(self, data):
-        return self.spi.xfer2(list(data))
-
     def status(self):
-        r = self.x([0x01, 0] + [0] * 16)[2:]
+        r = self.spi.xfer2([0x01, 0] + [0] * 16)[2:]
         return {
             "magic": bytes(r[0:2]), "ver": r[2], "flags": r[3], "seq": r[4],
             "lba": int.from_bytes(bytes(r[5:9]), "big"),
@@ -88,26 +83,8 @@ class Bridge:
             "sdcmds": r[13], "lastcmd": r[14], "ctrl": r[15],
         }
 
-    def sd_put(self, data):
-        self.x(b"\x10" + data)
-
-    def sd_get(self):
-        return bytes(self.x([0x11, 0] + [0] * 512)[2:])
-
-    def sd_wack(self):
-        self.x([0x12])
-
-    def sd_rerr(self):
-        self.x([0x13])
-
-    def uart_put(self, data):
-        self.x(b"\x20" + data)
-
-    def uart_get(self, n):
-        return bytes(self.x([0x21, 0] + [0] * n)[2:])
-
     def set_input(self, ctrl, ja, jb, cols):
-        self.x([0x30, ctrl & 0xFF, ja & 0x1F, jb & 0x1F] + [c & 0xFF for c in cols])
+        self.spi.xfer2([0x30, ctrl & 0xFF, ja & 0x1F, jb & 0x1F] + [c & 0xFF for c in cols])
 
 
 # ---------------------------------------------------------------- daemon
@@ -116,67 +93,20 @@ class Daemon:
         self.args = args
         self.br = Bridge(args.hz)
         st = self.br.status()
-        if st["magic"] != b"\x4d\x65":
-            sys.exit("m65d: no rk_bridge on spidev3.0 (magic %r) - wrong bitstream?" % st["magic"])
-        print("m65d: rk_bridge v%d found" % st["ver"], flush=True)
-        self.img = open(args.image, "r+b")
-        self.img_sectors = os.path.getsize(args.image) // 512   # card size = image size
+        print("m65d: rk_bridge %s v%d" % ("found" if st["magic"] == b"Me" else "NOT found", st["ver"]),
+              flush=True)
         self.ctrl = 0
         self.ja = self.jb = 0
         self.cols = [0] * 9
         self.input_dirty = True
-        self.keyq = []          # list of (deadline-relative ms, cols)
+        self.keyq = []          # list of (duration s, cols)
         self.key_until = 0.0
         self.reset_until = 0.0
-        self.mon_clients = []
         self.ctl_clients = {}
-        self.txq = bytearray()
-        self.log = bytearray()
-        self.stats = {"rd": 0, "wr": 0, "mon_in": 0, "mon_out": 0}
-        self.mon_srv = self.listen(args.mon_port)
-        self.ctl_srv = self.listen(args.ctl_port)
-
-    @staticmethod
-    def listen(port):
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(("0.0.0.0", port))
-        s.listen(4)
-        s.setblocking(False)
-        return s
-
-    # ---- SD
-    def serve_sd(self, st):
-        f = st["flags"]
-        if f & 0x01 and not f & 0x22:
-            if st["lba"] >= self.img_sectors:
-                # Past the end of the "card": answer like a real card (error token),
-                # so FDISK and HYPPO see the true capacity.
-                self.br.sd_rerr()
-                self.stats["rd_err"] = self.stats.get("rd_err", 0) + 1
-                return True
-            self.img.seek(st["lba"] * 512)
-            data = self.img.read(512)
-            data += b"\x00" * (512 - len(data))
-            self.br.sd_put(data)
-            self.stats["rd"] += 1
-            if self.args.verbose:
-                print("rd %d" % st["lba"], flush=True)
-            return True
-        if f & 0x04:
-            data = self.br.sd_get()
-            if st["lba"] >= self.img_sectors:     # never grow the image past the card size
-                self.br.sd_wack()
-                return True
-            self.img.seek(st["lba"] * 512)
-            self.img.write(data)
-            self.img.flush()
-            self.br.sd_wack()
-            self.stats["wr"] += 1
-            if self.args.verbose:
-                print("wr %d" % st["lba"], flush=True)
-            return True
-        return False
+        self.ctl_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.ctl_srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.ctl_srv.bind(("0.0.0.0", args.ctl_port))
+        self.ctl_srv.listen(4)
 
     # ---- keyboard / input
     def push_input(self):
@@ -184,13 +114,9 @@ class Daemon:
             self.br.set_input(self.ctrl, self.ja, self.jb, self.cols)
             self.input_dirty = False
 
-    MODIFIERS = None
-
     def queue_keys(self, combos, hold=0.06, gap=0.04):
-        if Daemon.MODIFIERS is None:
-            Daemon.MODIFIERS = {KEYPOS[k] for k in ("LSHIFT", "RSHIFT", "CTRL", "MEGA", "ALT")}
         for combo in combos:
-            mods = [k for k in combo if k in Daemon.MODIFIERS]
+            mods = [k for k in combo if k in MODIFIERS]
             cols, mcols = [0] * 9, [0] * 9
             for c, r in combo:
                 cols[c] |= 1 << r
@@ -199,9 +125,7 @@ class Daemon:
             if mods and len(mods) < len(combo):
                 # Like a typist: modifier down first, released last, so the key
                 # scanner never sees the key without its modifier.
-                self.keyq.append((0.04, mcols))
-                self.keyq.append((hold, cols))
-                self.keyq.append((0.04, mcols))
+                self.keyq += [(0.04, mcols), (hold, cols), (0.04, mcols)]
             else:
                 self.keyq.append((hold, cols))
             self.keyq.append((gap, [0] * 9))
@@ -213,6 +137,41 @@ class Daemon:
             self.input_dirty = True
             self.key_until = now + dur
 
+    # ---- helpers
+    def io_stats(self):
+        try:
+            return open(self.args.stats).read().strip()
+        except OSError:
+            return "m65io=not-running"
+
+    def temps(self):
+        out = []
+        for z in sorted(glob.glob("/sys/class/thermal/thermal_zone*")):
+            try:
+                out.append("%s=%.1fC" % (open(z + "/type").read().strip(),
+                                         int(open(z + "/temp").read()) / 1000.0))
+            except OSError:
+                pass
+        # FPGA die temperature: $D6DF:$D6DE (12-bit XADC) via the serial monitor
+        try:
+            with socket.create_connection(("127.0.0.1", self.args.mon_port), timeout=2) as s:
+                s.sendall(b"mffd36de\r")
+                buf, t0 = b"", time.time()
+                s.settimeout(0.2)
+                while b":0FFD36DE:" not in buf or len(buf.split(b":0FFD36DE:")[1]) < 4:
+                    if time.time() - t0 > 2:
+                        raise TimeoutError
+                    try:
+                        buf += s.recv(4096)
+                    except socket.timeout:
+                        pass
+            h = buf.split(b":0FFD36DE:")[1][:4].decode()
+            raw = (int(h[2:4], 16) << 4) | (int(h[0:2], 16) & 0x0F)
+            out.append("fpga=%.1fC" % (raw * 503.975 / 4096 - 273.15))
+        except Exception as e:     # monitor busy or m65io down
+            out.append("fpga=n/a(%s)" % type(e).__name__)
+        return " ".join(out)
+
     # ---- control commands
     def command(self, line):
         p = line.strip().split(" ", 1)
@@ -222,7 +181,9 @@ class Daemon:
         a = rest.split()
         if cmd == "status":
             st = self.br.status()
-            return "ok " + " ".join("%s=%s" % (k, v) for k, v in list(st.items()) + list(self.stats.items()))
+            return "ok " + " ".join("%s=%s" % kv for kv in st.items()) + " " + self.io_stats()
+        if cmd == "temps":
+            return "ok " + self.temps()
         if cmd == "reset":
             self.ctrl |= 1
             self.input_dirty = True
@@ -253,125 +214,67 @@ class Daemon:
             hold = int(a[1]) / 1000.0 if len(a) > 1 else 0.06
             self.queue_keys([key_combo(a[0])], hold=hold)
             return "ok"
-        if cmd == "typecase":
+        if cmd in ("type", "typecase"):
             text = rest.replace("\\n", "\n")
             combos = []
             try:
                 for ch in text:
                     c = key_combo(ch)
-                    if ch.isalpha() and ch.isupper():
+                    if cmd == "typecase" and ch.isalpha() and ch.isupper():
                         c = [KEYPOS["LSHIFT"]] + c
                     combos.append(c)
             except KeyError as e:
                 return "err no key for %r" % e.args[0]
             self.queue_keys(combos)
             return "ok %d keys" % len(text)
-        if cmd == "type":
-            text = rest.replace("\\n", "\n")
-            try:
-                self.queue_keys([key_combo(ch) for ch in text])
-            except KeyError as e:
-                return "err no key for %r" % e.args[0]
-            return "ok %d keys" % len(text)
-        if cmd == "log":
-            n = int(a[0]) if a else 2000
-            return "ok " + self.log[-n:].decode("latin-1").replace("\r", "").replace("\n", "\\n")
         return "err unknown command"
 
     # ---- main loop
     def loop(self):
         while True:
             now = time.time()
-            busy = False
             if self.reset_until and now >= self.reset_until:
                 self.ctrl &= ~1
                 self.input_dirty = True
                 self.reset_until = 0.0
             self.run_keys(now)
             self.push_input()
-
-            st = self.br.status()
-            if st["magic"] != b"\x4d\x65":
-                # No bridge answering (FPGA being reprogrammed / other bitstream):
-                # MISO floats and every field would read as 0xFF. Act on nothing.
-                self.bridge_down = getattr(self, "bridge_down", 0) + 1
-                time.sleep(0.05)
-                continue
-            busy |= self.serve_sd(st)
-
-            # monitor output
-            if st["rxcnt"]:
-                data = self.br.uart_get(min(st["rxcnt"], 4000))
-                self.stats["mon_out"] += len(data)
-                self.log += data
-                del self.log[:-65536]
-                for c in list(self.mon_clients):
-                    try:
-                        c.sendall(data)
-                    except OSError:
-                        self.mon_clients.remove(c)
-                busy = True
-            # monitor input
-            if self.txq and st["txfree"]:
-                n = min(len(self.txq), st["txfree"], 1000)
-                self.br.uart_put(bytes(self.txq[:n]))
-                del self.txq[:n]
-                self.stats["mon_in"] += n
-                busy = True
-
-            socks = [self.mon_srv, self.ctl_srv] + self.mon_clients + list(self.ctl_clients)
-            r, _, _ = select.select(socks, [], [], 0 if busy or self.keyq else self.args.idle)
+            socks = [self.ctl_srv] + list(self.ctl_clients)
+            r, _, _ = select.select(socks, [], [], 0.005 if self.keyq else 0.05)
             for s in r:
-                if s is self.mon_srv:
-                    c, _ = s.accept()
-                    c.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    self.mon_clients.append(c)
-                elif s is self.ctl_srv:
+                if s is self.ctl_srv:
                     c, _ = s.accept()
                     self.ctl_clients[c] = b""
-                elif s in self.mon_clients:
+                    continue
+                try:
+                    d = s.recv(4096)
+                except OSError:
+                    d = b""
+                if not d:
+                    del self.ctl_clients[s]
+                    s.close()
+                    continue
+                buf = self.ctl_clients[s] + d
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
                     try:
-                        d = s.recv(4096)
-                    except OSError:
-                        d = b""
-                    if not d:
-                        self.mon_clients.remove(s)
-                        s.close()
-                    else:
-                        self.txq += d
-                else:
+                        reply = self.command(line.decode("utf-8", "replace"))
+                    except Exception as e:  # keep serving
+                        reply = "err %s" % e
                     try:
-                        d = s.recv(4096)
+                        s.sendall((reply + "\n").encode())
                     except OSError:
-                        d = b""
-                    if not d:
-                        del self.ctl_clients[s]
-                        s.close()
-                        continue
-                    buf = self.ctl_clients[s] + d
-                    while b"\n" in buf:
-                        line, buf = buf.split(b"\n", 1)
-                        try:
-                            reply = self.command(line.decode("utf-8", "replace"))
-                        except Exception as e:  # keep serving
-                            reply = "err %s" % e
-                        try:
-                            s.sendall((reply + "\n").encode())
-                        except OSError:
-                            pass
-                    self.ctl_clients[s] = buf
+                        pass
+                self.ctl_clients[s] = buf
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--image", default="/root/m65/card.img")
-    ap.add_argument("--hz", type=int, default=4000000)
-    ap.add_argument("--mon-port", type=int, default=4510)
+    ap.add_argument("--hz", type=int, default=10000000)
     ap.add_argument("--ctl-port", type=int, default=4511)
-    ap.add_argument("--idle", type=float, default=0.0005, help="poll sleep when idle (s)")
-    ap.add_argument("-v", "--verbose", action="store_true")
-    args = ap.parse_args()
-    Daemon(args).loop()
+    ap.add_argument("--mon-port", type=int, default=4510, help="m65io monitor pipe (for temps)")
+    ap.add_argument("--stats", default="/root/m65/m65io.stats")
+    Daemon(ap.parse_args()).loop()
 
 
 if __name__ == "__main__":

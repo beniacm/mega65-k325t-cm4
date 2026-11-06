@@ -10,3 +10,9 @@ sed -E 's/(variable byteCnt_v *: *)natural range 0 to ([A-Za-z_0-9]+)/\1integer 
 ghdl -a --std=08 -frelaxed sdcard_simcopy.vhdl $V/sd_emu.vhdl $V/rk_bridge.vhdl tb_rk_sd.vhdl
 ghdl -e --std=08 -frelaxed tb_rk_sd
 ghdl -r --std=08 -frelaxed tb_rk_sd --stop-time=300ms 2>&1 | grep -v "st\[" | sed 's/.*(report note): //'
+# Monitor UART burst: the real UART_TX_CTRL (debug report line stripped: its to_hstring
+# clashes with VHDL-2008 numeric_std in GHDL) sends 64 back-to-back bytes, all must arrive.
+sed -e '/report "UART_TX: Sending byte/d' -e '/use work.debugtools.all;/d' $V/UART_TX_CTRL.vhdl > uart_tx_simcopy.vhdl
+ghdl -a --std=08 -frelaxed uart_tx_simcopy.vhdl tb_uart_burst.vhdl
+ghdl -e --std=08 -frelaxed tb_uart_burst
+ghdl -r --std=08 -frelaxed tb_uart_burst --stop-time=5ms 2>&1 | sed 's/.*(report note): //;s/.*(assertion failure): /FAIL: /' 

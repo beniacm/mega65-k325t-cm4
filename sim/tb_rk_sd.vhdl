@@ -11,9 +11,11 @@ end entity;
 
 architecture sim of tb_rk_sd is
   constant TCLK : time := 24.69 ns;          -- 40.5 MHz
-  constant TSPI : time := 125 ns;            -- 4 MHz SPI half period
+  constant TSPI : time := 20 ns;             -- 25 MHz SPI half period
+  constant TFAST : time := TCLK / 4;         -- 162 MHz bridge clock
 
   signal clk : std_logic := '0';
+  signal clkf : std_logic := '0';
   signal done : boolean := false;
 
   -- host side of SdCardCtrl
@@ -61,7 +63,8 @@ architecture sim of tb_rk_sd is
   signal stop_server : boolean := false;
   signal uart_seen : std_logic_vector(7 downto 0) := x"00";
 begin
-  clk <= not clk after TCLK/2 when not done;
+  clk  <= not clk after TCLK/2 when not done;
+  clkf <= not clkf after TFAST/2 when not done;
 
   ctl : entity work.SdCardCtrl
     port map (sdhc_i => '1', clk_i => clk, reset_i => reset_i, rd_i => rd_i, wr_i => wr_i,
@@ -78,7 +81,8 @@ begin
               cmd_count => ccnt, last_cmd => lcmd);
 
   br : entity work.rk_bridge
-    port map (clk => clk, spi_sck => sck, spi_cs_n => scs, spi_mosi => smosi, spi_miso => smiso,
+    generic map (BIT_CLKS => 80)
+    port map (clk => clkf, cpuclk => clk, spi_sck => sck, spi_cs_n => scs, spi_mosi => smosi, spi_miso => smiso,
               sd_rd_req => rd_req, sd_wr_req => wr_req, sd_lba => lba, sd_seq => seq,
               sd_inited => inited, sd_cmd_cnt => ccnt, sd_last_cmd => lcmd,
               sd_rd_ready => rd_ready, sd_rd_error => rd_error, sd_wr_ack => wr_ack, rbuf_addr => rba, rbuf_data => rbd,
