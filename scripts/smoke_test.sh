@@ -18,7 +18,7 @@ fi
 adb get-state >/dev/null 2>&1 || fail "Rockchip not reachable over adb"
 "$ROOT/scripts/program.sh" "$BIT" | grep -q "PROGRAMMED=" || fail "JTAG programming"
 
-adb push "$ROOT"/rockchip/{m65io.c,m65d.py,m65d_restart.sh,m65d_stop.sh,rk_pins.py} /root/m65/ >/dev/null
+adb push "$ROOT"/rockchip/{m65io.c,m65d.py,m65input.py,m65d_restart.sh,m65d_stop.sh,rk_pins.py} /root/m65/ >/dev/null
 adb shell sh /root/m65/m65d_restart.sh | grep -q "bridge found" || fail "rk_bridge not answering on spidev3.0"
 
 # MEGAFLASH: "slot messed up, press any key" + slot menu; RUN/STOP answers both and

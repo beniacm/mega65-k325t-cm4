@@ -75,13 +75,36 @@ against `sd_emu` + `rk_bridge` + a model Rockchip (`sim/tb_rk_sd.vhdl`) → `TB_
 It generates `sdcard_simcopy.vhdl` from upstream, only widening a counter range that underflows
 harmlessly in hardware but stops GHDL.
 
-## Keyboard options
+## Keyboard, gamepads
 
-Implemented: the **Rockchip types through the MEGA65 keyboard matrix** (widget interface).
-For example, `scripts/m65ctl.py type 'LOAD "$",8\n'` or `key RUNSTOP`. Next step: an evdev reader
-in `m65d.py`, so a USB keyboard and gamepads on the carrier's USB hub feed the same matrix
-and joystick registers.
-Alternatives: a real PS/2 keyboard or a MEGA65 MK-II keyboard on JP5, or USB host in the FPGA (see git history).
+**USB keyboard and USB gamepads** plugged into the carrier's USB ports (the CM4 module's USB) are
+forwarded by `m65d.py` + `rockchip/m65input.py`. It reads evdev directly (no python-evdev), grabs the
+devices exclusively, hot-plugs them (rescan every 2 s), and ORs them with scripted input from the
+control port.
+
+| PC key | MEGA65 | | PC key | MEGA65 |
+|---|---|---|---|---|
+| Esc | RUN/STOP | | PgUp | RESTORE |
+| Backspace, Del | INST/DEL | | Insert | INST (SHIFT+DEL) |
+| Home | CLR/HOME | | End | ↑ (up-arrow) |
+| PgDn | £ | | PrtSc | HELP |
+| CapsLock | CAPS LOCK (latching) | | ScrollLock | NO SCROLL |
+| Ctrl / Alt / Win | CTRL / ALT / MEGA | | Tab | TAB |
+| F1/3/5/7/9/11 | same | | F2/4/6/8/10/12 | SHIFT + odd F-key |
+| cursor keys | cursor (up/left = SHIFT+down/right) | | keypad | digits, + - * / . RETURN |
+| `` ` `` - = [ ] ; ' \ | ← + - @ * : ; = | | letters, digits, , . / | positional |
+
+Gamepads: **first pad → joystick port 2** (most C64 games), second → port 1. D-pad, hat or left stick
+(30 % dead zone) give directions; A/B/X/Y, shoulders and triggers fire. Start = SPACE,
+Select = RETURN, Mode/Home = RUN/STOP. The optional DS2x2 Pmod on J13 and the `joy` control
+command are OR'd in as well.
+
+Test without hardware: `rockchip/uinput_test.py` creates a virtual keyboard or gamepad via
+`/dev/uinput` (run it with a host-side `adb shell` in the background; processes backgrounded
+inside an adb command die with the session). Verified: `print 6*7` typed on the virtual
+keyboard → ` 42`; pad fire → `$DC00=$6F`, D-pad up → `$7E`, released → `$7F`.
+
+Scripted input (control port): `type`, `typecase`, `key`, `keys`, `joy`, `restore`, `capslock`.
 
 ## Scripts
 
@@ -96,6 +119,7 @@ scripts/m65ctl.py       # control client: status | type <text> | typecase <Text>
 scripts/sd_populate.sh  # copy system files + ROM + extra dirs into an existing (FDISK-made) card image
 rockchip/m65d.py        # Rockchip daemon (root): SD server, monitor pipe :4510, control :4511
 rockchip/m65d_restart.sh, rockchip/m65d_stop.sh, rockchip/rk_pins.py
+rockchip/m65input.py    # USB keyboard/gamepad bridge (imported by m65d.py); uinput_test.py = virtual devices
 # m65d ignores any status without the bridge magic: while the FPGA is reprogrammed, MISO floats
 # and every field reads 0xFF (an old daemon wrote a garbage sector at LBA 0xFFFFFFFF that way).
 ```

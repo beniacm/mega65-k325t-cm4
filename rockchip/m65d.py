@@ -7,6 +7,11 @@ C daemon m65io; this process only drives the INPUT register of rk_bridge.vhdl
 same /dev/spidev3.0 -- each ioctl is one complete CS transaction, the kernel
 serialises the two processes.
 
+USB keyboards and gamepads on the module's USB ports are forwarded too
+(m65input.py: hot-plug, exclusive grab, positional C64/MEGA65 key mapping,
+first pad -> joystick port 2, second -> port 1); they are OR'd with the
+scripted input below.
+
 Control: TCP port 4511, one text command per line, reply "ok ..."/"err ...":
     status                     bridge status + m65io counters
     temps                      Rockchip thermal zones + FPGA die temperature (XADC)
@@ -29,6 +34,8 @@ import sys
 import time
 
 import spidev
+
+import m65input
 
 # ---------------------------------------------------------------- key matrix
 # MEGA65/C64 matrix: column = CIA PA line (0..8), row = PB bit.
@@ -103,6 +110,10 @@ class Daemon:
         self.key_until = 0.0
         self.reset_until = 0.0
         self.ctl_clients = {}
+        self.inp = m65input.InputHub(KEYPOS, log=lambda m: print(m, flush=True))
+        self.inp.scan()
+        self.next_scan = time.time() + 2.0
+        self.sent = None
         self.ctl_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.ctl_srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.ctl_srv.bind(("0.0.0.0", args.ctl_port))
@@ -110,8 +121,15 @@ class Daemon:
 
     # ---- keyboard / input
     def push_input(self):
+        # scripted state OR physical USB keyboards/gamepads
         if self.input_dirty:
-            self.br.set_input(self.ctrl, self.ja, self.jb, self.cols)
+            pcols = self.inp.matrix()
+            pj1, pj2 = self.inp.joysticks()
+            state = (self.ctrl | self.inp.ctrl_bits(), self.ja | pj1, self.jb | pj2,
+                     tuple(a | b for a, b in zip(self.cols, pcols)))
+            if state != self.sent:
+                self.br.set_input(state[0], state[1], state[2], list(state[3]))
+                self.sent = state
             self.input_dirty = False
 
     def queue_keys(self, combos, hold=0.06, gap=0.04):
@@ -181,7 +199,8 @@ class Daemon:
         a = rest.split()
         if cmd == "status":
             st = self.br.status()
-            return "ok " + " ".join("%s=%s" % kv for kv in st.items()) + " " + self.io_stats()
+            return ("ok " + " ".join("%s=%s" % kv for kv in st.items()) + " " + self.io_stats()
+                    + " inputs=" + self.inp.describe())
         if cmd == "temps":
             return "ok " + self.temps()
         if cmd == "reset":
@@ -239,9 +258,17 @@ class Daemon:
                 self.reset_until = 0.0
             self.run_keys(now)
             self.push_input()
-            socks = [self.ctl_srv] + list(self.ctl_clients)
+            if now >= self.next_scan:              # hot-plug
+                self.inp.scan()
+                self.next_scan = now + 2.0
+            evfds = self.inp.fds()
+            socks = [self.ctl_srv] + list(self.ctl_clients) + evfds
             r, _, _ = select.select(socks, [], [], 0.005 if self.keyq else 0.05)
             for s in r:
+                if isinstance(s, int):                # evdev device
+                    if self.inp.handle(s):
+                        self.input_dirty = True
+                    continue
                 if s is self.ctl_srv:
                     c, _ = s.accept()
                     self.ctl_clients[c] = b""
