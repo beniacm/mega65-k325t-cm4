@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """crt_banksum.py <file.crt> <word-address-hex> [base-hex] -- expected sum of the 4096 16-bit words
 the C64 core's cartridge cacher reads from <word address> (CRT image stored at word <base>,
-default 0x200000), to compare with rk_dbg.py's "loads" log."""
+default 0x200000), e.g. to check bank loads captured with a probe or ILA."""
 import sys
 d = open(sys.argv[1], "rb").read()
 base = int(sys.argv[3], 16) if len(sys.argv) > 3 else 0x200000

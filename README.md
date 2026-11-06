@@ -64,8 +64,8 @@ v2 had a raw UART on D13/D14, which caused contention; it was removed in v3.
 | `50` | cmd, len_hi, len_lo, len bytes, 2 pads | **configuration flash pass-through** (x1 SPI, ~27 MHz, CS low for exactly len bytes); the answer to data byte k comes back in frame byte k+5 |
 | `60` | cmd, addr[4] (big endian), `A5` | reboot the FPGA into the bitstream at flash byte address `addr` (C64 core: `rk_iprog`; the MEGA65 core reboots via `$D6C8..$D6CF` instead) |
 
-STATUS byte 52 = core id (1 MEGA65, 2 C64; 0 on older MEGA65 bitstreams), bytes 18..51 = debug
-probes (C64 bring-up build, read with `rockchip/rk_dbg.py`).
+STATUS byte 52 = core id (1 MEGA65, 2 C64; 0 on older MEGA65 bitstreams), byte 53 bit 0 = a
+flash pass-through byte arrived while the previous one was still shifting (overrun).
 
 **Speed:** the bridge's SPI front end runs at 162 MHz (4 × cpuclock, same MMCM) and the link at
 **25 MHz**. `rockchip/linktest.py`: 0 errors at 10/16.7/25 MHz, failures from 33 MHz up (MISO setup).
@@ -127,7 +127,6 @@ rockchip/m65d_restart.sh, rockchip/m65d_stop.sh, rockchip/rk_pins.py
 rockchip/m65input.py    # USB keyboard/gamepad/1351-mouse bridge (imported by m65d.py); uinput_test.py = virtual devices
 rockchip/m65flash.py    # configuration flash: id | backup | write <slot> <bit> | verify | boot <slot>
 rockchip/m65d.service   # systemd unit (enabled): m65io + m65d at boot, then m65_bootreset.py
-rockchip/rk_dbg.py      # C64 bring-up debug word / DDR3 probes from rk_bridge STATUS 18..51
 scripts/c64_run.sh      # C64 core: load, mount k325t.d64, LOAD+RUN a program, capture
 scripts/mkd64.py        # BASIC V2 text / PRG files -> D64;  scripts/crt_banksum.py: expected CRT bank sums
 # m65d ignores any status without the bridge magic: while the FPGA is reprogrammed, MISO floats

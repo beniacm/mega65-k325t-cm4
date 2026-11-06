@@ -57,7 +57,7 @@ ghdl -a --std=08 -frelaxed --workdir=c64work axi_fifo_sim.vhdl $C/M2M/vhdl/memor
     $C/M2M/vhdl/memory/avm_arbit_general.vhd $C/CORE/vhdl/reu_mapper.vhd tb_c64_reu.vhdl
 ghdl -e --std=08 -frelaxed --workdir=c64work tb_c64_reu
 ghdl -r --std=08 -frelaxed --workdir=c64work tb_c64_reu --stop-time=40ms --ieee-asserts=disable 2>&1 \
-    | sed 's/.*(report note): //;s/.*(assertion failure): /FAIL: /' | grep -v "^M \|^MAP \|^CACHE "
+    | sed 's/.*(report note): //;s/.*(assertion failure): /FAIL: /'
 
 # C64 core: software-cartridge loader (real sw_cartridge_wrapper) writing the first 8 KB of a
 # real EasyFlash .crt byte by byte through avm_mig + framework arbiter (with scaler traffic),

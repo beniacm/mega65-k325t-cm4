@@ -96,8 +96,6 @@ architecture sim of tb_c64_reu is
    signal dig_ok : boolean := true;
    signal dig_bursts : natural := 0;
    signal ascal_on : boolean := true;
-   constant TRACE_FROM : time := 1 sec;   -- set to a window to trace the bus
-   constant TRACE_TO   : time := 852.9 us;
 begin
    clkm <= not clkm after TMAIN / 2 when not done;
    clkh <= not clkh after THR / 2 when not done;
@@ -250,49 +248,6 @@ begin
                 app_wdf_rdy => app_wdf_rdy, app_rd_data => app_rd_data,
                 app_rd_data_valid => app_rd_data_valid);
 
-
-   ---------------------------------------------------------------- debug trace (TRACE_FROM..TRACE_TO)
-   trace : process (clkh)
-      function h(v : std_logic_vector) return string is
-      begin
-         return integer'image(to_integer(unsigned(v)));
-      end function;
-   begin
-      if rising_edge(clkh) and now >= TRACE_FROM and now <= TRACE_TO then
-         if m_read = '1' and m_wait = '0' then
-            report "M RD a=" & h(m_addr) & " bc=" & h(m_bc) & " sreq=" & h(s_read) & "/" & h(s_write);
-         end if;
-         if m_write = '1' and m_wait = '0' then
-            report "M WR a=" & h(m_addr) & " bc=" & h(m_bc) & " be=" & h(m_be) & " sreq=" & h(s_read) & "/" & h(s_write);
-         end if;
-         if m_rdv = '1' then
-            report "M RDV d=" & h(m_rdata) & " to=" & h(s_rdv);
-         end if;
-      end if;
-   end process;
-
-
-   trace_core : process (clkm)
-      function h(v : std_logic_vector) return string is
-      begin
-         return integer'image(to_integer(unsigned(v)));
-      end function;
-   begin
-      if rising_edge(clkm) and now >= TRACE_FROM and now <= TRACE_TO then
-         if map_write = '1' and map_wait = '0' then
-            report "MAP WR a=" & h(map_addr) & " be=" & h(map_be) & " d=" & h(map_wdata) & " reu=" & h(reu_addr);
-         end if;
-         if map_read = '1' and map_wait = '0' then
-            report "MAP RD a=" & h(map_addr) & " reu=" & h(reu_addr);
-         end if;
-         if c_write = '1' and c_wait = '0' then
-            report "CACHE WR a=" & h(c_addr) & " be=" & h(c_be);
-         end if;
-         if c_read = '1' and c_wait = '0' then
-            report "CACHE RD a=" & h(c_addr) & " bc=" & h(c_bc);
-         end if;
-      end if;
-   end process;
 
    ---------------------------------------------------------------- MIG model
    mig : process
