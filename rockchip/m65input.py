@@ -18,6 +18,8 @@ Keyboard: positional mapping like a C64/MEGA65 keyboard on a PC layout
 Gamepad: first pad -> joystick port 2 (most C64 games), second pad -> port 1.
     D-pad / hat / left stick = directions; A/B/X/Y, shoulders, triggers = fire;
     Start = SPACE, Select = RETURN, Mode/Home = RUN/STOP.
+System keys (never passed to the core), Ctrl + Alt + ...:
+    Del = reset the core     F1 = MEGA65     F2 = C64     F12 = toggle MEGA65 <-> C64
 Mouse: Commodore 1351 in proportional mode on port 2 (all mice summed): the SID POTX/POTY
     values carry the position mod 64 (bits 6..1), left button = fire, right button = up.
     MOUSE_SCALE divides PC mouse counts (modern mice report far more counts than a 1351).
@@ -68,6 +70,8 @@ for code, ch in zip([30, 31, 32, 33, 34, 35, 36, 37, 38], "ASDFGHJKL"):
 for code, ch in zip([44, 45, 46, 47, 48, 49, 50], "ZXCVBNM"):
     KEYMAP[code] = [ch]
 KEY_CAPSLOCK, KEY_PAGEUP = 58, 104       # handled as lines, not matrix keys
+CTRL_KEYS, ALT_KEYS = {29, 97}, {56, 100}
+SYSTEM_KEYS = {111: "reset", 59: "core mega65", 60: "core c64", 88: "core toggle"}  # Del F1 F2 F12
 
 # Gamepad buttons
 BTN_FIRE = set(range(0x120, 0x12c)) | {0x130, 0x131, 0x132, 0x133, 0x134, 0x135,
@@ -135,6 +139,8 @@ class InputHub:
         self.script_buttons = 0             # scripted mouse buttons (m65d 'mouse' command)
         self.caps = False
         self.restore = False
+        self.actions = []                   # system-key actions for m65d (reset / core switch)
+        self.sys_held = set()               # system keys swallowed while held
 
     # ---- discovery
     def scan(self):
@@ -235,6 +241,14 @@ class InputHub:
                             self.caps = not self.caps       # latching key, like the real one
                     elif code == KEY_PAGEUP:
                         self.restore = val != 0
+                    elif code in SYSTEM_KEYS and (val == 0 and code in self.sys_held or
+                                                  val and self.kbd_keys & CTRL_KEYS
+                                                  and self.kbd_keys & ALT_KEYS):
+                        if val == 1:
+                            self.actions.append(SYSTEM_KEYS[code])
+                            self.sys_held.add(code)
+                        elif val == 0:
+                            self.sys_held.discard(code)
                     elif val:                               # 1 = press, 2 = autorepeat
                         self.kbd_keys.add(code)
                     else:

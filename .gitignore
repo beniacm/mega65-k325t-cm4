@@ -28,3 +28,4 @@ __pycache__/
 /sim/*_simcopy.vhdl
 /sim/eob_head.hex
 /sim/work_*/
+/flashbackup/

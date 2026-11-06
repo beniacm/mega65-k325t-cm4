@@ -23,6 +23,8 @@ Control: TCP port 4511, one text command per line, reply "ok ..."/"err ...":
     key <NAME> [ms]            tap one key (RETURN, SPACE, F1, RUNSTOP, ...)
     keys <c0> .. <c8>          raw matrix state, 9 hex bytes (bit = row, 1 = down)
     joy <a> <b>                joystick bits (b0 up b1 down b2 left b3 right b4 fire)
+    core [mega65|c64|toggle]   show / switch the FPGA core (flash slot 0 / 1); USB keyboard:
+                               Ctrl+Alt+F1 / F2 / F12, Ctrl+Alt+Del = reset
     mouse <dx> <dy> [btn]      move the 1351 mouse on port 2 (counts, dy>0 = up; btn b0 L b1 R)
     mouse off                  no mouse (POTs read $FF)
     pots <p1x> <p1y> <p2x> <p2y>   raw SID POT values in hex (paddles); "pots off" = back to mouse
@@ -93,6 +95,17 @@ class Bridge:
             "sdcmds": r[13], "lastcmd": r[14], "ctrl": r[15],
         }
 
+    def core_id(self):
+        """STATUS byte 52: 1 = MEGA65, 2 = C64 (0 = older MEGA65 bitstream)"""
+        r = self.spi.xfer2([0x01, 0] + [0] * 53)[2:]
+        if bytes(r[0:2]) != b"Me":
+            return None
+        return r[52] or 1
+
+    def iprog(self, addr):
+        self.spi.xfer2([0x60, (addr >> 24) & 0xFF, (addr >> 16) & 0xFF, (addr >> 8) & 0xFF,
+                        addr & 0xFF, 0xA5])
+
     def set_input(self, ctrl, ja, jb, cols, pots=(0xFF, 0xFF, 0xFF, 0xFF)):
         # bytes 13..16 = pot1 x, pot1 y, pot2 x, pot2 y (SID values; older bitstreams ignore them)
         self.spi.xfer2([0x30, ctrl & 0xFF, ja & 0x1F, jb & 0x1F] + [c & 0xFF for c in cols]
@@ -115,6 +128,7 @@ class Daemon:
         self.keyq = []          # list of (duration s, cols)
         self.key_until = 0.0
         self.reset_until = 0.0
+        self.resend_at = 0.0    # after a core switch: send the input state to the new core
         self.ctl_clients = {}
         self.inp = m65input.InputHub(KEYPOS, log=lambda m: print(m, flush=True))
         self.inp.scan()
@@ -197,6 +211,46 @@ class Daemon:
             out.append("fpga=n/a(%s)" % type(e).__name__)
         return " ".join(out)
 
+    # ---- cores (flash slots: 0 = MEGA65 at 0x000000, 1 = C64 at 0x800000)
+    CORES = {"mega65": (1, 0x000000), "c64": (2, 0x800000)}
+
+    def monitor(self, line):
+        with socket.create_connection(("127.0.0.1", self.args.mon_port), timeout=2) as s:
+            s.sendall(line.encode() + b"\r")
+            time.sleep(0.3)
+
+    def switch_core(self, target):
+        cur = self.br.core_id()
+        if cur is None:
+            return "err no bridge answer"
+        names = {1: "mega65", 2: "c64"}
+        if target == "toggle":
+            target = "c64" if cur == 1 else "mega65"
+        if target not in self.CORES:
+            return "err core mega65|c64|toggle"
+        want, addr = self.CORES[target]
+        if want == cur:
+            return "ok already %s" % target
+        print("m65d: core %s -> %s (flash 0x%06x)" % (names.get(cur, cur), target, addr), flush=True)
+        if cur == 1:
+            # MEGA65: its own reconfig ($D6C8..$D6CB boot address, $D6CF <- $42 triggers)
+            # WBSTAR takes the SPI address in 256-byte units ("shifted by 8 bits")
+            w = addr >> 8
+            self.monitor("sffd36c8 %02x %02x %02x %02x" % (w & 0xFF, (w >> 8) & 0xFF,
+                                                           (w >> 16) & 0xFF, w >> 24))
+            self.monitor("sffd36cf 42")
+        else:
+            self.br.iprog(addr)
+        self.sent = None
+        self.resend_at = time.time() + 3.0
+        return "ok switching to %s" % target
+
+    def system_action(self, act):
+        if act == "reset":
+            self.command("reset")
+        elif act.startswith("core "):
+            print("m65d: " + self.switch_core(act.split()[1]), flush=True)
+
     # ---- control commands
     def command(self, line):
         p = line.strip().split(" ", 1)
@@ -215,6 +269,11 @@ class Daemon:
             self.input_dirty = True
             self.reset_until = time.time() + 0.2
             return "ok"
+        if cmd == "core":
+            if not a:
+                c = self.br.core_id()
+                return "ok core=%s" % {1: "mega65", 2: "c64"}.get(c, c)
+            return self.switch_core(a[0].lower())
         if cmd == "hold_reset":
             self.ctrl = (self.ctrl | 1) if a and a[0] == "1" else (self.ctrl & ~1)
             self.input_dirty = True
@@ -281,6 +340,12 @@ class Daemon:
                 self.input_dirty = True
                 self.reset_until = 0.0
             self.run_keys(now)
+            if self.resend_at and now >= self.resend_at:     # new core is up: resend inputs
+                self.sent = None
+                self.input_dirty = True
+                self.resend_at = 0.0
+            while self.inp.actions:
+                self.system_action(self.inp.actions.pop(0))
             self.push_input()
             if now >= self.next_scan:              # hot-plug
                 self.inp.scan()

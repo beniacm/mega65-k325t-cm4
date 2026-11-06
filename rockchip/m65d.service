@@ -1,0 +1,17 @@
+[Unit]
+Description=MEGA65 / C64 FPGA bridge (m65io SD + monitor, m65d control + USB input)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh /root/m65/m65d_restart.sh
+# At power-on the FPGA boots (~1 s) long before this service serves the SD card, so the
+# MEGA65's HYPPO finds no card and stops ("SD CARD IS NOT SDHC").  Once m65io/m65d are up,
+# reset the core once so it boots with the card present.
+ExecStartPost=-/usr/bin/python3 /root/m65/m65_bootreset.py
+ExecStop=/bin/sh /root/m65/m65d_stop.sh
+
+[Install]
+WantedBy=multi-user.target

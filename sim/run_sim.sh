@@ -73,3 +73,8 @@ ghdl -e --std=08 -frelaxed --workdir=c64work tb_c64_crt
 ghdl -r --std=08 -frelaxed --workdir=c64work tb_c64_crt --stop-time=80ms --ieee-asserts=disable 2>&1 \
   | sed 's/.*(report note): //;s/.*(report failure): /FAIL: /;s/.*(assertion failure): /FAIL: /' | grep -v readback
 fi
+
+# rk_bridge: configuration-flash pass-through (0x50), IPROG request (0x60), core id
+ghdl -a --std=08 -frelaxed --workdir=c64work $V/rk_bridge.vhdl tb_rk_flash.vhdl
+ghdl -e --std=08 -frelaxed --workdir=c64work tb_rk_flash
+ghdl -r --std=08 -frelaxed --workdir=c64work tb_rk_flash --stop-time=5ms 2>&1 | sed 's/.*(report note): //;s/.*(assertion failure): /FAIL: /'

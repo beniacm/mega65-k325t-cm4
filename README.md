@@ -60,7 +60,12 @@ v2 had a raw UART on D13/D14, which caused contention; it was removed in v3.
 | `13` | cmd | pending read is past the end of the card → data-error token `0x08` (out of range) |
 | `20` | cmd, N bytes | → monitor RX (2.025 Mbaud internally) |
 | `21` | cmd, dummy, N bytes | ← monitor TX FIFO (16 KiB) |
-| `30` | cmd, ctrl, joyA, joyB, col0..8 | ctrl b0 reset, b1 RESTORE, b2 CAPS, b3 physical SD |
+| `30` | cmd, ctrl, joyA, joyB, col0..8 [, pot1x, pot1y, pot2x, pot2y] | ctrl b0 reset, b1 RESTORE, b2 CAPS, b3 physical SD; optional POT bytes = SID values (paddles / 1351 mouse, `$FF` = open) |
+| `50` | cmd, len_hi, len_lo, len bytes, 2 pads | **configuration flash pass-through** (x1 SPI, ~27 MHz, CS low for exactly len bytes); the answer to data byte k comes back in frame byte k+5 |
+| `60` | cmd, addr[4] (big endian), `A5` | reboot the FPGA into the bitstream at flash byte address `addr` (C64 core: `rk_iprog`; the MEGA65 core reboots via `$D6C8..$D6CF` instead) |
+
+STATUS byte 52 = core id (1 MEGA65, 2 C64; 0 on older MEGA65 bitstreams), bytes 18..51 = debug
+probes (C64 bring-up build, read with `rockchip/rk_dbg.py`).
 
 **Speed:** the bridge's SPI front end runs at 162 MHz (4 × cpuclock, same MMCM) and the link at
 **25 MHz**. `rockchip/linktest.py`: 0 errors at 10/16.7/25 MHz, failures from 33 MHz up (MISO setup).
@@ -119,7 +124,12 @@ scripts/m65ctl.py       # control client: status | type <text> | typecase <Text>
 scripts/sd_populate.sh  # copy system files + ROM + extra dirs into an existing (FDISK-made) card image
 rockchip/m65d.py        # Rockchip daemon (root): SD server, monitor pipe :4510, control :4511
 rockchip/m65d_restart.sh, rockchip/m65d_stop.sh, rockchip/rk_pins.py
-rockchip/m65input.py    # USB keyboard/gamepad bridge (imported by m65d.py); uinput_test.py = virtual devices
+rockchip/m65input.py    # USB keyboard/gamepad/1351-mouse bridge (imported by m65d.py); uinput_test.py = virtual devices
+rockchip/m65flash.py    # configuration flash: id | backup | write <slot> <bit> | verify | boot <slot>
+rockchip/m65d.service   # systemd unit (enabled): m65io + m65d at boot, then m65_bootreset.py
+rockchip/rk_dbg.py      # C64 bring-up debug word / DDR3 probes from rk_bridge STATUS 18..51
+scripts/c64_run.sh      # C64 core: load, mount k325t.d64, LOAD+RUN a program, capture
+scripts/mkd64.py        # BASIC V2 text / PRG files -> D64;  scripts/crt_banksum.py: expected CRT bank sums
 # m65d ignores any status without the bridge magic: while the FPGA is reprogrammed, MISO floats
 # and every field reads 0xFF (an old daemon wrote a garbage sector at LBA 0xFFFFFFFF that way).
 ```
@@ -226,6 +236,68 @@ MEGA65 MAC ─RMII─ eth_vphy ═ rk_bridge ═ SPI ═ m65io ─AF_PACKET─ e
   reaches the x86 host over the LAN, and a host broadcast lands in the MEGA65 RX buffer.
   Simulation: `sim/tb_eth.vhdl` (RMII MAC model, 60/100/1514-byte frames both ways).
 
+## C64 core (C64MEGA65 V5.2 port)
+
+`c64mega65/` = github.com/MJoergen/C64MEGA65 (tag V5.2-release), local branch
+**`qmtech-k325t-cm4`** (separate repo, not tracked here). Build: `c64mega65/K325T/build.sh`
+(~8 min) → `K325T/bin/c64_k325t_cm4.bit`. The QNICE firmware needs the assembler built once
+(`M2M/QNICE/assembler/qasm*`) and `dist_kit/sysdef.asm` (from `M2M/QNICE/monitor`).
+
+| piece | role |
+|---|---|
+| `K325T/avm_mig.vhd` | M2M Avalon bus (HyperRAM interface) → MIG DDR3 native UI |
+| `K325T/m65kbd_emu.vhd` | MEGA65 keyboard serial link, answered from the bridge's matrix |
+| `K325T/gen_top.py` + `top_qmtech_k325t_cm4.tpl.vhd` | top generated from the R6 top: clocks, MIG, bridge, SD emulator, flash, IPROG |
+| M2M `framework.vhd` | generics `G_EXT_HR` (external memory), `G_TMDS_INVERT` (J11), `G_NO_I2C` |
+
+Works on hardware: BASIC, keyboard, menu (HELP), SD/D64 load + save, REU, EasyFlash cartridges
+(Eye of the Beholder, Metal Warrior Trilogy), disk games (Metal Warrior), joysticks and the
+**1351 mouse** (USB mouse → evdev → SID POT values, port 2; `m65ctl mouse dx dy [btn]`).
+Files live in `/c64` on the card (the MEGA65 card's FAT32 partition serves both cores).
+
+DDR3 bridge bugs found on the way (both in `avm_mig.vhd`, simulated with `sim/tb_c64_reu.vhdl`):
+- **MIG write order** (UG586): write data may come at most 2 cycles after its command. Under
+  `app_wdf_rdy` back-pressure it came later. Data now goes first. `ddr3_attic` had the same bug.
+- **No new command in the cycle of a read's last beat**: M2M's `avm_arbit` miscounts and read
+  beats reach the wrong master. The HDMI scaler then waited forever (frozen picture while the
+  C64 ran on), and the CRT parser read garbage ("Wrong CRT/CHIP header"). Afterwards 20/20
+  cartridge loads OK.
+
+## Standalone: both cores in flash, switched from the Rockchip
+
+No PC or JTAG is needed in normal use:
+
+1. Power on → the FPGA loads the **MEGA65 from flash slot 0**.
+2. The Rockchip boots and `m65d.service` starts m65io + m65d, then resets the core once
+   (`m65_bootreset.py`): the FPGA boots in ~1 s, long before the card is served, and HYPPO
+   would otherwise stop with "SD CARD IS NOT SDHC".
+3. The MEGA65 comes up in its menu system.
+
+| USB keyboard (not passed to the core) | `m65ctl` | |
+|---|---|---|
+| Ctrl+Alt+F12 | `core toggle` | MEGA65 ⇄ C64 |
+| Ctrl+Alt+F1 / F2 | `core mega65` / `core c64` | |
+| Ctrl+Alt+Del | `reset` | reset the running core |
+
+Flash (S25FL128L, 16 MB), written from the Rockchip with `rockchip/m65flash.py` while either core
+runs (16 MB read 15 s, a 6 MB core about 1 min including verify):
+
+| slot | address | content |
+|---|---|---|
+| 0 | `0x000000` | MEGA65 core (boots at power-on) |
+| 1 | `0x800000` | 4 KB `$FF`, then the C64 core |
+
+- The 4 KB `$FF` in front make HYPPO's flash check see slot 1 as *empty*. A valid `.cor` there
+  would be auto-started at power-on; anything else gives "slot 1 messed up". The FPGA skips the
+  `$FF` bytes before the sync word.
+- **WBSTAR for SPI is the byte address >> 8.** An unshifted address left the FPGA unconfigured
+  (DONE low, no fallback). Both bitstreams set `CONFIGFALLBACK`.
+- Upstream megaflash bug fixed (`mf_utility.c`): `$D629=$62` was split into "minor 6, model 2"
+  = MEGA65 R2 with 4 MB slots. Ids ≥ `$20` are now whole bytes, so this board gets 8 MB slots.
+- The original flash content is backed up in `flashbackup/flash_backup_20261106.bin` (git-ignored).
+- Core switching: MEGA65 → C64 through the serial monitor (`$D6C8..$D6CB` = address >> 8,
+  `$D6CF`←`$42`); C64 → MEGA65 through bridge command `60` (`rk_iprog`, own ICAPE2).
+
 ## Build status / hardware results
 
 - **v1** (2026-11-05): HDMI-only test. **First-light OK**: MEGAFLASH screen, clean 720x576 capture via J11.
@@ -245,3 +317,6 @@ MEGA65 MAC ─RMII─ eth_vphy ═ rk_bridge ═ SPI ═ m65io ─AF_PACKET─ e
   column off); CMD25 has 3 extra SCLK pulses between blocks (found in simulation); m65d crashed on a
   client reset.
 - Upstream "timing loop" synth warnings (`neotrng` ring oscillators, `gs4510` divider) are expected.
+- **2026-11-06 standalone**: MEGA65 (slot 0) and C64 (slot 1) in flash. A cold power cycle via
+  the smart plug boots the MEGA65 menu system without the PC; Ctrl+Alt+F12 switches to the C64
+  and back; Ctrl+Alt+Del resets. MEGA65 build WNS +0.988 ns, C64 build WNS +0.187 ns.

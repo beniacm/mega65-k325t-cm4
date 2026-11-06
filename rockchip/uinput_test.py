@@ -4,6 +4,7 @@ bridge end-to-end without hardware.  Run as root on the Rockchip while m65d is r
     uinput_test.py type 'print 6*7\\n'     type a line on the virtual keyboard
     uinput_test.py fire [seconds]          hold gamepad A (fire) on the virtual pad
     uinput_test.py dpad up|down|left|right [seconds]
+    uinput_test.py keys 29,56,88            hold a key combination (here Ctrl+Alt+F12)
     uinput_test.py mouse <dx> <dy> [steps] [left|right]   move a virtual mouse (PC counts,
                                            dy > 0 = down), optionally click at the end
 The devices appear, m65d picks them up within ~2 s (hot-plug scan), then events flow."""
@@ -73,6 +74,18 @@ def main():
                 tap(kbd, SHIFTED[ch], shift=True)
             else:
                 tap(kbd, CHARS[ch])
+        time.sleep(0.5)
+        fcntl.ioctl(kbd, UI_DEV_DESTROY)
+    elif cmd == "keys":
+        # keys <code,code,...> [hold s]: press in order, hold, release in reverse (combos)
+        kbd = make("m65 virtual keyboard", list(range(1, 128)))
+        time.sleep(3)
+        codes = [int(c) for c in sys.argv[2].split(",")]
+        for c in codes:
+            ev(kbd, EV_KEY, c, 1); time.sleep(0.05)
+        time.sleep(float(sys.argv[3]) if len(sys.argv) > 3 else 0.2)
+        for c in reversed(codes):
+            ev(kbd, EV_KEY, c, 0); time.sleep(0.05)
         time.sleep(0.5)
         fcntl.ioctl(kbd, UI_DEV_DESTROY)
     elif cmd == "mouse":
