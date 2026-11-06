@@ -175,6 +175,12 @@ BTN_FIRE = set(range(0x120, 0x12c)) | {0x130, 0x131, 0x132, 0x133, 0x134, 0x135,
 BTN_SELECT, BTN_START, BTN_MODE = 0x13a, 0x13b, 0x13c
 BTN_DPAD = {0x220: 0, 0x221: 1, 0x222: 2, 0x223: 3}                  # up down left right -> joy bit
 PAD_KEYS = {BTN_START: ["SPACE"], BTN_SELECT: ["RETURN"], BTN_MODE: ["RUNSTOP"]}
+# Generic USB pads that call themselves a "joystick" (e.g. DragonRise 0079:0006 "PC TWIN SHOCK")
+# report buttons 1..12 as BTN_TRIGGER..BTN_BASE6; their usual layout (SDL gamecontrollerdb) has
+# button 9 = Select, 10 = Start.  Applied only to such twin-stick pads (12 buttons, Z/RZ axes),
+# so the base buttons of a real joystick stay fire buttons.
+JOY_SELECT, JOY_START = 0x128, 0x129
+ABS_Z, ABS_RZ = 0x02, 0x05
 
 
 def _bitmap(hexwords):
@@ -189,9 +195,13 @@ def _bitmap(hexwords):
 
 
 class Pad:
-    def __init__(self, fd, port):
+    def __init__(self, fd, port, keys=(), absb=()):
         self.fd = fd
         self.port = port                  # 1 or 2, kept while connected
+        self.remap = {}                   # button code -> PAD_KEYS code
+        if set(range(0x120, 0x12c)) <= set(keys) and not {BTN_SELECT, BTN_START} & set(keys) \
+                and {ABS_Z, ABS_RZ} <= set(absb):
+            self.remap = {JOY_SELECT: BTN_SELECT, JOY_START: BTN_START}
         self.hat = [0, 0]
         self.stick = [0, 0]
         self.dpad = 0
@@ -208,6 +218,7 @@ class Pad:
                 pass
 
     def key(self, code, down):
+        code = self.remap.get(code, code)
         if code in BTN_DPAD:
             bit = 1 << BTN_DPAD[code]
             self.dpad = (self.dpad | bit) if down else (self.dpad & ~bit)
@@ -347,9 +358,9 @@ class InputHub:
             if EV_KEY in ev and {30, 57, 28} <= keys:     # has A, SPACE, ENTER
                 roles.add("kbd")
             if roles:
-                info[handler] = (roles, name)
+                info[handler] = (roles, name, keys, absb)
         self.proc_paths = set(info)       # retried until all are open (node may lag the list)
-        for path, (roles, name) in info.items():
+        for path, (roles, name, keys, absb) in info.items():
             if path in self.paths:
                 continue
             try:
@@ -364,17 +375,27 @@ class InputHub:
                 fcntl.ioctl(fd, EVIOCSCLOCKID, struct.pack("i", CLOCK_MONOTONIC))
             except OSError:
                 pass
-            dev = Dev(fd, path, roles, name, poll_ms(path))
-            if "pad" in roles:
-                used = {p.port for p in self.pads}
-                dev.pad = Pad(fd, 2 if 2 not in used else 1 if 1 not in used else 2)
-            self.devs[fd] = dev
-            self.paths[path] = fd
-            self._resync(dev)
-            self.log("m65input: + %s %s (%s)%s%s" % (
-                "+".join(sorted(roles)), path, name,
-                " poll %gms" % dev.poll if dev.poll else "",
-                " -> port %d" % dev.pad.port if dev.pad else ""))
+            try:
+                self._add(fd, path, roles, name, keys, absb)
+            except Exception as e:        # one odd device must not stop the others
+                self.paths.pop(path, None)
+                self.devs.pop(fd, None)
+                os.close(fd)
+                self.log("m65input: ! %s (%s) not used: %r" % (path, name, e))
+
+    def _add(self, fd, path, roles, name, keys, absb):
+        dev = Dev(fd, path, roles, name, poll_ms(path))
+        if "pad" in roles:
+            used = {p.port for p in self.pads}
+            dev.pad = Pad(fd, 2 if 2 not in used else 1 if 1 not in used else 2, keys, absb)
+        self.devs[fd] = dev
+        self.paths[path] = fd
+        self._resync(dev)
+        self.log("m65input: + %s %s (%s)%s%s%s" % (
+            "+".join(sorted(roles)), path, name,
+            " poll %gms" % dev.poll if dev.poll else "",
+            " -> port %d" % dev.pad.port if dev.pad else "",
+            " (buttons 9/10 = Select/Start)" if dev.pad and dev.pad.remap else ""))
 
     def _drop(self, fd):
         dev = self.devs.pop(fd)
@@ -402,6 +423,9 @@ class InputHub:
         return list(self.devs) + ([self.watch] if self.watch is not None else [])
 
     def describe(self):
+        for d in self.devs.values():
+            if d.poll is None:            # sysfs may lag the event node at plug-in: look again
+                d.poll = poll_ms(d.path)
         return " ".join("%s:%s%s%s" % ("+".join(sorted(d.roles)), d.name.replace(" ", "_"),
                                        "@%gms" % d.poll if d.poll else "",
                                        "@port%d" % d.pad.port if d.pad else "")

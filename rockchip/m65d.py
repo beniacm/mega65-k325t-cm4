@@ -29,6 +29,7 @@ Control: TCP port 4511, one text command per line, reply "ok ..."/"err ...":
     mouse off                  no mouse (POTs read $FF)
     pots <p1x> <p1y> <p2x> <p2y>   raw SID POT values in hex (paddles); "pots off" = back to mouse
     restore 0|1  capslock 0|1  sd emu|phys
+    inputs                     live USB input state: joystick bits per port, POTs, keys, devices
     joyswap                    swap joystick ports 1 <-> 2 (pads and mouse; USB keyboard: Ctrl+Alt+J)
     latency [reset]            USB input event (kernel timestamp) -> INPUT register written:
                                p50/p90/p99/max per device kind, last 4000 updates
@@ -43,7 +44,6 @@ import sys
 import time
 import traceback
 
-import spidev
 
 import m65input
 
@@ -85,6 +85,7 @@ def key_combo(name):
 # ---------------------------------------------------------------- SPI bridge
 class Bridge:
     def __init__(self, hz):
+        import spidev                     # here, so the PC can import m65d (KEYPOS, tests)
         self.spi = spidev.SpiDev()
         self.spi.open(3, 0)
         self.spi.mode = 0
@@ -136,7 +137,10 @@ class Daemon:
         self.resend_at = 0.0    # after a core switch: send the input state to the new core
         self.ctl_clients = {}
         self.inp = m65input.InputHub(KEYPOS, log=lambda m: print(m, flush=True))
-        self.inp.maintain(time.monotonic())
+        try:
+            self.inp.maintain(time.monotonic())
+        except Exception:                 # the main loop retries
+            traceback.print_exc()
         self.sent = None
         self.lat = []           # (device kind, event -> SPI write seconds), last 4000
         self.ctl_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -288,6 +292,18 @@ class Daemon:
             return "ok " + self.temps()
         if cmd == "latency":
             return self.latency(rest.strip())
+        if cmd == "inputs":
+            # live view of the USB input state, e.g. while pressing pad buttons
+            j1, j2 = self.inp.joysticks()
+            bits = lambda j: "".join(n if j >> i & 1 else "-" for i, n in enumerate("UDLRF"))
+            pads = " ".join("pad@port%d[hat=%d,%d stick=%d,%d dpad=%x fire=%s keys=%s]" % (
+                p.port, p.hat[0], p.hat[1], p.stick[0], p.stick[1], p.dpad,
+                ",".join("%x" % c for c in sorted(p.fire)) or "-",
+                ",".join("%x" % c for c in sorted(p.keys)) or "-") for p in self.inp.pads)
+            return "ok port1=%s port2=%s %s pots=%s keys=%s ports=%s devices=%s" % (
+                bits(j1), bits(j2), pads, ",".join("%02x" % p for p in self.inp.pots()),
+                ",".join(str(k) for k in sorted(self.inp.kbd_keys)) or "-",
+                "swapped" if self.inp.joy_swap else "normal", self.inp.describe())
         if cmd == "joyswap":
             self.inp.swap_ports()
             self.input_dirty = True

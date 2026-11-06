@@ -6,6 +6,7 @@
     ports      pad 1 -> port 2, pad 2 -> port 1; unplug pad 1: pad 2 stays on port 1; Ctrl+Alt+J swaps
     mouse      a fast fling: the POT value never jumps more than 31 counts per 20 ms
     plugheld   a key held while the keyboard is plugged in is seen at once
+    twinshock  generic twin-stick 'joystick' pad: button 10 = Start (SPACE), 9 = Select
 Prints PASS/FAIL per test; exit status 1 if any failed."""
 import fcntl, os, signal, socket, subprocess, sys, time
 import uinput_test as U
@@ -122,6 +123,7 @@ def port_of(name):
 
 
 def t_ports():
+    real_pads = ctl("status").count("@port")
     p1 = U.make("m65 st padA", [0x130, 0x131], abs_axes=(U.ABS_HAT0X, U.ABS_HAT0Y))
     if not wait_inputs("m65_st_padA"):
         destroy(p1)
@@ -132,16 +134,18 @@ def t_ports():
         if not wait_inputs("m65_st_padB") or not wait_inputs("m65_st_swapkbd"):
             return "pad B / keyboard not picked up"
         a, b = port_of("m65_st_padA"), port_of("m65_st_padB")
-        if (a, b) != (2, 1):
+        if real_pads == 0 and (a, b) != (2, 1):
             return "ports A=%s B=%s, expected 2, 1" % (a, b)
+        if real_pads == 1 and (a, b) != (1, 2):     # the real pad holds port 2
+            return "ports A=%s B=%s with a real pad on port 2, expected 1, 2 (shared)" % (a, b)
         U.ev(p2, U.EV_KEY, 0x130, 1)             # pad B fire -> port 1 (ja)
         time.sleep(0.05)
         destroy(p1)
         p1 = None
         if not wait_inputs("m65_st_padA", present=False):
             return "pad A not dropped"
-        if port_of("m65_st_padB") != 1:
-            return "pad B moved to port %s after pad A was unplugged" % port_of("m65_st_padB")
+        if port_of("m65_st_padB") != b:
+            return "pad B moved from port %s to %s after pad A was unplugged" % (b, port_of("m65_st_padB"))
         U.ev(p2, U.EV_KEY, 0x130, 0)
         for k, v in ((KEY_LEFTCTRL, 1), (KEY_LEFTALT, 1), (KEY_J, 1), (KEY_J, 0), (KEY_LEFTALT, 0),
                      (KEY_LEFTCTRL, 0)):
@@ -207,8 +211,37 @@ def t_plugheld():
         destroy(fd)
 
 
+def t_twinshock():
+    """generic 'joystick' twin-stick pad: button 10 = Start = SPACE, button 1 = fire only"""
+    fd = U.make("m65 st twin", list(range(0x120, 0x12c)),
+                abs_axes=(0x00, 0x01, 0x02, 0x05, U.ABS_HAT0X, U.ABS_HAT0Y))
+    try:
+        if not wait_inputs("m65_st_twin"):
+            return "not picked up"
+        sp = KEYPOS["SPACE"]
+        U.ev(fd, U.EV_KEY, 0x129, 1)
+        time.sleep(0.05)
+        cols = [int(v, 16) for v in ctl("keylog").split("matrix")[1].split()]
+        st = ctl("inputs")
+        U.ev(fd, U.EV_KEY, 0x129, 0)
+        time.sleep(0.05)
+        if not cols[sp[0]] >> sp[1] & 1:
+            return "button 10 (Start) did not give SPACE"
+        if "fire=129" in st:
+            return "button 10 still counted as fire"
+        U.ev(fd, U.EV_KEY, 0x120, 1)
+        time.sleep(0.05)
+        st = ctl("inputs")
+        U.ev(fd, U.EV_KEY, 0x120, 0)
+        if "fire=120" not in st:
+            return "button 1 not fire"
+        return None
+    finally:
+        destroy(fd)
+
+
 TESTS = {"combo": t_combo, "dropped": t_dropped, "ports": t_ports, "mouse": t_mouse,
-         "plugheld": t_plugheld}
+         "plugheld": t_plugheld, "twinshock": t_twinshock}
 
 
 def main():

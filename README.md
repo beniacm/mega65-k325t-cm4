@@ -144,8 +144,16 @@ no `hid-sony` (DS3) and no `hid-nintendo` (Switch Pro) — such pads are not see
 Gamepads: **first pad → joystick port 2** (most C64 games), second → port 1; a pad keeps its port
 while connected (unplugging pad 1 does not move pad 2). **Ctrl+Alt+J swaps ports 1 ↔ 2** (pads and
 mouse; also the `joyswap` command). D-pad, hat or left stick (30 % dead zone) give directions;
-A/B/X/Y, shoulders and triggers fire. Start = SPACE, Select = RETURN, Mode/Home = RUN/STOP. The
-optional DS2x2 Pmod on J13 and the `joy` control command are OR'd in as well.
+A/B/X/Y, shoulders and triggers fire. Start = SPACE, Select = RETURN, Mode/Home = RUN/STOP. Generic
+twin-stick pads that report as a "joystick" (12 buttons BTN_TRIGGER..BTN_BASE6, e.g. DragonRise
+0079:0006 "PC TWIN SHOCK") get their usual layout: button 9 = Select, 10 = Start; the other
+buttons fire. The optional DS2x2 Pmod on J13 and the `joy` control command are OR'd in as well.
+
+Tested with real devices (2026-11-06): HP 320K keyboard, HP 320M optical mouse (1351: movement,
+left = fire, right = up), DragonRise twin-shock pad (D-pad as X/Y axes, 8 buttons; its D-pad itself
+reports short diagonals when pressed off-centre, verified in the raw HID reports). All three poll at
+8 ms. `m65ctl.py inputs` shows the live state: joystick bits per port, per-pad hat/stick/buttons,
+POT values, keys down, devices with polling interval and port.
 
 Mouse: Commodore 1351 (proportional, POT X/Y = position mod 64) on port 2, left = fire, right = up.
 A 1351 driver reads the position once per frame and takes a change of more than 31 counts as the
@@ -153,9 +161,10 @@ other direction, which a modern mouse moved fast exceeded (pointer jumping back)
 now move at most 1100 counts/s with a burst of 8 (≤ 30 per PAL frame); normal movement passes at
 once, a fling is queued up to 40 counts and the rest dropped, like a real 1351 at its limit.
 
-Tests: `rockchip/input_selftest.py` (on the Rockchip, virtual devices) checks combo devices,
-`SYN_DROPPED` recovery, port stability + Ctrl+Alt+J, the 1351 rate limit and keys held at plug-in
-(all fail with the previous code, pass now).
+Tests: `rockchip/input_selftest.py` (on the Rockchip, virtual devices; works with real devices
+plugged in) checks combo devices, `SYN_DROPPED` recovery, port stability + Ctrl+Alt+J, the 1351 rate
+limit, keys held at plug-in and the twin-stick Select/Start layout. A device that fails to register
+is logged and skipped; it cannot stop the others.
 
 Test without hardware: `rockchip/uinput_test.py` creates a virtual keyboard or gamepad via
 `/dev/uinput` (run it with a host-side `adb shell` in the background; processes backgrounded
