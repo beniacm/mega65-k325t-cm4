@@ -1,7 +1,7 @@
 [Unit]
 Description=MEGA65 / C64 bridge control: m65d (USB keyboard, gamepads, mouse; control on :4511)
-# m65io (SD card image, serial monitor, Ethernet) is started with it; stop/restart of this unit
-# covers both (m65io.service has PartOf=m65d.service)
+# m65io (SD card image, serial monitor, Ethernet) is started with it (Wants); to stop or restart
+# both use m65d_stop.sh / m65d_restart.sh -- a restart of m65d alone leaves m65io serving
 # no network-online.target: the control port binds 0.0.0.0, and waiting for DHCP delayed the
 # USB keyboard and the boot reset by ~19 s
 Wants=m65io.service

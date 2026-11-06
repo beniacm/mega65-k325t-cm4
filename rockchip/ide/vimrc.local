@@ -1,0 +1,5 @@
+" MEGA65 cross-development (rockchip/ide): colours, filetypes, a status line
+syntax on
+filetype plugin indent on
+set background=dark
+set laststatus=2 ruler showcmd

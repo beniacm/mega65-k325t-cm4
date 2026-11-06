@@ -1,0 +1,7 @@
+#!/bin/sh
+# m65doc <mnemonic> -- 45GS02 (MEGA65 CPU) instruction help; vim's K in *.s files calls it
+DOC=/usr/local/share/m65ide/45gs02.txt
+[ -n "$1" ] || { echo "usage: m65doc <mnemonic>"; exit 1; }
+k=$(echo "$1" | tr a-z A-Z | sed 's/[0-7]$//')       # BBR3 -> BBR
+awk -v k="$k" -F'\t' '$1 == k { p = 1; print; next } p && /^\t/ { print; next } { p = 0 }' "$DOC" | grep . \
+  || echo "m65doc: no entry for '$1' (ca65 directives: https://cc65.github.io/doc/ca65.html)"

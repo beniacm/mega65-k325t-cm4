@@ -1,0 +1,15 @@
+[Unit]
+Description=Linux terminal on the MEGA65 screen (m65term: shell + VT emulator, drawn via the serial monitor)
+After=m65io.service
+
+[Service]
+WorkingDirectory=/root/m65
+ExecStartPre=-/bin/mv -f /root/m65/m65term.log /root/m65/m65term.log.1
+ExecStart=/usr/bin/python3 -u /root/m65/m65term.py
+StandardOutput=append:/root/m65/m65term.log
+StandardError=inherit
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

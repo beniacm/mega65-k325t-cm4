@@ -1,6 +1,7 @@
 [Unit]
 Description=MEGA65 / C64 bridge I/O: m65io (SD card image, serial monitor :4510, Ethernet)
-PartOf=m65d.service
+# no PartOf=m65d.service: systemd propagated m65d's automatic restarts (crash recovery) to m65io,
+# a 1-2 s gap in SD service; m65d_restart.sh / m65d_stop.sh handle both units explicitly
 
 [Service]
 WorkingDirectory=/root/m65

@@ -16,9 +16,18 @@ HERE=$(cd "$(dirname "$0")/.." && pwd)            # .../rockchip
 DEST=/root/m65
 # files deployed to /root/m65 (everything the service and the PC-side tools call)
 FILES="m65d_restart.sh m65d_stop.sh m65_bootreset.py m65io.c m65d.py m65input.py m65flash.py
-       rk_pins.py uinput_test.py input_bench.py input_selftest.py linktest.py usbtest.sh"
-UNITS="m65d.service m65io.service m65-bootreset.service"
-ENABLE="m65d.service m65-bootreset.service"        # m65io.service comes with m65d (Wants)
+       rk_pins.py uinput_test.py input_bench.py input_selftest.py linktest.py usbtest.sh
+       m65term.py m65run"
+UNITS="m65d.service m65io.service m65-bootreset.service m65term.service"
+ENABLE="m65d.service m65-bootreset.service m65term.service"   # m65io.service comes with m65d (Wants)
+# MEGA65 assembler IDE (vim + ca65): repo path under rockchip/ -> installed path
+IDE="ide/vim/syntax/ca65.vim:/usr/share/vim/vimfiles/syntax/ca65.vim
+     ide/vim/ftdetect/ca65.vim:/usr/share/vim/vimfiles/ftdetect/ca65.vim
+     ide/vim/ftplugin/ca65.vim:/usr/share/vim/vimfiles/ftplugin/ca65.vim
+     ide/vimrc.local:/etc/vim/vimrc.local
+     ide/45gs02.txt:/usr/local/share/m65ide/45gs02.txt
+     ide/m65doc:/usr/local/bin/m65doc
+     ide/m65new:/usr/local/bin/m65new"
 # sha256 of the deployed boot image (~/qmtech: rockchip/boot_dtb/boot_sd.img, 24863744 bytes) and
 # of the factory p3 dump (~/qmtech: rockchip/p3_boot_backup.img.xz)
 BOOT_LEN=24863744
@@ -39,6 +48,8 @@ check() {
     echo FACT \$(sha256sum < /dev/block/by-name/boot | cut -d' ' -f1);
     echo SPIDEV \$(ls /dev/spidev3.0 2>/dev/null) \$(python3 -c 'import spidev; print(\"py-ok\")' 2>/dev/null);
     echo GCC \$(command -v gcc);
+    for f in $(for e in $IDE; do printf '%s ' ${e#*:}; done); do echo IDE \$(md5sum < \$f 2>/dev/null | cut -d' ' -f1) \$f; done;
+    echo CA65 \$(ca65 --version 2>&1 | head -1);
     echo CARD \$(stat -c %s $DEST/card.img 2>/dev/null)") || { echo "cannot reach $HOST"; exit 2; }
   for f in $FILES; do
     if echo "$out" | grep -q "^$(md5l "$HERE/$f")  $f\$"; then echo "ok    $DEST/$f"; else echo "DIFF  $DEST/$f"; bad=1; fi
@@ -64,6 +75,13 @@ check() {
   echo "$out" | grep -q "^SPIDEV /dev/spidev3.0 py-ok" && echo "ok    /dev/spidev3.0 + python3 spidev" \
     || { echo "DIFF  spidev missing (config.txt spi3cs1=on applied? reboot after install)"; bad=1; }
   echo "$out" | grep -q "^GCC /" && echo "ok    gcc" || { echo "DIFF  gcc missing (apt install gcc)"; bad=1; }
+  local e
+  for e in $IDE; do
+    echo "$out" | grep -q "^IDE $(md5l "$HERE/${e%%:*}") ${e#*:}\$" && echo "ok    ${e#*:}" \
+      || { echo "DIFF  ${e#*:}"; bad=1; }
+  done
+  echo "$out" | grep -q "^CA65 ca65 V" && echo "ok    $(echo "$out" | sed -n 's/^CA65 //p')" \
+    || echo "WARN  ca65 missing (run deploy/build_tools.sh on the Rockchip)"
   local card; card=$(echo "$out" | awk '/^CARD/{print $2}')
   [ -n "$card" ] && echo "ok    card.img $((card / 1048576)) MB" || { echo "DIFF  $DEST/card.img missing (README: SD card image)"; bad=1; }
   [ $bad = 0 ] && echo "== $HOST matches the repo" || echo "== $HOST differs (see DIFF lines)"
@@ -72,12 +90,13 @@ check() {
 
 install() {
   echo "copying to $HOST:$DEST"
-  tar -C "$HERE" -cf - $FILES $UNITS deploy/config.txt | \
-    rsh "mkdir -p $DEST && tar -C $DEST -xf - && cd $DEST && chmod 644 $(echo $FILES) && rm -f m65io &&
+  tar -C "$HERE" -cf - $FILES $UNITS deploy/config.txt ide | \
+    rsh "mkdir -p $DEST && tar -C $DEST -xf - && cd $DEST && chmod 644 $(echo $FILES) && rm -f /usr/local/bin/m65run && install -m 755 m65run /usr/local/bin/m65run && rm -f m65io &&
          for u in $UNITS; do install -m 644 \$u /etc/systemd/system/\$u && rm \$u || exit 1; done &&
          if ! cmp -s deploy/config.txt /boot/config.txt; then cp /boot/config.txt /boot/config.txt.pre-m65 &&
            cp deploy/config.txt /boot/config.txt && echo 'config.txt replaced (old: /boot/config.txt.pre-m65)'; fi &&
          rm -r deploy && gcc -O2 -Wall -o m65io m65io.c &&
+         for e in $(echo $IDE); do install -D -m \$(case \${e#*:} in /usr/local/bin/*) echo 755;; *) echo 644;; esac) \${e%%:*} \${e#*:} || exit 1; done && rm -r ide &&
          systemctl daemon-reload && systemctl enable $ENABLE" || { echo "install FAILED"; exit 1; }
   echo "installed; m65io built.  Reboot the Rockchip (or: ssh ... sh $DEST/m65d_restart.sh), then: $0 check $HOST"
 }

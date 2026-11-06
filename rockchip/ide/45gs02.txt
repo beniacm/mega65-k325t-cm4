@@ -1,0 +1,124 @@
+ADC	Add memory + carry to A.  Flags N V Z C (decimal mode with D).  Q form: ADCQ.
+AND	A = A AND memory.  Flags N Z.  Q form: ANDQ.
+ASL	Shift left (A or memory), bit 7 -> C.  Flags N Z C.  Q form: ASLQ.
+BCC	Branch if carry clear (8-bit offset).  16-bit offset: LBCC.
+BCS	Branch if carry set.  16-bit offset: LBCS.
+BEQ	Branch if Z set (equal).  16-bit offset: LBEQ.
+BIT	Test A AND memory: Z from the result, N/V from memory bits 7/6.  Q form: BITQ.
+BMI	Branch if N set.  16-bit offset: LBMI.
+BNE	Branch if Z clear (not equal).  16-bit offset: LBNE.
+BPL	Branch if N clear.  16-bit offset: LBPL.
+BRK	Software interrupt (on the MEGA65 usually ends up in the monitor/freezer).
+BVC	Branch if V clear.  16-bit offset: LBVC.
+BVS	Branch if V set.  16-bit offset: LBVS.
+CLC	C = 0.
+CLD	Decimal mode off.
+CLI	Enable IRQs.
+CLV	V = 0.
+CMP	Compare A with memory (A - M): N Z C.  Q form: CMPQ.
+CPX	Compare X with memory.
+CPY	Compare Y with memory.
+DEC	Decrement memory or A (DEC A).  Flags N Z.
+DEX	X = X - 1.
+DEY	Y = Y - 1.
+EOR	A = A XOR memory.  Q form: EORQ.
+INC	Increment memory or A (INC A).  Flags N Z.
+INX	X = X + 1.
+INY	Y = Y + 1.
+JMP	Jump (absolute, (indirect), (indirect,X)).
+JSR	Call subroutine (absolute, (indirect), (indirect,X)).
+LDA	Load A.  Modes include (zp),Z and (d,SP),Y (stack relative); [zp],Z = 32-bit flat address
+	(NOP prefix, 45GS02).  Q form: LDQ.
+LDX	Load X.
+LDY	Load Y.
+LSR	Shift right (A or memory), bit 0 -> C.  Q form: LSRQ.
+NOP	No operation.  On the 45GS02 also the prefix for 32-bit flat addressing ([zp],Z); EOM is
+	the same opcode ($EA).
+ORA	A = A OR memory.  Q form: ORQ.
+PHA	Push A.
+PHP	Push the processor status.
+PLA	Pull A.
+PLP	Pull the processor status.
+ROL	Rotate left through carry.  Q form: ROLQ.
+ROR	Rotate right through carry.  Q form: RORQ.
+RTI	Return from interrupt.
+RTS	Return from subroutine.  RTN #n (4510): return and drop n more bytes from the stack.
+SBC	Subtract memory and borrow from A.  Q form: SBCQ.
+SEC	C = 1.
+SED	Decimal mode on.
+SEI	Disable IRQs.
+STA	Store A.  Modes include (zp),Z, (d,SP),Y and [zp],Z (flat).  Q form: STQ.
+STX	Store X (also absolute,Y).
+STY	Store Y (also absolute,X).
+TAX	X = A.
+TAY	Y = A.
+TSX	X = stack pointer low byte.
+TXA	A = X.
+TXS	Stack pointer low byte = X.
+TYA	A = Y.
+BRA	Branch always (8-bit offset).  16-bit offset: LBRA.
+PHX	Push X.
+PHY	Push Y.
+PLX	Pull X.
+PLY	Pull Y.
+STZ	4510/45GS02: store the Z REGISTER (not zero as on the 65C02!).  Clear memory with
+	LDZ #0 + STZ, or STA with A = 0.
+TRB	Test and reset bits: memory = memory AND NOT A, Z from A AND memory.
+TSB	Test and set bits: memory = memory OR A, Z from A AND memory.
+BBR	BBR0..BBR7 zp,label: branch if bit n of the zero-page byte is 0.
+BBS	BBS0..BBS7 zp,label: branch if bit n of the zero-page byte is 1.
+RMB	RMB0..RMB7 zp: clear bit n of the zero-page byte.
+SMB	SMB0..SMB7 zp: set bit n of the zero-page byte.
+LDZ	Load the Z register (4510).  Z is the index of the (zp),Z modes; also Q bits 31..24.
+CPZ	Compare Z with memory.
+INZ	Z = Z + 1.
+DEZ	Z = Z - 1.
+PHZ	Push Z.
+PLZ	Pull Z.
+TAZ	Z = A.
+TZA	A = Z.
+TAB	Base page register B = A: the zero page moves to page B (zp addresses become $BBxx).
+TBA	A = B.
+TSY	Y = stack pointer high byte.
+TYS	Stack pointer high byte = Y.
+CLE	E = 0: 16-bit stack (SPH:SPL) instead of the 6502's page 1 stack.
+SEE	E = 1: 8-bit stack in page 1 (6502 behaviour, the default).
+NEG	A = 0 - A (two's complement).  NEG NEG is the prefix of the 32-bit Q instructions.
+ASR	Arithmetic shift right (bit 7 kept), A or memory.  Q form: ASRQ.
+ASW	Arithmetic shift left of a 16-bit word in memory (absolute).
+ROW	Rotate left a 16-bit word in memory (absolute) through carry.
+DEW	Decrement a 16-bit word in zero page.
+INW	Increment a 16-bit word in zero page.
+PHW	Push a 16-bit word: PHW #imm16 or PHW absolute.
+BSR	Branch to subroutine, 16-bit relative offset (position-independent JSR).
+MAP	Set the memory mapper from A X Y Z (offsets for the 8 KB blocks of the 64 KB view; MEGA65:
+	A with X=$0F / Y with Z=$0F select the megabyte instead).  Interrupts stay off until EOM.
+EOM	End of mapping: interrupts allowed again (same opcode as NOP, $EA).
+RTN	RTN #n: return from subroutine and drop n bytes of arguments from the stack.
+LBCC	BCC with 16-bit offset.
+LBCS	BCS with 16-bit offset.
+LBEQ	BEQ with 16-bit offset.
+LBMI	BMI with 16-bit offset.
+LBNE	BNE with 16-bit offset.
+LBPL	BPL with 16-bit offset.
+LBRA	Branch always, 16-bit offset.
+LBVC	BVC with 16-bit offset.
+LBVS	BVS with 16-bit offset.
+LDQ	45GS02: load Q (32 bits: A = bits 7..0, X 15..8, Y 23..16, Z 31..24) from 4 bytes.
+	Forms as LDA: zp, abs, (zp),Z and [zp],Z (32-bit flat pointer).  Encoded as NEG NEG + LDA.
+STQ	45GS02: store Q (A X Y Z) as 4 bytes, little endian.
+ADCQ	45GS02: Q = Q + memory(32 bit) + C.
+SBCQ	45GS02: Q = Q - memory(32 bit) - borrow.
+ANDQ	45GS02: Q = Q AND memory(32 bit).
+ORQ	45GS02: Q = Q OR memory(32 bit).
+EORQ	45GS02: Q = Q XOR memory(32 bit).
+CMPQ	45GS02: compare Q with a 32-bit memory value (flags as CMP).  ca65 also: CPQ.
+CPQ	45GS02: = CMPQ.
+BITQ	45GS02: BIT on 32 bits.
+ASLQ	45GS02: shift Q (or 32-bit memory) left.
+LSRQ	45GS02: shift Q (or 32-bit memory) right.
+ROLQ	45GS02: rotate Q left through carry.
+RORQ	45GS02: rotate Q right through carry.
+ASRQ	45GS02: arithmetic shift right of Q.
+INQ	45GS02: Q = Q + 1 (or a 32-bit value in memory).
+DEQ	45GS02: Q = Q - 1 (or a 32-bit value in memory).

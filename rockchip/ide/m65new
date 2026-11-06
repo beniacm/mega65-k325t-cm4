@@ -1,0 +1,64 @@
+#!/bin/sh
+# m65new <name> -- new MEGA65 assembler project (ca65): main.s, mega65.cfg, Makefile
+#   cd <name>; vi main.s    F5 = build + run on the MEGA65, F7 = build, K = instruction help
+set -e
+[ -n "$1" ] || { echo "usage: m65new <name>"; exit 1; }
+[ -e "$1" ] && { echo "m65new: $1 exists"; exit 1; }
+mkdir "$1"; cd "$1"
+cat > main.s <<'S'
+; main.s -- MEGA65 program (BASIC 65 mode).  F5 in vim: build and run, Ctrl+Alt+T: back here
+        .setcpu "45GS02"
+
+        .segment "LOADADDR"
+        .word   $2001                   ; PRG load address
+
+        .segment "CODE"
+        .word   @next, 10               ; BASIC 65 stub: 10 SYS 8205
+        .byte   $9e, "8205", 0
+@next:  .word   0
+start:                                  ; = $200d = 8205: keep the stub above unchanged
+        ldx     #0
+@print: lda     msg,x
+        beq     @done
+        jsr     $ffd2                   ; CHROUT
+        inx
+        bne     @print
+@done:  inc     $d020                   ; border colour: it ran
+        rts
+
+msg:    .byte   13, "HELLO MEGA65", 13, 0
+S
+cat > mega65.cfg <<'S'
+# ld65 config: MEGA65 PRG for BASIC 65 mode (load address $2001)
+MEMORY {
+    LOADADDR: start = $1FFF, size = 2,     file = %O;
+    MAIN:     start = $2001, size = $CFFF, file = %O;
+}
+SEGMENTS {
+    LOADADDR: load = LOADADDR, type = ro;
+    CODE:     load = MAIN,     type = rw;
+    RODATA:   load = MAIN,     type = ro, optional = yes;
+    DATA:     load = MAIN,     type = rw, optional = yes;
+    BSS:      load = MAIN,     type = bss, optional = yes, define = yes;
+}
+S
+cat > Makefile <<'S'
+# make: main.prg (+ main.lst listing, main.lbl labels)   make run: on the MEGA65   make clean
+SRC  = $(wildcard *.s)
+OBJ  = $(SRC:.s=.o)
+
+main.prg: $(OBJ) mega65.cfg
+	ld65 -C mega65.cfg -Ln main.lbl -o $@ $(OBJ)
+
+%.o: %.s
+	ca65 -g -l $(<:.s=.lst) -o $@ $<
+
+run: main.prg
+	m65run main.prg
+
+clean:
+	rm -f *.o *.lst main.lbl main.prg
+
+.PHONY: run clean
+S
+echo "m65new: $1 created -- cd $1 && vi main.s  (F5 = build + run on the MEGA65)"
