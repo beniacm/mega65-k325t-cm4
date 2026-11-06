@@ -4,6 +4,16 @@ Upstream: `mega65-core/` = github.com/MEGA65/mega65-core (`development`), local
 branch **`qmtech-k325t-cm4`** adds a new target for this board (separate repo, not tracked here;
 this repo holds the harness: scripts, Rockchip daemon, simulation).
 
+Repositories (private, github.com/beniacm):
+
+| repo | content | branch |
+|---|---|---|
+| `mega65-k325t-cm4` | this harness: scripts, Rockchip daemon/tools, simulation, docs | `main` |
+| `mega65-core-k325t-cm4` | MEGA65 core with the `qmtech-k325t-cm4` target (upstream MEGA65/mega65-core) | `qmtech-k325t-cm4` |
+| `c64mega65-k325t-cm4` | C64MEGA65 V5.2 port, `K325T/` (upstream MJoergen/C64MEGA65) | `qmtech-k325t-cm4` |
+
+Clone them side by side as `mega65-core/` and `c64mega65/` inside this directory (both git-ignored here).
+
 > The upstream `qmtech-k325t` target is for a *different* QMTech K325T carrier
 > (VGA + other Pmods). Same FPGA, clock (F22), LEDs and QSPI pins, but about 25 of its
 > outputs (VGA, `jc` Pmod, PWM audio) land on this board's **CM4 GPIO bus**:
@@ -331,3 +341,5 @@ runs (16 MB read 15 s, a 6 MB core about 1 min including verify):
 - **2026-11-06 standalone**: MEGA65 (slot 0) and C64 (slot 1) in flash. A cold power cycle via
   the smart plug boots the MEGA65 menu system without the PC; Ctrl+Alt+F12 switches to the C64
   and back; Ctrl+Alt+Del resets. MEGA65 build WNS +0.988 ns, C64 build WNS +0.187 ns.
+- **2026-11-06 games / sound**: Roguecraft DX (MEGA65) and Eye of the Beholder / Metal Warrior
+  (C64) play with USB keyboard and gamepad; MEGA65 HDMI sound confirmed by ear.
