@@ -11,6 +11,7 @@ Repositories (private, github.com/beniacm):
 | `mega65-k325t-cm4` | this harness: scripts, Rockchip daemon/tools, simulation, docs | `main` |
 | `mega65-core-k325t-cm4` | MEGA65 core with the `qmtech-k325t-cm4` target (upstream MEGA65/mega65-core) | `qmtech-k325t-cm4` |
 | `c64mega65-k325t-cm4` | C64MEGA65 V5.2 port, `K325T/` (upstream MJoergen/C64MEGA65) | `qmtech-k325t-cm4` |
+| `qmtech-k325t-cm4-lab` | `~/qmtech`: carrier bring-up, pin maps, **Rockchip boot image/DTB** (`rockchip/boot_dtb/`), `scripts/power.sh` | `bt1120-hdmi` |
 
 Clone them side by side as `mega65-core/` and `c64mega65/` inside this directory (both git-ignored here).
 
@@ -149,6 +150,7 @@ rockchip/m65d_restart.sh, rockchip/m65d_stop.sh, rockchip/rk_pins.py
 rockchip/m65input.py    # USB keyboard/gamepad/1351-mouse bridge (imported by m65d.py); uinput_test.py = virtual devices
 rockchip/m65flash.py    # configuration flash: id | backup | write <slot> <bit> | verify | boot <slot>
 rockchip/m65d.service   # systemd unit (enabled): m65io + m65d at boot, then m65_bootreset.py
+rockchip/deploy/        # setup_rockchip.sh check|install + the board's /boot/config.txt
 scripts/c64_run.sh      # C64 core: load, mount k325t.d64, LOAD+RUN a program, capture
 scripts/mkd64.py        # BASIC V2 text / PRG files -> D64;  scripts/crt_banksum.py: expected CRT bank sums
 # m65d ignores any status without the bridge magic: while the FPGA is reprogrammed, MISO floats
@@ -318,6 +320,36 @@ runs (16 MB read 15 s, a 6 MB core about 1 min including verify):
 - The original flash content is backed up in `flashbackup/flash_backup_20261106.bin` (git-ignored).
 - Core switching: MEGA65 → C64 through the serial monitor (`$D6C8..$D6CB` = address >> 8,
   `$D6CF`←`$42`); C64 → MEGA65 through bridge command `60` (`rk_iprog`, own ICAPE2).
+
+## Rebuilding the Rockchip from scratch
+
+Everything the Luckfox Core3566 needs beyond its stock image; `rockchip/deploy/setup_rockchip.sh
+check` compares a board with this list (read-only) and passed on the current board (2026-11-06).
+
+1. **Base OS**: the stock Luckfox Core3566 Debian 10 (buster) eMMC image (rootfs of 2023-09-13,
+   vendor kernel 4.19.232, hostname `linaro-alip`, login `linaro`/`linaro`, passwordless sudo).
+   It already has python3 `spidev` 3.6, gcc and python3-dev; nothing else is installed for this
+   project (`dosfstools` came with the qmtech SD work, not needed here).
+2. **Boot partition (p3)**: `boot_sd.img` from the `qmtech-k325t-cm4-lab` repo
+   (`rockchip/boot_dtb/boot_sd.img.xz`, raw sha256 `a34f418c…`; flash recipe in its README): the
+   stock DTB plus the BT1120 video and sdmmc2 edits of the earlier bring-up. This deployment does not
+   use either, but it is the only boot image it was tested on; `rk_pins.py` gives the three CM4
+   pads the bitstreams use back from the BT1120 pinmux. With the factory image (also in that repo)
+   it should work in principle, untested.
+3. **Access**: DHCP address `192.168.1.143` (keep it reserved in the router); install the PC's SSH key
+   for `root` (`ssh-copy-id linaro@…`, then `sudo cp ~linaro/.ssh/authorized_keys /root/.ssh/`).
+   `~/.ssh/config` aliases `rock` / `rock-root` and the smart-plug script `scripts/power.sh` (with
+   its git-ignored `.rock_pass`) live in `~/qmtech` (`rockchip-board.md`).
+4. **This repo's files**: `rockchip/deploy/setup_rockchip.sh install` copies the scripts and
+   `m65io.c` to `/root/m65`, builds `m65io`, installs `/boot/config.txt` (`deploy/config.txt`:
+   `spi3cs1=on` enables SPI3 → `/dev/spidev3.0`, the rest switches stock overlays off; the old file is
+   kept as `config.txt.pre-m65`), installs and enables `m65d.service` (mode 644). Then reboot.
+5. **SD card**: create `/root/m65/card.img` as in "SD card and ROM" above (format with HYPPO, then
+   `scripts/sd_populate.sh`), add `/c64` for the C64 core and the games. Not in git (copyrighted
+   ROMs and games); back it up separately.
+6. **FPGA flash**: slot 0 / slot 1 with `m65flash.py write` ("Standalone" above). The original flash
+   contents are in `flashbackup/` (git-ignored, also on the board in `/root/m65/`).
+7. `rockchip/deploy/setup_rockchip.sh check` → `== root@192.168.1.143 matches the repo`.
 
 ## Build status / hardware results
 
