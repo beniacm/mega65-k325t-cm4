@@ -47,6 +47,7 @@ architecture sim of tb_rk_sd is
   signal col_idx : integer range 0 to 15 := 0;
   signal joya, joyb : std_logic_vector(4 downto 0);
   signal ctrl : std_logic_vector(7 downto 0);
+  signal pots : std_logic_vector(31 downto 0);
 
   type bytes_t is array (natural range <>) of std_logic_vector(7 downto 0);
   signal served, written : integer := 0;
@@ -89,7 +90,7 @@ begin
               wbuf_we => wbwe, wbuf_addr => wba, wbuf_data => wbd,
               mon_rx => mon_rx, mon_tx => mon_tx,
               matrix_col_idx => col_idx, matrix_col => col, joya => joya, joyb => joyb,
-              ctrl => ctrl, spi_active => open);
+              ctrl => ctrl, pots => pots, spi_active => open);
 
   -- Model Rockchip: SPI master + sector server + UART checks
   rk : process
@@ -137,6 +138,15 @@ begin
     end loop;
     wait for TSPI; scs <= '1'; wait for 4*TSPI;
     assert joya = "10001" and joyb = "00010" report "INPUT joy FAIL" severity failure;
+    assert pots = x"FFFFFFFF" report "pots not \$FF after a 13-byte INPUT" severity failure;
+    -- 17-byte INPUT: + pot1 x/y, pot2 x/y
+    scs <= '0'; wait for TSPI;
+    xfer(x"30", b); xfer(x"00", b); xfer(x"11", b); xfer(x"02", b);
+    for i in 0 to 8 loop xfer(x"00", b); end loop;
+    xfer(x"12", b); xfer(x"34", b); xfer(x"56", b); xfer(x"78", b);
+    wait for TSPI; scs <= '1'; wait for 4*TSPI;
+    assert pots = x"12345678" report "INPUT pots FAIL" severity failure;
+    report "INPUT pots ok";
 
     -- UART_PUT one byte to the monitor
     scs <= '0'; wait for TSPI; xfer(x"20", b); xfer(x"A5", b); wait for TSPI; scs <= '1'; wait for 4*TSPI;

@@ -23,6 +23,9 @@ Control: TCP port 4511, one text command per line, reply "ok ..."/"err ...":
     key <NAME> [ms]            tap one key (RETURN, SPACE, F1, RUNSTOP, ...)
     keys <c0> .. <c8>          raw matrix state, 9 hex bytes (bit = row, 1 = down)
     joy <a> <b>                joystick bits (b0 up b1 down b2 left b3 right b4 fire)
+    mouse <dx> <dy> [btn]      move the 1351 mouse on port 2 (counts, dy>0 = up; btn b0 L b1 R)
+    mouse off                  no mouse (POTs read $FF)
+    pots <p1x> <p1y> <p2x> <p2y>   raw SID POT values in hex (paddles); "pots off" = back to mouse
     restore 0|1  capslock 0|1  sd emu|phys
 Run as root (spidev3.0 is root-only).
 """
@@ -90,8 +93,10 @@ class Bridge:
             "sdcmds": r[13], "lastcmd": r[14], "ctrl": r[15],
         }
 
-    def set_input(self, ctrl, ja, jb, cols):
-        self.spi.xfer2([0x30, ctrl & 0xFF, ja & 0x1F, jb & 0x1F] + [c & 0xFF for c in cols])
+    def set_input(self, ctrl, ja, jb, cols, pots=(0xFF, 0xFF, 0xFF, 0xFF)):
+        # bytes 13..16 = pot1 x, pot1 y, pot2 x, pot2 y (SID values; older bitstreams ignore them)
+        self.spi.xfer2([0x30, ctrl & 0xFF, ja & 0x1F, jb & 0x1F] + [c & 0xFF for c in cols]
+                       + [p & 0xFF for p in pots])
 
 
 # ---------------------------------------------------------------- daemon
@@ -106,6 +111,7 @@ class Daemon:
         self.ja = self.jb = 0
         self.cols = [0] * 9
         self.input_dirty = True
+        self.pots_override = None
         self.keyq = []          # list of (duration s, cols)
         self.key_until = 0.0
         self.reset_until = 0.0
@@ -126,9 +132,10 @@ class Daemon:
             pcols = self.inp.matrix()
             pj1, pj2 = self.inp.joysticks()
             state = (self.ctrl | self.inp.ctrl_bits(), self.ja | pj1, self.jb | pj2,
-                     tuple(a | b for a, b in zip(self.cols, pcols)))
+                     tuple(a | b for a, b in zip(self.cols, pcols)),
+                     self.pots_override or self.inp.pots())
             if state != self.sent:
-                self.br.set_input(state[0], state[1], state[2], list(state[3]))
+                self.br.set_input(state[0], state[1], state[2], list(state[3]), state[4])
                 self.sent = state
             self.input_dirty = False
 
@@ -225,6 +232,23 @@ class Daemon:
             self.ja, self.jb = int(a[0], 0), int(a[1], 0)
             self.input_dirty = True
             return "ok"
+        if cmd == "pots":
+            # pots <p1x> <p1y> <p2x> <p2y> (hex SID values) overrides mouse/paddles; "pots off"
+            self.pots_override = None if a and a[0] == "off" else tuple(int(v, 16) for v in a[:4])
+            self.input_dirty = True
+            return "ok"
+        if cmd == "mouse":
+            # mouse <dx> <dy> [buttons]: 1351 counts (dy > 0 = up), buttons b0 left b1 right;
+            # "mouse off" = no mouse (pots read $FF again)
+            if a and a[0] == "off":
+                self.inp.mx = self.inp.my = 0.0
+                self.inp.script_buttons = 0
+            else:
+                self.inp.move_mouse(int(a[0]), int(a[1]))
+                if len(a) > 2:
+                    self.inp.script_buttons = int(a[2], 0)
+            self.input_dirty = True
+            return "ok pots %s" % " ".join("%02x" % p for p in self.inp.pots())
         if cmd == "keys":
             self.cols = [int(v, 16) for v in a[:9]] + [0] * (9 - len(a[:9]))
             self.input_dirty = True

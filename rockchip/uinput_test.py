@@ -4,10 +4,15 @@ bridge end-to-end without hardware.  Run as root on the Rockchip while m65d is r
     uinput_test.py type 'print 6*7\\n'     type a line on the virtual keyboard
     uinput_test.py fire [seconds]          hold gamepad A (fire) on the virtual pad
     uinput_test.py dpad up|down|left|right [seconds]
+    uinput_test.py mouse <dx> <dy> [steps] [left|right]   move a virtual mouse (PC counts,
+                                           dy > 0 = down), optionally click at the end
 The devices appear, m65d picks them up within ~2 s (hot-plug scan), then events flow."""
 import fcntl, os, struct, sys, time
 
 UI_SET_EVBIT, UI_SET_KEYBIT, UI_SET_ABSBIT = 0x40045564, 0x40045565, 0x40045567
+UI_SET_RELBIT = 0x40045566
+EV_REL, REL_X, REL_Y = 2, 0, 1
+BTN_LEFT, BTN_RIGHT = 0x110, 0x111
 UI_DEV_CREATE, UI_DEV_DESTROY = 0x5501, 0x5502
 EV_SYN, EV_KEY, EV_ABS = 0, 1, 3
 ABS_HAT0X, ABS_HAT0Y = 0x10, 0x11
@@ -20,11 +25,15 @@ SHIFTED = {"*": 9, '"': 3, "!": 2, "(": 9, ")": 10}      # C64 positional: SHIFT
 KP_ASTERISK = 55
 
 
-def make(name, keys, abs_axes=()):
+def make(name, keys, abs_axes=(), rel_axes=()):
     fd = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
     fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY)
     for k in keys:
         fcntl.ioctl(fd, UI_SET_KEYBIT, k)
+    if rel_axes:
+        fcntl.ioctl(fd, UI_SET_EVBIT, EV_REL)
+        for r in rel_axes:
+            fcntl.ioctl(fd, UI_SET_RELBIT, r)
     absmin, absmax = [0] * 64, [0] * 64
     if abs_axes:
         fcntl.ioctl(fd, UI_SET_EVBIT, EV_ABS)
@@ -66,6 +75,21 @@ def main():
                 tap(kbd, CHARS[ch])
         time.sleep(0.5)
         fcntl.ioctl(kbd, UI_DEV_DESTROY)
+    elif cmd == "mouse":
+        m = make("m65 virtual mouse", [BTN_LEFT, BTN_RIGHT], rel_axes=(REL_X, REL_Y))
+        time.sleep(3)
+        dx, dy = int(sys.argv[2]), int(sys.argv[3])
+        steps = int(sys.argv[4]) if len(sys.argv) > 4 else 20
+        for i in range(steps):
+            ev(m, EV_REL, REL_X, dx // steps)
+            ev(m, EV_REL, REL_Y, dy // steps)
+            time.sleep(0.02)
+        if len(sys.argv) > 5:
+            b = BTN_LEFT if sys.argv[5] == "left" else BTN_RIGHT
+            time.sleep(0.2)
+            ev(m, EV_KEY, b, 1); time.sleep(0.15); ev(m, EV_KEY, b, 0)
+        time.sleep(1)
+        fcntl.ioctl(m, UI_DEV_DESTROY)
     else:
         pad = make("m65 virtual gamepad", list(range(0x130, 0x13f)), (ABS_HAT0X, ABS_HAT0Y))
         time.sleep(3)

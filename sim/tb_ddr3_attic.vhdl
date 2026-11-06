@@ -64,9 +64,11 @@ begin
     variable wdat : std_logic_vector(127 downto 0);
     variable wmask : std_logic_vector(15 downto 0);
     variable w : std_logic_vector(127 downto 0);
+    variable cyc, wcmd_cyc : integer := 0;
   begin
     wait until rising_edge(ui_clk);
     lfsr := lfsr(14 downto 0) & (lfsr(15) xor lfsr(13) xor lfsr(12) xor lfsr(10));
+    cyc := cyc + 1;
     -- app_rdy / app_wdf_rdy for THIS cycle (decided last cycle -> registered like MIG)
     if app_en = '1' and app_rdy = '1' then
       assert app_addr(2 downto 0) = "000" report "app_addr not word aligned" severity failure;
@@ -75,10 +77,14 @@ begin
         rd_q := cmd_addr; rd_cnt := 20;
       else
         pend_cmd := true;
+        wcmd_cyc := cyc;
       end if;
     end if;
     if app_wdf_wren = '1' and app_wdf_rdy = '1' then
       assert app_wdf_end = '1' report "wdf without end" severity failure;
+      -- UG586: write data at most two cycles after its command
+      assert not pend_cmd or cyc - wcmd_cyc <= 2
+        report "MIG rule: write data " & integer'image(cyc - wcmd_cyc) & " cycles after its command" severity failure;
       wdat := app_wdf_data; wmask := app_wdf_mask; pend_dat := true;
     end if;
     if pend_cmd and pend_dat then

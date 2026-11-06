@@ -18,6 +18,9 @@ Keyboard: positional mapping like a C64/MEGA65 keyboard on a PC layout
 Gamepad: first pad -> joystick port 2 (most C64 games), second pad -> port 1.
     D-pad / hat / left stick = directions; A/B/X/Y, shoulders, triggers = fire;
     Start = SPACE, Select = RETURN, Mode/Home = RUN/STOP.
+Mouse: Commodore 1351 in proportional mode on port 2 (all mice summed): the SID POTX/POTY
+    values carry the position mod 64 (bits 6..1), left button = fire, right button = up.
+    MOUSE_SCALE divides PC mouse counts (modern mice report far more counts than a 1351).
 """
 import errno
 import fcntl
@@ -25,7 +28,10 @@ import glob
 import os
 import struct
 
-EV_SYN, EV_KEY, EV_ABS = 0, 1, 3
+EV_SYN, EV_KEY, EV_REL, EV_ABS = 0, 1, 2, 3
+REL_X, REL_Y = 0x00, 0x01
+BTN_LEFT, BTN_RIGHT, BTN_MIDDLE = 0x110, 0x111, 0x112
+MOUSE_SCALE = 2.0                         # PC counts per 1351 count
 EVENT_FMT = "llHHi"                      # struct input_event (timeval + type/code/value)
 EVENT_SIZE = struct.calcsize(EVENT_FMT)
 EVIOCGRAB = 0x40044590
@@ -110,6 +116,12 @@ class Pad:
                 | bool(self.fire) << 4)
 
 
+class Mouse:
+    def __init__(self, fd):
+        self.fd = fd
+        self.buttons = set()
+
+
 class InputHub:
     def __init__(self, keypos, log=print):
         self.keypos = keypos               # MEGA65 key name -> (column, row)
@@ -118,6 +130,9 @@ class InputHub:
         self.paths = {}                     # path -> fd
         self.kbd_keys = set()              # pressed linux keycodes (all keyboards)
         self.pads = []                      # Pad objects in connection order
+        self.mice = []                      # Mouse objects
+        self.mx = self.my = 0.0             # 1351 position (all mice summed)
+        self.script_buttons = 0             # scripted mouse buttons (m65d 'mouse' command)
         self.caps = False
         self.restore = False
 
@@ -129,7 +144,7 @@ class InputHub:
         except OSError:
             return
         for b in blocks:
-            name, ev, keys, absb, handler = "", set(), set(), set(), None
+            name, ev, keys, absb, rel, handler = "", set(), set(), set(), set(), None
             for line in b.splitlines():
                 if line.startswith("N: Name="):
                     name = line[8:].strip().strip('"')
@@ -143,9 +158,13 @@ class InputHub:
                     keys = _bitmap(line[7:])
                 elif line.startswith("B: ABS="):
                     absb = _bitmap(line[7:])
+                elif line.startswith("B: REL="):
+                    rel = _bitmap(line[7:])
             if not handler:
                 continue
-            if keys & {0x130, 0x120} or (absb & {ABS_X, ABS_HAT0X} and keys & BTN_FIRE):
+            if {REL_X, REL_Y} <= rel and BTN_LEFT in keys:
+                info[handler] = ("mouse", name)
+            elif keys & {0x130, 0x120} or (absb & {ABS_X, ABS_HAT0X} and keys & BTN_FIRE):
                 info[handler] = ("pad", name)
             elif EV_KEY in ev and {30, 57, 28} <= keys:     # has A, SPACE, ENTER
                 info[handler] = ("kbd", name)
@@ -164,12 +183,15 @@ class InputHub:
             self.paths[path] = fd
             if kind == "pad":
                 self.pads.append(Pad(fd))
+            elif kind == "mouse":
+                self.mice.append(Mouse(fd))
             self.log("m65input: + %s %s (%s)" % (kind, path, name))
 
     def _drop(self, fd):
         path, kind, name = self.devs.pop(fd)
         self.paths.pop(path, None)
         self.pads = [p for p in self.pads if p.fd != fd]
+        self.mice = [m for m in self.mice if m.fd != fd]
         os.close(fd)
         self.kbd_keys.clear()             # don't leave keys stuck after an unplug
         self.log("m65input: - %s %s (%s)" % (kind, path, name))
@@ -195,8 +217,17 @@ class InputHub:
             return True
         kind = self.devs[fd][1]
         pad = next((p for p in self.pads if p.fd == fd), None)
+        mouse = next((m for m in self.mice if m.fd == fd), None)
         for i in range(0, len(data) - EVENT_SIZE + 1, EVENT_SIZE):
             _, _, typ, code, val = struct.unpack_from(EVENT_FMT, data, i)
+            if mouse:
+                if typ == EV_REL and code == REL_X:
+                    self.mx += val / MOUSE_SCALE
+                elif typ == EV_REL and code == REL_Y:
+                    self.my -= val / MOUSE_SCALE          # 1351: moving up counts up
+                elif typ == EV_KEY:
+                    (mouse.buttons.add if val else mouse.buttons.discard)(code)
+                continue
             if typ == EV_KEY:
                 if kind == "kbd":
                     if code == KEY_CAPSLOCK:
@@ -240,9 +271,27 @@ class InputHub:
         return cols
 
     def joysticks(self):
-        """(port1 bits, port2 bits): first pad -> port 2, second -> port 1"""
+        """(port1 bits, port2 bits): first pad -> port 2, second -> port 1; mouse on port 2"""
         j = [p.joy() for p in self.pads] + [0, 0]
-        return j[1], j[0]
+        btn = set().union(*(m.buttons for m in self.mice)) if self.mice else set()
+        mb = (0x10 if BTN_LEFT in btn or self.script_buttons & 1 else 0) | \
+             (0x01 if BTN_RIGHT in btn or self.script_buttons & 2 else 0)
+        return j[1], j[0] | mb
+
+    def move_mouse(self, dx, dy):
+        """scripted movement in 1351 counts (dy > 0 = up)"""
+        self.mx += dx
+        self.my += dy
+
+    def mouse_active(self):
+        return bool(self.mice) or self.mx != 0 or self.my != 0 or self.script_buttons != 0
+
+    def pots(self):
+        """SID values (pot1 x, pot1 y, pot2 x, pot2 y); $FF = nothing connected.
+        1351 proportional mode: bits 6..1 = position mod 64, bit 0 = noise (0 here)."""
+        if not self.mouse_active():
+            return (0xFF, 0xFF, 0xFF, 0xFF)
+        return (0xFF, 0xFF, (int(self.mx) & 63) << 1, (int(self.my) & 63) << 1)
 
     def ctrl_bits(self):
         return (2 if self.restore else 0) | (4 if self.caps else 0)
