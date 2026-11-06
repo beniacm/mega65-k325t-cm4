@@ -15,15 +15,23 @@ Keyboard: positional mapping like a C64/MEGA65 keyboard on a PC layout
     CapsLock = CAPS LOCK (toggles)     cursor keys (up/left are the MEGA65's dedicated keys, INPUT ctrl b4/b5)
     F1/F3/F5/F7/F9/F11 direct, F2/F4/F6/F8/F10/F12 = SHIFT + the odd key
     ` = left-arrow  - = +  = = -  [ = @  ] = *  ; = :  ' = ;  \\ = =   keypad digits/operators
-Gamepad: first pad -> joystick port 2 (most C64 games), second pad -> port 1.
+Gamepad: first pad -> joystick port 2 (most C64 games), second pad -> port 1; a pad keeps its
+    port while connected (unplugging pad 1 does not move pad 2).
     D-pad / hat / left stick = directions; A/B/X/Y, shoulders, triggers = fire;
     Start = SPACE, Select = RETURN, Mode/Home = RUN/STOP.
 System keys (never passed to the core), Ctrl + Alt + ...:
     Del = reset the core     F1 = MEGA65     F2 = C64     F12 = toggle MEGA65 <-> C64
+    J = swap joystick ports 1 <-> 2 (pads and mouse)
 Mouse: Commodore 1351 in proportional mode on port 2 (all mice summed): the SID POTX/POTY
     values carry the position mod 64 (bits 6..1), left button = fire, right button = up.
     MOUSE_SCALE divides PC mouse counts (modern mice report far more counts than a 1351).
+    The POT values change at most MOUSE_RATE counts/s (burst MOUSE_BURST): a 1351 driver reads
+    the position once per frame and takes a change of more than 31 counts as the other direction.
+Devices are classified by capability, one node can be several (keyboard + touchpad combos);
+events are dispatched by type.  Hot-plug: inotify on /dev/input (+ a 2 s rescan as fallback).
+After an evdev buffer overrun (SYN_DROPPED) and at plug-in the state is re-read from the kernel.
 """
+import ctypes
 import errno
 import fcntl
 import glob
@@ -35,14 +43,87 @@ EV_SYN, EV_KEY, EV_REL, EV_ABS = 0, 1, 2, 3
 REL_X, REL_Y = 0x00, 0x01
 BTN_LEFT, BTN_RIGHT, BTN_MIDDLE = 0x110, 0x111, 0x112
 MOUSE_SCALE = 2.0                         # PC counts per 1351 count
+MOUSE_RATE = 1100.0                       # 1351 counts/s per axis the POTs may move, and ...
+MOUSE_BURST = 8.0                         # ... burst: <= 8 + 1100 * 20 ms = 30 counts per PAL frame
+MOUSE_BACKLOG = 40.0                      # movement queued beyond the rate; more is dropped
+SYN_REPORT, SYN_DROPPED = 0, 3
 EVENT_FMT = "llHHi"                      # struct input_event (timeval + type/code/value)
 EVENT_SIZE = struct.calcsize(EVENT_FMT)
 EVIOCGRAB = 0x40044590
+EVIOCSCLOCKID = 0x400445a0              # event timestamps in CLOCK_MONOTONIC (= time.monotonic())
+CLOCK_MONOTONIC = 1
 ABS_X, ABS_Y, ABS_HAT0X, ABS_HAT0Y = 0x00, 0x01, 0x10, 0x11
 
 
 def EVIOCGABS(axis):
     return 0x80184540 + axis              # _IOR('E', 0x40 + axis, struct input_absinfo)
+
+
+EVIOCGKEY_96 = 0x80604518                 # _IOR('E', 0x18, 96 bytes): keys currently down (KEY_MAX 0x2ff)
+IN_ATTRIB, IN_CREATE, IN_DELETE = 0x4, 0x100, 0x200
+_libc = ctypes.CDLL(None, use_errno=True)
+
+
+def inotify_dev_input():
+    """non-blocking inotify fd watching /dev/input, or None"""
+    try:
+        fd = _libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+        if fd < 0:
+            return None
+        if _libc.inotify_add_watch(fd, b"/dev/input", IN_CREATE | IN_ATTRIB | IN_DELETE) < 0:
+            os.close(fd)
+            return None
+        return fd
+    except (AttributeError, OSError):
+        return None
+
+
+def keys_down(fd):
+    """set of key/button codes the kernel reports as currently down"""
+    try:
+        return _bitmap_bytes(fcntl.ioctl(fd, EVIOCGKEY_96, b"\0" * 96))
+    except OSError:
+        return set()
+
+
+def abs_value(fd, axis):
+    try:
+        return struct.unpack("6i", fcntl.ioctl(fd, EVIOCGABS(axis), b"\0" * 24))[0]
+    except OSError:
+        return None
+
+
+def _bitmap_bytes(buf):
+    return {i * 8 + b for i, v in enumerate(buf) for b in range(8) if v >> b & 1}
+
+
+def poll_ms(event_path):
+    """effective USB polling interval (ms) of an evdev node's device, or None.  xHCI schedules a
+    low/full-speed interrupt endpoint at the descriptor's interval rounded down to a power of 2
+    (usbhid's kbpoll/mousepoll/jspoll are ignored by xHCI)"""
+    try:
+        d = os.path.realpath("/sys/class/input/%s/device" % os.path.basename(event_path))
+        for _ in range(4):                # input -> (HID device ->) USB interface with ep_8x
+            if glob.glob(os.path.join(d, "ep_8*")):
+                break
+            d = os.path.dirname(d)
+        else:
+            return None
+        speed = open(os.path.join(d, "..", "speed")).read().strip()
+        for e in sorted(glob.glob(os.path.join(d, "ep_8*"))):
+            if open(os.path.join(e, "type")).read().strip() != "Interrupt":
+                continue
+            t = open(os.path.join(e, "interval")).read().strip()
+            ms = float(t[:-2]) if t.endswith("ms") else float(t[:-2]) / 1000.0
+            if speed in ("1.5", "12") and ms >= 1:
+                p = 1
+                while p * 2 <= ms:
+                    p *= 2
+                ms = p
+            return ms
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 # Linux keycode -> MEGA65 matrix key names (combos for keys that need SHIFT)
@@ -85,7 +166,8 @@ MOD_LEAD = 0.04
 # tap (the KERNAL scans every 16-20 ms; a 60 ms tap left ~20 ms of SHIFT+key)
 MOD_HOLD = 0.10
 CTRL_KEYS, ALT_KEYS = {29, 97}, {56, 100}
-SYSTEM_KEYS = {111: "reset", 59: "core mega65", 60: "core c64", 88: "core toggle"}  # Del F1 F2 F12
+SYSTEM_KEYS = {111: "reset", 59: "core mega65", 60: "core c64", 88: "core toggle",  # Del F1 F2 F12
+               36: "joyswap"}                                                       # J (local)
 
 # Gamepad buttons
 BTN_FIRE = set(range(0x120, 0x12c)) | {0x130, 0x131, 0x132, 0x133, 0x134, 0x135,
@@ -107,9 +189,9 @@ def _bitmap(hexwords):
 
 
 class Pad:
-    def __init__(self, fd):
+    def __init__(self, fd, port):
         self.fd = fd
-        self.dirs = [0, 0, 0, 0]          # up down left right from: hat/stick/dpad (sources OR'd)
+        self.port = port                  # 1 or 2, kept while connected
         self.hat = [0, 0]
         self.stick = [0, 0]
         self.dpad = 0
@@ -125,6 +207,33 @@ class Pad:
             except OSError:
                 pass
 
+    def key(self, code, down):
+        if code in BTN_DPAD:
+            bit = 1 << BTN_DPAD[code]
+            self.dpad = (self.dpad | bit) if down else (self.dpad & ~bit)
+        elif code in PAD_KEYS:
+            (self.keys.add if down else self.keys.discard)(code)
+        elif code in BTN_FIRE:
+            (self.fire.add if down else self.fire.discard)(code)
+
+    def axis(self, code, val):
+        if code in (ABS_HAT0X, ABS_HAT0Y):
+            self.hat[code - ABS_HAT0X] = (val > 0) - (val < 0)
+        elif code in self.ranges:
+            mn, mx = self.ranges[code]
+            mid, dead = (mn + mx) / 2.0, (mx - mn) * 0.3       # 30 % from centre
+            self.stick[code] = (val > mid + dead) - (val < mid - dead)
+
+    def resync(self):
+        down = keys_down(self.fd)
+        self.dpad, self.fire, self.keys = 0, set(), set()
+        for c in down:
+            self.key(c, True)
+        for ax in (ABS_HAT0X, ABS_HAT0Y, ABS_X, ABS_Y):
+            v = abs_value(self.fd, ax)
+            if v is not None:
+                self.axis(ax, v)
+
     def joy(self):
         up = self.hat[1] < 0 or self.stick[1] < 0 or self.dpad & 1
         down = self.hat[1] > 0 or self.stick[1] > 0 or self.dpad & 2
@@ -134,38 +243,83 @@ class Pad:
                 | bool(self.fire) << 4)
 
 
-class Mouse:
-    def __init__(self, fd):
-        self.fd = fd
-        self.buttons = set()
+class Dev:
+    def __init__(self, fd, path, roles, name, poll):
+        self.fd, self.path, self.roles, self.name, self.poll = fd, path, roles, name, poll
+        self.keys = set()                 # keyboard keys down on this device
+        self.buttons = set()              # mouse buttons down on this device
+        self.pad = None
+        self.skip = False                 # after SYN_DROPPED: ignore events until SYN_REPORT
+
+
+class Axis:
+    """1351 position on one axis, rate-limited (token bucket) so that a driver reading once per
+    frame never sees more than ~30 counts of change"""
+    def __init__(self):
+        self.target = 0.0                 # where the mouse is
+        self.out = 0.0                    # what the POTs show
+        self.tokens = MOUSE_BURST
+
+    def add(self, d, cap=True):
+        self.target += d
+        if cap:                           # too fast for a 1351: drop the excess
+            self.target = max(self.out - MOUSE_BACKLOG, min(self.out + MOUSE_BACKLOG, self.target))
+
+    def tick(self, dt):
+        self.tokens = min(MOUSE_BURST, self.tokens + MOUSE_RATE * dt)
+        d = self.target - self.out
+        step = max(-self.tokens, min(self.tokens, d))
+        self.out += step
+        self.tokens -= abs(step)
+        return abs(self.target - self.out) > 0.5        # backlog left
 
 
 class InputHub:
     def __init__(self, keypos, log=print):
         self.keypos = keypos               # MEGA65 key name -> (column, row)
         self.log = log
-        self.devs = {}                      # fd -> (path, kind, name)
+        self.devs = {}                      # fd -> Dev
         self.paths = {}                     # path -> fd
         self.kbd_keys = set()              # pressed linux keycodes (all keyboards)
-        self.pads = []                      # Pad objects in connection order
-        self.mice = []                      # Mouse objects
-        self.mx = self.my = 0.0             # 1351 position (all mice summed)
+        self.ax, self.ay = Axis(), Axis()   # 1351 position (all mice summed)
+        self.mouse_t = time.monotonic()
+        self.mouse_backlog = False
         self.script_buttons = 0             # scripted mouse buttons (m65d 'mouse' command)
         self.caps = False
         self.restore = False
+        self.joy_swap = False
         self.actions = []                   # system-key actions for m65d (reset / core switch)
         self.lead = {}                      # keycode -> press time (modifier-first combos)
         self.keylog = []                    # last key events (m65ctl keylog)
         self.held = {}                      # keycode -> release time (released early, held)
         self.sys_held = set()               # system keys swallowed while held
+        self.pending = None                 # (timestamp, kind) of the oldest event not yet sent
+        self.watch = inotify_dev_input()
+        self.next_scan = 0.0                # periodic fallback rescan
+        self.rescan_at = []                 # quick rescans after an inotify event
+        self.dropped = 0                    # SYN_DROPPED seen
+        self.proc_text = None               # last /proc/bus/input/devices parsed
+        self.proc_paths = set()
 
     # ---- discovery
+    @property
+    def pads(self):
+        return [d.pad for d in self.devs.values() if d.pad]
+
+    @property
+    def mice(self):
+        return [d for d in self.devs.values() if "mouse" in d.roles]
+
     def scan(self):
-        info = {}
         try:
-            blocks = open("/proc/bus/input/devices").read().split("\n\n")
+            text = open("/proc/bus/input/devices").read()
         except OSError:
             return
+        if text == self.proc_text and set(self.paths) >= self.proc_paths:
+            return                        # nothing new (parsing costs ~2 ms, reading 0.2 ms)
+        self.proc_text = text
+        info = {}
+        blocks = text.split("\n\n")
         for b in blocks:
             name, ev, keys, absb, rel, handler = "", set(), set(), set(), set(), None
             for line in b.splitlines():
@@ -185,13 +339,17 @@ class InputHub:
                     rel = _bitmap(line[7:])
             if not handler:
                 continue
+            roles = set()
             if {REL_X, REL_Y} <= rel and BTN_LEFT in keys:
-                info[handler] = ("mouse", name)
-            elif keys & {0x130, 0x120} or (absb & {ABS_X, ABS_HAT0X} and keys & BTN_FIRE):
-                info[handler] = ("pad", name)
-            elif EV_KEY in ev and {30, 57, 28} <= keys:     # has A, SPACE, ENTER
-                info[handler] = ("kbd", name)
-        for path, (kind, name) in info.items():
+                roles.add("mouse")
+            if keys & {0x130, 0x120} or (absb & {ABS_X, ABS_HAT0X} and keys & BTN_FIRE):
+                roles.add("pad")
+            if EV_KEY in ev and {30, 57, 28} <= keys:     # has A, SPACE, ENTER
+                roles.add("kbd")
+            if roles:
+                info[handler] = (roles, name)
+        self.proc_paths = set(info)       # retried until all are open (node may lag the list)
+        for path, (roles, name) in info.items():
             if path in self.paths:
                 continue
             try:
@@ -202,32 +360,86 @@ class InputHub:
                 fcntl.ioctl(fd, EVIOCGRAB, 1)
             except OSError:
                 pass
-            self.devs[fd] = (path, kind, name)
+            try:
+                fcntl.ioctl(fd, EVIOCSCLOCKID, struct.pack("i", CLOCK_MONOTONIC))
+            except OSError:
+                pass
+            dev = Dev(fd, path, roles, name, poll_ms(path))
+            if "pad" in roles:
+                used = {p.port for p in self.pads}
+                dev.pad = Pad(fd, 2 if 2 not in used else 1 if 1 not in used else 2)
+            self.devs[fd] = dev
             self.paths[path] = fd
-            if kind == "pad":
-                self.pads.append(Pad(fd))
-            elif kind == "mouse":
-                self.mice.append(Mouse(fd))
-            self.log("m65input: + %s %s (%s)" % (kind, path, name))
+            self._resync(dev)
+            self.log("m65input: + %s %s (%s)%s%s" % (
+                "+".join(sorted(roles)), path, name,
+                " poll %gms" % dev.poll if dev.poll else "",
+                " -> port %d" % dev.pad.port if dev.pad else ""))
 
     def _drop(self, fd):
-        path, kind, name = self.devs.pop(fd)
-        self.paths.pop(path, None)
-        self.pads = [p for p in self.pads if p.fd != fd]
-        self.mice = [m for m in self.mice if m.fd != fd]
+        dev = self.devs.pop(fd)
+        self.paths.pop(dev.path, None)
         os.close(fd)
-        self.kbd_keys.clear()             # don't leave keys stuck after an unplug
-        self.log("m65input: - %s %s (%s)" % (kind, path, name))
+        self._merge_keys()
+        self.log("m65input: - %s %s (%s)" % ("+".join(sorted(dev.roles)), dev.path, dev.name))
+
+    def _merge_keys(self):
+        self.kbd_keys = set().union(*(d.keys for d in self.devs.values()))
+
+    def _resync(self, dev):
+        """read the device's current state from the kernel (plug-in, after SYN_DROPPED)"""
+        down = keys_down(dev.fd)
+        if "kbd" in dev.roles:
+            dev.keys = {c for c in down if c < 0x100 and c not in (KEY_CAPSLOCK, KEY_PAGEUP)
+                        and c not in SYSTEM_KEYS}
+            self._merge_keys()
+        if "mouse" in dev.roles:
+            dev.buttons = {c for c in down if 0x110 <= c < 0x118}
+        if dev.pad:
+            dev.pad.resync()
 
     def fds(self):
-        return list(self.devs)
+        return list(self.devs) + ([self.watch] if self.watch is not None else [])
 
     def describe(self):
-        return " ".join("%s:%s" % (k, n.replace(" ", "_")) for _, k, n in self.devs.values()) or "none"
+        return " ".join("%s:%s%s%s" % ("+".join(sorted(d.roles)), d.name.replace(" ", "_"),
+                                       "@%gms" % d.poll if d.poll else "",
+                                       "@port%d" % d.pad.port if d.pad else "")
+                        for d in self.devs.values()) or "none"
+
+    def maintain(self, now):
+        """hot-plug rescans + mouse rate limiting; returns (state changed, max seconds to sleep)"""
+        changed = False
+        if now >= self.next_scan or (self.rescan_at and now >= self.rescan_at[0]):
+            n = len(self.devs)
+            self.scan()
+            changed = len(self.devs) != n
+            self.next_scan = now + 2.0
+            self.rescan_at = [t for t in self.rescan_at if t > now]
+        before = (int(self.ax.out), int(self.ay.out))
+        dt, self.mouse_t = now - self.mouse_t, now
+        bx, by = self.ax.tick(dt), self.ay.tick(dt)
+        self.mouse_backlog = bx or by
+        if (int(self.ax.out), int(self.ay.out)) != before:
+            changed = True
+        wait = 2.0
+        if self.mouse_backlog:
+            wait = 0.002
+        if self.rescan_at:
+            wait = min(wait, max(0.0, self.rescan_at[0] - now))
+        return changed, wait
 
     # ---- events
     def handle(self, fd):
         """read pending events from fd; True if the MEGA65-visible state may have changed"""
+        if fd == self.watch:
+            try:
+                os.read(fd, 4096)
+            except OSError:
+                pass
+            now = time.monotonic()            # node permissions / handler lines settle: retry
+            self.rescan_at = sorted(set(self.rescan_at) | {now + 0.02, now + 0.25, now + 1.0})
+            return False
         try:
             data = os.read(fd, EVENT_SIZE * 64)
         except OSError as e:
@@ -238,67 +450,89 @@ class InputHub:
         if not data:
             self._drop(fd)
             return True
-        kind = self.devs[fd][1]
-        pad = next((p for p in self.pads if p.fd == fd), None)
-        mouse = next((m for m in self.mice if m.fd == fd), None)
+        dev = self.devs[fd]
+        pad = dev.pad
+        is_kbd, is_mouse = "kbd" in dev.roles, "mouse" in dev.roles
+        kchanged = False
         for i in range(0, len(data) - EVENT_SIZE + 1, EVENT_SIZE):
-            _, _, typ, code, val = struct.unpack_from(EVENT_FMT, data, i)
-            if mouse:
-                if typ == EV_REL and code == REL_X:
-                    self.mx += val / MOUSE_SCALE
-                elif typ == EV_REL and code == REL_Y:
-                    self.my -= val / MOUSE_SCALE          # 1351: moving up counts up
-                elif typ == EV_KEY:
-                    (mouse.buttons.add if val else mouse.buttons.discard)(code)
+            sec, usec, typ, code, val = struct.unpack_from(EVENT_FMT, data, i)
+            if typ == EV_SYN:
+                if code == SYN_DROPPED:
+                    dev.skip = True
+                    self.dropped += 1
+                elif code == SYN_REPORT and dev.skip:
+                    dev.skip = False
+                    self._resync(dev)
+                    kchanged = True
                 continue
-            if typ == EV_KEY:
-                if kind == "kbd":
-                    self.keylog = (self.keylog + ["%d:%d" % (code, val)])[-20:]
-                    if code == KEY_CAPSLOCK:
-                        if val == 1:
-                            self.caps = not self.caps       # latching key, like the real one
-                    elif code == KEY_PAGEUP:
-                        self.restore = val != 0
-                    elif code in SYSTEM_KEYS and (val == 0 and code in self.sys_held or
-                                                  val and self.kbd_keys & CTRL_KEYS
-                                                  and self.kbd_keys & ALT_KEYS):
-                        if val == 1:
-                            self.actions.append(SYSTEM_KEYS[code])
-                            self.sys_held.add(code)
-                        elif val == 0:
-                            self.sys_held.discard(code)
-                    elif val:                               # 1 = press, 2 = autorepeat
-                        if val == 1 and code not in self.kbd_keys:
-                            names = KEYMAP.get(code, [])
-                            if any(n in MOD_NAMES for n in names) and \
-                               any(n not in MOD_NAMES for n in names):
-                                self.lead[code] = time.time()
-                                self.held.pop(code, None)
-                        self.kbd_keys.add(code)
-                    else:
-                        if code in self.lead:
-                            # quick tap of a combination: keep it until lead + hold time
-                            self.held[code] = self.lead[code] + MOD_LEAD + MOD_HOLD
-                        self.kbd_keys.discard(code)
-                        self.lead.pop(code, None)
-                elif pad:
-                    if code in BTN_DPAD:
-                        bit = 1 << BTN_DPAD[code]
-                        pad.dpad = (pad.dpad | bit) if val else (pad.dpad & ~bit)
-                    elif code in PAD_KEYS:
-                        (pad.keys.add if val else pad.keys.discard)(code)
-                    elif code in BTN_FIRE:
-                        (pad.fire.add if val else pad.fire.discard)(code)
+            if dev.skip:
+                continue
+            if self.pending is None:
+                self.pending = (sec + usec * 1e-6, "mouse" if typ == EV_REL else
+                                "pad" if (pad and (typ == EV_ABS or code >= 0x120)) else
+                                "kbd" if code < 0x100 else "mouse")
+            if typ == EV_REL and is_mouse:
+                if code == REL_X:
+                    self.ax.add(val / MOUSE_SCALE)
+                elif code == REL_Y:
+                    self.ay.add(-val / MOUSE_SCALE)          # 1351: moving up counts up
             elif typ == EV_ABS and pad:
-                if code in (ABS_HAT0X, ABS_HAT0Y):
-                    pad.hat[code - ABS_HAT0X] = (val > 0) - (val < 0)
-                elif code in pad.ranges:
-                    mn, mx = pad.ranges[code]
-                    mid, dead = (mn + mx) / 2.0, (mx - mn) * 0.3       # 30 % from centre
-                    pad.stick[code] = (val > mid + dead) - (val < mid - dead)
+                pad.axis(code, val)
+            elif typ == EV_KEY:
+                if is_mouse and 0x110 <= code < 0x118:
+                    (dev.buttons.add if val else dev.buttons.discard)(code)
+                elif pad and code >= 0x120:
+                    pad.key(code, val != 0)
+                elif is_kbd and code < 0x100:
+                    self._kbd_key(dev, code, val)
+                    kchanged = True
+        if kchanged:
+            self._merge_keys()
         return True
 
+    def _kbd_key(self, dev, code, val):
+        self.keylog = (self.keylog + ["%d:%d" % (code, val)])[-20:]
+        if code == KEY_CAPSLOCK:
+            if val == 1:
+                self.caps = not self.caps       # latching key, like the real one
+        elif code == KEY_PAGEUP:
+            self.restore = val != 0
+        elif code in SYSTEM_KEYS and (val == 0 and code in self.sys_held or
+                                      val and self.kbd_keys & CTRL_KEYS
+                                      and self.kbd_keys & ALT_KEYS):
+            if val == 1:
+                if SYSTEM_KEYS[code] == "joyswap":
+                    self.swap_ports()
+                else:
+                    self.actions.append(SYSTEM_KEYS[code])
+                self.sys_held.add(code)
+            elif val == 0:
+                self.sys_held.discard(code)
+        elif val:                               # 1 = press, 2 = autorepeat
+            if val == 1 and code not in self.kbd_keys:
+                names = KEYMAP.get(code, [])
+                if any(n in MOD_NAMES for n in names) and \
+                   any(n not in MOD_NAMES for n in names):
+                    self.lead[code] = time.time()
+                    self.held.pop(code, None)
+            dev.keys.add(code)
+        else:
+            if code in self.lead:
+                # quick tap of a combination: keep it until lead + hold time
+                self.held[code] = self.lead[code] + MOD_LEAD + MOD_HOLD
+            dev.keys.discard(code)
+            self.lead.pop(code, None)
+
+    def swap_ports(self):
+        self.joy_swap = not self.joy_swap
+        self.log("m65input: joystick ports %s" % ("swapped" if self.joy_swap else "normal"))
+
     # ---- state for m65d
+    def take_pending(self):
+        """(timestamp, kind) of the oldest event since the last call, or None (latency stats)"""
+        p, self.pending = self.pending, None
+        return p
+
     def lead_pending(self):
         """True while a modifier-first combo still holds back its key (m65d re-pushes)"""
         now = time.time()
@@ -328,37 +562,45 @@ class InputHub:
             for code in p.keys:
                 names += PAD_KEYS[code]
         for n in names:
-            c, r = self.keypos[n]
-            cols[c] |= 1 << r
+            if n in self.keypos:
+                c, r = self.keypos[n]
+                cols[c] |= 1 << r
         return cols
 
+    def _mouse_port(self):
+        return 1 if self.joy_swap else 2
+
     def joysticks(self):
-        """(port1 bits, port2 bits): first pad -> port 2, second -> port 1; mouse on port 2"""
-        j = [p.joy() for p in self.pads] + [0, 0]
+        """(port1 bits, port2 bits): first pad -> port 2, second -> port 1; mouse on port 2
+        (all swapped with Ctrl+Alt+J)"""
+        j = {1: 0, 2: 0}
+        for p in self.pads:
+            j[(3 - p.port) if self.joy_swap else p.port] |= p.joy()
         btn = set().union(*(m.buttons for m in self.mice)) if self.mice else set()
         mb = (0x10 if BTN_LEFT in btn or self.script_buttons & 1 else 0) | \
              (0x01 if BTN_RIGHT in btn or self.script_buttons & 2 else 0)
-        return j[1], j[0] | mb
+        j[self._mouse_port()] |= mb
+        return j[1], j[2]
 
     def move_mouse(self, dx, dy):
-        """scripted movement in 1351 counts (dy > 0 = up)"""
-        self.mx += dx
-        self.my += dy
+        """scripted movement in 1351 counts (dy > 0 = up); rate-limited, never dropped"""
+        self.ax.add(dx, cap=False)
+        self.ay.add(dy, cap=False)
 
     def mouse_active(self):
-        return bool(self.mice) or self.mx != 0 or self.my != 0 or self.script_buttons != 0
+        return bool(self.mice) or self.ax.target != 0 or self.ay.target != 0 or self.script_buttons != 0
 
     def pots(self):
         """SID values (pot1 x, pot1 y, pot2 x, pot2 y); $FF = nothing connected.
         1351 proportional mode: bits 6..1 = position mod 64, bit 0 = noise (0 here)."""
         if not self.mouse_active():
             return (0xFF, 0xFF, 0xFF, 0xFF)
-        return (0xFF, 0xFF, (int(self.mx) & 63) << 1, (int(self.my) & 63) << 1)
+        m = ((int(self.ax.out) & 63) << 1, (int(self.ay.out) & 63) << 1)
+        return (m + (0xFF, 0xFF)) if self._mouse_port() == 1 else ((0xFF, 0xFF) + m)
 
     def ctrl_bits(self):
         # b1 RESTORE, b2 CAPS LOCK, b4 / b5 cursor up / left: the MEGA65 keyboard's dedicated
-        # keys (MEGA65 core keyup/keyleft, C64 core keyboard keys 73/74) -- the cores make
-        # RIGHT SHIFT + DOWN / RIGHT from them with their own timing (SHIFT + DOWN from the
-        # matrix was not reliable for programs)
+        # keys (MEGA65 core keyup/keyleft, C64 core keyboard keys 73/74); the matrix gets
+        # RIGHT SHIFT + DOWN / RIGHT as well (KEYMAP), as from a real MEGA65 keyboard
         return ((2 if self.restore else 0) | (4 if self.caps else 0) |
                 (0x10 if 103 in self.kbd_keys else 0) | (0x20 if 105 in self.kbd_keys else 0))

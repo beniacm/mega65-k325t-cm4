@@ -29,14 +29,19 @@ Control: TCP port 4511, one text command per line, reply "ok ..."/"err ...":
     mouse off                  no mouse (POTs read $FF)
     pots <p1x> <p1y> <p2x> <p2y>   raw SID POT values in hex (paddles); "pots off" = back to mouse
     restore 0|1  capslock 0|1  sd emu|phys
+    joyswap                    swap joystick ports 1 <-> 2 (pads and mouse; USB keyboard: Ctrl+Alt+J)
+    latency [reset]            USB input event (kernel timestamp) -> INPUT register written:
+                               p50/p90/p99/max per device kind, last 4000 updates
 Run as root (spidev3.0 is root-only).
 """
 import argparse
 import glob
+import os
 import select
 import socket
 import sys
 import time
+import traceback
 
 import spidev
 
@@ -131,9 +136,9 @@ class Daemon:
         self.resend_at = 0.0    # after a core switch: send the input state to the new core
         self.ctl_clients = {}
         self.inp = m65input.InputHub(KEYPOS, log=lambda m: print(m, flush=True))
-        self.inp.scan()
-        self.next_scan = time.time() + 2.0
+        self.inp.maintain(time.monotonic())
         self.sent = None
+        self.lat = []           # (device kind, event -> SPI write seconds), last 4000
         self.ctl_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.ctl_srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.ctl_srv.bind(("0.0.0.0", args.ctl_port))
@@ -148,10 +153,27 @@ class Daemon:
             state = (self.ctrl | self.inp.ctrl_bits(), self.ja | pj1, self.jb | pj2,
                      tuple(a | b for a, b in zip(self.cols, pcols)),
                      self.pots_override or self.inp.pots())
+            pend = self.inp.take_pending()
             if state != self.sent:
                 self.br.set_input(state[0], state[1], state[2], list(state[3]), state[4])
                 self.sent = state
+                if pend:      # USB event (kernel timestamp) -> INPUT register written
+                    self.lat.append((pend[1], time.monotonic() - pend[0]))
+                    del self.lat[:-4000]
             self.input_dirty = False
+
+    def latency(self, arg):
+        if arg == "reset":
+            self.lat = []
+            return "ok"
+        out = []
+        for kind in ("all", "kbd", "pad", "mouse"):
+            v = sorted(l for k, l in self.lat if kind in ("all", k))
+            if v:
+                q = lambda f: v[min(len(v) - 1, int(f * len(v)))] * 1000
+                out.append("%s n=%d p50=%.2f p90=%.2f p99=%.2f max=%.2f ms"
+                           % (kind, len(v), q(.5), q(.9), q(.99), v[-1] * 1000))
+        return "ok " + ("; ".join(out) or "no samples") + "; syn_dropped=%d" % self.inp.dropped
 
     def queue_keys(self, combos, hold=0.06, gap=0.04):
         for combo in combos:
@@ -264,6 +286,12 @@ class Daemon:
                     + " inputs=" + self.inp.describe())
         if cmd == "temps":
             return "ok " + self.temps()
+        if cmd == "latency":
+            return self.latency(rest.strip())
+        if cmd == "joyswap":
+            self.inp.swap_ports()
+            self.input_dirty = True
+            return "ok ports %s" % ("swapped" if self.inp.joy_swap else "normal")
         if cmd == "reset":
             self.ctrl |= 1
             self.input_dirty = True
@@ -304,7 +332,7 @@ class Daemon:
             # mouse <dx> <dy> [buttons]: 1351 counts (dy > 0 = up), buttons b0 left b1 right;
             # "mouse off" = no mouse (pots read $FF again)
             if a and a[0] == "off":
-                self.inp.mx = self.inp.my = 0.0
+                self.inp.ax, self.inp.ay = m65input.Axis(), m65input.Axis()
                 self.inp.script_buttons = 0
             else:
                 self.inp.move_mouse(int(a[0]), int(a[1]))
@@ -338,60 +366,72 @@ class Daemon:
     # ---- main loop
     def loop(self):
         while True:
-            now = time.time()
-            if self.reset_until and now >= self.reset_until:
-                self.ctrl &= ~1
-                self.input_dirty = True
-                self.reset_until = 0.0
-            self.run_keys(now)
-            if self.resend_at and now >= self.resend_at:     # new core is up: resend inputs
-                self.sent = None
-                self.input_dirty = True
-                self.resend_at = 0.0
-            while self.inp.actions:
-                self.system_action(self.inp.actions.pop(0))
-            self.push_input()
-            if now >= self.next_scan:              # hot-plug
-                self.inp.scan()
-                self.next_scan = now + 2.0
-            evfds = self.inp.fds()
-            socks = [self.ctl_srv] + list(self.ctl_clients) + evfds
-            lead = self.inp.lead_pending()
-            if lead:
-                self.input_dirty = True          # modifier-first combo: key part follows
-            r, _, _ = select.select(socks, [], [], 0.005 if self.keyq or lead else 0.05)
-            for s in r:
-                if isinstance(s, int):                # evdev device
-                    if self.inp.handle(s):
-                        self.input_dirty = True
-                    continue
-                if s is self.ctl_srv:
-                    c, _ = s.accept()
-                    self.ctl_clients[c] = b""
-                    continue
+            try:
+                self.step()
+            except Exception:                     # keep the keyboard alive; log and go on
+                traceback.print_exc()
+                sys.stdout.flush()
+                time.sleep(0.1)
+
+    def step(self):
+        now = time.time()
+        if self.reset_until and now >= self.reset_until:
+            self.ctrl &= ~1
+            self.input_dirty = True
+            self.reset_until = 0.0
+        self.run_keys(now)
+        if self.resend_at and now >= self.resend_at:     # new core is up: resend inputs
+            self.sent = None
+            self.input_dirty = True
+            self.resend_at = 0.0
+        while self.inp.actions:
+            self.system_action(self.inp.actions.pop(0))
+        changed, wait = self.inp.maintain(time.monotonic())   # hot-plug, mouse rate limit
+        if changed:
+            self.input_dirty = True
+        self.push_input()
+        evfds = self.inp.fds()
+        socks = [self.ctl_srv] + list(self.ctl_clients) + evfds
+        lead = self.inp.lead_pending()
+        if lead:
+            self.input_dirty = True          # modifier-first combo: key part follows
+        r, _, _ = select.select(socks, [], [], min(wait, 0.005 if self.keyq or lead else 0.05))
+        for s in r:
+            if isinstance(s, int):                # evdev device
+                if self.inp.handle(s):
+                    self.input_dirty = True
+                continue
+            if s is self.ctl_srv:
+                c, _ = s.accept()
+                self.ctl_clients[c] = b""
+                continue
+            try:
+                d = s.recv(4096)
+            except OSError:
+                d = b""
+            if not d:
+                del self.ctl_clients[s]
+                s.close()
+                continue
+            buf = self.ctl_clients[s] + d
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
                 try:
-                    d = s.recv(4096)
+                    reply = self.command(line.decode("utf-8", "replace"))
+                except Exception as e:  # keep serving
+                    reply = "err %s" % e
+                try:
+                    s.sendall((reply + "\n").encode())
                 except OSError:
-                    d = b""
-                if not d:
-                    del self.ctl_clients[s]
-                    s.close()
-                    continue
-                buf = self.ctl_clients[s] + d
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    try:
-                        reply = self.command(line.decode("utf-8", "replace"))
-                    except Exception as e:  # keep serving
-                        reply = "err %s" % e
-                    try:
-                        s.sendall((reply + "\n").encode())
-                    except OSError:
-                        pass
-                self.ctl_clients[s] = buf
+                    pass
+            self.ctl_clients[s] = buf
 
 
 def main():
+    try:      # input latency: run before ordinary processes (the service sets this too)
+        os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(50))
+    except (AttributeError, OSError):
+        pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--hz", type=int, default=10000000)
     ap.add_argument("--ctl-port", type=int, default=4511)
