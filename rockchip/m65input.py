@@ -57,7 +57,11 @@ KEYMAP = {
     42: ["LSHIFT"], 54: ["RSHIFT"], 29: ["CTRL"], 97: ["CTRL"], 56: ["ALT"], 100: ["ALT"],
     125: ["MEGA"], 126: ["MEGA"], 70: ["NOSCRL"], 99: ["HELP"],
     102: ["HOME"], 107: ["UPARROW"], 109: ["POUND"],
-    108: ["DOWN"], 106: ["RIGHT"],     # cursor up / left: dedicated keys, see ctrl_bits()
+    108: ["DOWN"], 106: ["RIGHT"],
+    # cursor up / left: the dedicated keys (ctrl_bits) AND RIGHT SHIFT + DOWN / RIGHT in the
+    # matrix, as a real MEGA65 keyboard delivers them -- the hardware ASCII decoder uses the
+    # former, programs scanning the CIA matrix (games) the latter
+    103: ["RSHIFT", "DOWN"], 105: ["RSHIFT", "RIGHT"],
     55: ["*"], 74: ["-"], 78: ["+"], 98: ["/"], 83: ["."],
     82: ["0"], 79: ["1"], 80: ["2"], 81: ["3"], 75: ["4"], 76: ["5"], 77: ["6"],
     71: ["7"], 72: ["8"], 73: ["9"],

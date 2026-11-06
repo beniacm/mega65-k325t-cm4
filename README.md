@@ -117,9 +117,10 @@ keyboard → ` 42`; pad fire → `$DC00=$6F`, D-pad up → `$7E`, released → `
 Scripted input (control port): `type`, `typecase`, `key`, `keys`, `joy`, `restore`, `capslock`,
 `mouse`, `pots`; `keylog` shows the last 20 USB key events and the resulting matrix.
 
-Cursor up/left are sent as the MEGA65 keyboard's dedicated keys (MEGA65 core `keyup`/`keyleft`,
-C64 core keyboard keys 73/74), which the cores turn into RIGHT SHIFT + DOWN/RIGHT with their own
-timing; SHIFT + DOWN through the matrix was not reliable for programs. Other PC keys mapped to a
+Cursor up/left are sent like a real MEGA65 keyboard sends them: as the dedicated keys (MEGA65
+core `keyup`/`keyleft`, C64 core keyboard keys 73/74) **and** as RIGHT SHIFT + DOWN/RIGHT in the
+matrix. The hardware ASCII decoder (e.g. the Intro Disk menus) uses the former, games scanning
+the CIA matrix (e.g. Roguecraft DX) the latter; either alone failed in one of them. Other PC keys mapped to a
 modifier + key (Insert, F2…) get the modifier 40 ms first and a 100 ms minimum hold.
 
 ## Scripts
