@@ -5,14 +5,18 @@
     m65run prog.prg --sys N    start with SYS N (decimal or 0x hex)
     m65run prog.prg --run      start with RUN
     m65run prog.prg --load     only load
+    m65run prog.prg --reset    reset the MEGA65 to BASIC READY first
 
 Leaves the terminal (m65d 'terminal off': the MEGA65 picture and the frozen program come back),
 writes the PRG through the serial monitor (binary load, ~190 KB/s) and starts it:
   * MEGA65 at the BASIC READY prompt: types SYS <address> (stub '10 SYS n') or RUN (other stubs,
     e.g. llvm-mos's '10 BANK 0 : 20 SYS n')
-  * CPU parked in a finished program's end loop (BRA * / JMP *; llvm-mos C programs never
-    return to BASIC -- their start code maps the BASIC ROM out): stops the CPU, loads, sets the
-    PC to the stub's SYS address and lets it run (the start code sets up the rest itself).
+  * llvm-mos C programs (stub '10 BANK 0 : 20 SYS n') never return to BASIC -- their start
+    code maps the BASIC ROM out and the CPU ends in BRA *.  Next C program: stop the CPU, load,
+    set the PC to the stub's SYS address, run (the start code sets up the rest itself).
+  * a BASIC-style program after a C program (or with the CPU parked): BASIC is broken, so the
+    MEGA65 core is reset first and m65run waits for READY. (leaving the start menu with '/').
+    The kind of the last program is kept in /tmp/m65run.last.
 Back to the shell: Ctrl+Alt+T."""
 import socket
 import sys
@@ -31,6 +35,15 @@ def ctl(cmd, port=4511, timeout=10):
     return buf.decode().strip()
 
 
+LAST = "/tmp/m65run.last"
+VIC = 0xFFD3000
+
+
+def scr_codes(text):
+    """upper-case screen codes as BASIC prints them (A-Z = 1-26)"""
+    return bytes(ord(c) - 64 if "A" <= c <= "Z" else ord(c) for c in text)
+
+
 class Monitor:
     def __init__(self):
         self.s = socket.create_connection(("127.0.0.1", 4510), timeout=5)
@@ -43,6 +56,13 @@ class Monitor:
             pass
 
     def cmd(self, c, raw=b""):
+        self.s.setblocking(False)           # the pipe sends every client's output to all
+        try:                                # clients: drop what is already buffered
+            while self.s.recv(65536):
+                pass
+        except (BlockingIOError, InterruptedError):
+            pass
+        self.s.setblocking(True)
         self.s.sendall(c.encode() + b"\r" + raw)
         out, t0 = b"", time.time()
         self.s.settimeout(3)
@@ -55,6 +75,44 @@ class Monitor:
             chunk = data[o:o + 4096]
             a = addr + o
             self.cmd("l%x %x" % (a, (a + len(chunk)) & 0xFFFF), chunk)
+
+    def read(self, addr, n):
+        data = b""
+        while len(data) < n:
+            got = b""
+            for line in self.cmd("M%x" % (addr + len(data))).splitlines():
+                if line.startswith(":") and line.count(":") >= 2:
+                    got += bytes.fromhex(line.split(":")[2].strip())
+            if not got:
+                break
+            data += got
+        return data[:n]
+
+    def screen(self):
+        """the current text screen's bytes (screen pointer and size from the VIC-IV)"""
+        r = self.read(VIC, 0x80)
+        if len(r) < 0x80:
+            return b""
+        ptr = r[0x60] | r[0x61] << 8 | r[0x62] << 16
+        size = (r[0x58] | r[0x59] << 8) * (r[0x7B] + 1)
+        return self.read(ptr, min(size, 8192))
+
+    def reset_to_basic(self, timeout=40):
+        """reset the MEGA65 core and wait for BASIC's READY. (leave the start menu with '/')"""
+        print("m65run: resetting the MEGA65 (BASIC is not usable after the last program)")
+        ctl("reset")
+        t0, slashed = time.time(), False
+        time.sleep(3)
+        while time.time() - t0 < timeout:
+            scr = self.screen()
+            if scr_codes("READY.") in scr:
+                time.sleep(0.3)
+                return True
+            if not slashed and scr_codes("MENU SYSTEM") in scr:
+                ctl("key /")
+                slashed = True
+            time.sleep(0.5)
+        return False
 
     def parked(self):
         """True if the CPU spins in BRA * / JMP * (a finished program's end loop): the monitor's
@@ -113,7 +171,19 @@ def main():
         sys.exit("m65run: " + r)
     mon = Monitor()
     entry = int(a[a.index("--sys") + 1], 0) if "--sys" in a else stub_sys(addr, data, any_line=True)
-    if "--load" not in a and entry is not None and mon.parked():
+    is_c = len(data) > 5 and data[4] == 0xFE        # llvm-mos stub: 10 BANK 0 (token $FE $02)
+    try:
+        last = open(LAST).read().strip()
+    except OSError:
+        last = ""
+    if "--load" not in a and not is_c and ("--reset" in a or last == "c" or mon.parked()):
+        if not mon.reset_to_basic():
+            sys.exit("m65run: no READY. after the reset (check the MEGA65 screen)")
+    try:
+        open(LAST, "w").write("c" if is_c else "basic")
+    except OSError:
+        pass
+    if "--load" not in a and is_c and entry is not None and mon.parked():
         mon.cmd("t1")                              # stop the parked CPU, load, start directly
         mon.load(addr, data)
         mon.cmd("g%x" % entry)

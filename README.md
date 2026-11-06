@@ -222,7 +222,11 @@ runtime, headers and `mos-platform/mega65` libraries are host-independent). Need
 `m65new -c <name>` makes a C project (`<mega65.h>`: `VICIV.bordercol` etc.). llvm-mos programs do
 not return to BASIC (the start code maps the BASIC ROM out; the CPU ends in `BRA *`):
 `m65run` detects that end loop in the monitor's disassembly and then loads and starts the next
-build directly (stop CPU, `L`, set PC to the stub's SYS address, run). Tested: hello world with
+build directly (stop CPU, `L`, set PC to the stub's SYS address, run). A BASIC-style program after
+a C program (kind of the last run in `/tmp/m65run.last`, or CPU parked) cannot use BASIC/KERNAL
+any more, so `m65run` resets the MEGA65 core first and waits for `READY.` in screen RAM (leaving
+the start menu with `/`); `--reset` forces that. Tested: C program, then `m65new` asm project →
+reset → `HELLO MEGA65` + `READY.` Tested: hello world with
 printf and `VICIV.bordercol` run twice in a row without a reset.
 
 **Assembler IDE in vim** (`rockchip/ide/`, installed by `setup_rockchip.sh`):
@@ -251,6 +255,10 @@ printf and `VICIV.bordercol` run twice in a row without a reset.
 scripts/build.sh        # make bin/qmtech-k325t-cm4.bit (handles pkg-config / exomizer / Vivado quirks)
 scripts/program.sh      # JTAG → SRAM via ~/qmtech/scripts/03_program.sh
 scripts/capture.sh      # MS2130 HDMI capture → captures/
+scripts/m65shot.py      # screenshot WITHOUT the dongle: VIC-IV registers + screen/colour RAM + font +
+                        #   palette read over the serial monitor (~0.4 s), text modes rendered as the
+                        #   720x576 HDMI picture (x 40..760 / y 17..593) → captures/shot_*.png; --text.
+                        #   Not rendered: bitmap modes, sprites, full-colour characters.
 scripts/smoke_test.sh   # plug → program → m65d → RUN/STOP → SD boot → type → joystick → capture
 scripts/make_sdimage.sh # sparse 2 GiB MBR+FAT32 image with the core's system files (+ sdimage/extra/*)
 scripts/m65ctl.py       # control client: status | type <text> | typecase <Text> | key <K> | joy a b |

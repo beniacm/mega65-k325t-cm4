@@ -36,6 +36,7 @@ import struct
 import sys
 import termios
 import time
+import traceback
 
 COLS, ROWS = 90, 72                # the whole 720x576 PAL picture in 8x8 characters
 SCREEN, FONT, COLOUR = 0x005D000, 0x005F000, 0x2000      # chip RAM, chip RAM, colour RAM offset
@@ -533,9 +534,21 @@ class Monitor:
         except socket.timeout:
             pass
 
+    def _discard(self):
+        """drop what is already buffered (no waiting)"""
+        self.s.setblocking(False)
+        try:
+            while self.s.recv(65536):
+                pass
+        except (BlockingIOError, InterruptedError):
+            pass
+        finally:
+            self.s.setblocking(True)
+
     def cmd(self, c, raw=b"", timeout=3.0):
         """send a command (+ raw bytes for L), wait for the prompt, return the output"""
         self.connect()
+        self._discard()     # the pipe sends every client's output to all clients: drop others'
         self.s.sendall(c.encode() + b"\r" + raw)
         out, t0 = b"", time.time()
         self.s.settimeout(timeout)
@@ -665,6 +678,8 @@ class Term:
         m.cmd("t1")                                       # stop the CPU
         try:
             regs = m.read(VIC, 0x80)
+            if len(regs) != 0x80:
+                raise OSError("short register read from the monitor (%d bytes)" % len(regs))
             m.poke(VIC + 0x70, [(regs[0x70] & 0x3F) | PAL_BANK << 6])   # CPU sees our bank
             saved = {
                 "palette": m.read(VIC + 0x100, 16) + m.read(VIC + 0x200, 16) + m.read(VIC + 0x300, 16),
@@ -857,7 +872,7 @@ def serve_client(t, s, clients):
         except Exception as e:                  # monitor trouble: report, keep running
             t.mon.close()
             rep = "err %r" % e
-            log(rep)
+            log(rep + "\n" + traceback.format_exc())
         if rep is not None:
             try:
                 s.sendall((rep + "\n").encode())
