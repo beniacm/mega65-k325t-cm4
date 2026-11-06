@@ -193,6 +193,32 @@ The board's 256 MB DDR3 (MT41K128M16, bank 34) provides the MEGA65's **8 MB atti
   `app_rdy`/`app_wdf_rdy`, 81 MHz request side): worst read 26 cycles against slow_devices'
   128-cycle limit.
 
+## Ethernet (MEGA65 MAC → LAN through the Rockchip)
+
+```
+MEGA65 MAC ─RMII─ eth_vphy ═ rk_bridge ═ SPI ═ m65io ─AF_PACKET─ eth0 ─ LAN (own MAC / DHCP)
+(ethernet.vhdl)  (FPGA, 8×2 KB slots/dir)    (C, L2 bridge)
+```
+- The core's Ethernet MAC was excluded for `qmtechk325t` in `iomapper.vhdl`; it is enabled now.
+  `machine` gets `clock50` (RMII) and `clock200` (MAC phase logic) from the eth MMCM, both
+  through explicit `BUFG`s (the MIG's IDELAYCTRL needs a buffered clock200, DRC PLIDC-9).
+  `{clock50, clock200}` are asynchronous to the core clocks, as in the R6 constraints.
+- `eth_vphy.vhdl` is a virtual RMII PHY: it captures MAC TX frames (preamble/SFD stripped, FCS
+  kept) into 2 KB slots and sends Rockchip frames to the MAC with preamble/SFD/96-bit gap.
+  Bridge v3 commands: `0x40 ETH_TXGET`, `0x41 ETH_RXPUT`, STATUS bytes 16-19 (next frame
+  length, free RX slots, drops). The bridge byte index grew to 12 bits for 1518-byte frames.
+- The module's vendor kernel has **no TUN/TAP, bridge or NAT**, so `m65io` bridges at layer 2 over an
+  AF_PACKET socket on `eth0` (promiscuous; GRO switched off via SIOCETHTOOL). MEGA65 frames go
+  out unchanged (FCS checked and stripped). Frames for the MEGA65's MAC (learned from its
+  traffic) and broadcasts/multicasts come in, with the FCS appended. Limitation: the MEGA65 and
+  the module itself can't talk directly. The x86 host, the LAN and the internet can.
+- MEGA65 side: `$D6E0` 0→3 starts the MAC, `$D6E5=$10` accepts broadcasts, MAC at `$D6E9-$D6EE`.
+  TX: frame at `$FFDE800`, length `$D6E2/3`, `$D6E4=1`. RX: `$D6E1.5` = frame waiting, a
+  **0→1 edge** on `$D6E1.1` releases/advances the buffer (the MAC blocks RX while all 4 are full).
+- Verified on hardware: `scripts/eth_test.py` → **ETH PASS**. A UDP broadcast built by the MEGA65
+  reaches the x86 host over the LAN, and a host broadcast lands in the MEGA65 RX buffer.
+  Simulation: `sim/tb_eth.vhdl` (RMII MAC model, 60/100/1514-byte frames both ways).
+
 ## Build status / hardware results
 
 - **v1** (2026-11-05): HDMI-only test. **First-light OK**: MEGAFLASH screen, clean 720x576 capture via J11.
