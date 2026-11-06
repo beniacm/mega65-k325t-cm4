@@ -24,8 +24,11 @@ ENABLE="m65d.service m65-bootreset.service m65term.service"   # m65io.service co
 IDE="ide/vim/syntax/ca65.vim:/usr/share/vim/vimfiles/syntax/ca65.vim
      ide/vim/ftdetect/ca65.vim:/usr/share/vim/vimfiles/ftdetect/ca65.vim
      ide/vim/ftplugin/ca65.vim:/usr/share/vim/vimfiles/ftplugin/ca65.vim
+     ide/vim/ftplugin/c/m65.vim:/usr/share/vim/vimfiles/ftplugin/c/m65.vim
+     ide/vim/plugin/m65.vim:/usr/share/vim/vimfiles/plugin/m65.vim
      ide/vimrc.local:/etc/vim/vimrc.local
      ide/45gs02.txt:/usr/local/share/m65ide/45gs02.txt
+     ide/mega65_regs.inc:/usr/local/share/m65ide/asminc/mega65_regs.inc
      ide/m65doc:/usr/local/bin/m65doc
      ide/m65new:/usr/local/bin/m65new"
 # sha256 of the deployed boot image (~/qmtech: rockchip/boot_dtb/boot_sd.img, 24863744 bytes) and
@@ -50,6 +53,7 @@ check() {
     echo GCC \$(command -v gcc);
     for f in $(for e in $IDE; do printf '%s ' ${e#*:}; done); do echo IDE \$(md5sum < \$f 2>/dev/null | cut -d' ' -f1) \$f; done;
     echo CA65 \$(ca65 --version 2>&1 | head -1);
+    echo LLVMMOS \$(/opt/llvm-mos/bin/clang --version 2>/dev/null | head -1);
     echo CARD \$(stat -c %s $DEST/card.img 2>/dev/null)") || { echo "cannot reach $HOST"; exit 2; }
   for f in $FILES; do
     if echo "$out" | grep -q "^$(md5l "$HERE/$f")  $f\$"; then echo "ok    $DEST/$f"; else echo "DIFF  $DEST/$f"; bad=1; fi
@@ -82,6 +86,8 @@ check() {
   done
   echo "$out" | grep -q "^CA65 ca65 V" && echo "ok    $(echo "$out" | sed -n 's/^CA65 //p')" \
     || echo "WARN  ca65 missing (run deploy/build_tools.sh on the Rockchip)"
+  echo "$out" | grep -q "^LLVMMOS clang version" && echo "ok    llvm-mos: $(echo "$out" | sed -n 's/^LLVMMOS //p' | cut -c1-60)" \
+    || echo "WARN  llvm-mos missing (run deploy/build_llvm_mos.sh on the PC)"
   local card; card=$(echo "$out" | awk '/^CARD/{print $2}')
   [ -n "$card" ] && echo "ok    card.img $((card / 1048576)) MB" || { echo "DIFF  $DEST/card.img missing (README: SD card image)"; bad=1; }
   [ $bad = 0 ] && echo "== $HOST matches the repo" || echo "== $HOST differs (see DIFF lines)"

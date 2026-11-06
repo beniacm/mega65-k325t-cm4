@@ -1,13 +1,50 @@
 #!/bin/sh
 # m65new <name> -- new MEGA65 assembler project (ca65): main.s, mega65.cfg, Makefile
 #   cd <name>; vi main.s    F5 = build + run on the MEGA65, F7 = build, K = instruction help
+#   m65new -c <name>   C project for llvm-mos (main.c, mos-mega65-clang)
 set -e
-[ -n "$1" ] || { echo "usage: m65new <name>"; exit 1; }
+C=; [ "$1" = "-c" ] && { C=1; shift; }
+[ -n "$1" ] || { echo "usage: m65new [-c] <name>"; exit 1; }
 [ -e "$1" ] && { echo "m65new: $1 exists"; exit 1; }
 mkdir "$1"; cd "$1"
+if [ -n "$C" ]; then
+cat > main.c <<'S'
+// main.c -- MEGA65 program in C (llvm-mos).  F5 in vim: build and run, Ctrl+Alt+T: back here
+// Registers by name: VICIV.bordercol, DMA, ... (<mega65.h>, /opt/llvm-mos/mos-platform/mega65)
+#include <stdio.h>
+#include <mega65.h>
+
+int main(void) {
+    printf("HELLO MEGA65 FROM C\n");
+    VICIV.bordercol++;                  // it ran
+    return 0;                           // llvm-mos parks the CPU (BASIC ROM is mapped out);
+}                                       // m65run starts the next build directly
+S
+cat > Makefile <<'S'
+# make: main.prg   make run: on the MEGA65   make clean
+CC     = mos-mega65-clang
+CFLAGS = -Os -Wall
+
+main.prg: $(wildcard *.c) $(wildcard *.h)
+	$(CC) $(CFLAGS) -o $@ $(wildcard *.c)
+
+run: main.prg
+	m65run main.prg
+
+clean:
+	rm -f main.prg main.prg.elf
+
+.PHONY: run clean
+S
+echo "m65new: C project $1 created -- cd $1 && vi main.c  (F5 = build + run on the MEGA65)"
+exit 0
+fi
 cat > main.s <<'S'
 ; main.s -- MEGA65 program (BASIC 65 mode).  F5 in vim: build and run, Ctrl+Alt+T: back here
         .setcpu "45GS02"
+        .include "cbm_kernal.inc"       ; KERNAL routines: CHROUT, GETIN, PLOT, ...
+        .include "mega65.inc"           ; C64-compatible VIC/SID/CIA names, zero page (cc65)
+        .include "mega65_regs.inc"      ; MEGA65 registers: VIC4_*, DMA_*, MATH_*, CPU_*, ...
 
         .segment "LOADADDR"
         .word   $2001                   ; PRG load address
@@ -20,10 +57,10 @@ start:                                  ; = $200d = 8205: keep the stub above un
         ldx     #0
 @print: lda     msg,x
         beq     @done
-        jsr     $ffd2                   ; CHROUT
+        jsr     CHROUT
         inx
         bne     @print
-@done:  inc     $d020                   ; border colour: it ran
+@done:  inc     VIC_BORDERCOLOR         ; it ran
         rts
 
 msg:    .byte   13, "HELLO MEGA65", 13, 0
@@ -50,8 +87,10 @@ OBJ  = $(SRC:.s=.o)
 main.prg: $(OBJ) mega65.cfg
 	ld65 -C mega65.cfg -Ln main.lbl -o $@ $(OBJ)
 
+ASFLAGS = -I /usr/local/share/cc65/asminc -I /usr/local/share/m65ide/asminc
+
 %.o: %.s
-	ca65 -g -l $(<:.s=.lst) -o $@ $<
+	ca65 $(ASFLAGS) -g -l $(<:.s=.lst) -o $@ $<
 
 run: main.prg
 	m65run main.prg

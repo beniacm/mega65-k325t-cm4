@@ -7,9 +7,13 @@
     m65run prog.prg --load     only load
 
 Leaves the terminal (m65d 'terminal off': the MEGA65 picture and the frozen program come back),
-writes the PRG through the serial monitor (binary load, ~190 KB/s) and types the start command
-on the MEGA65 keyboard.  The MEGA65 should be at the BASIC READY prompt.  Back to the shell:
-Ctrl+Alt+T."""
+writes the PRG through the serial monitor (binary load, ~190 KB/s) and starts it:
+  * MEGA65 at the BASIC READY prompt: types SYS <address> (stub '10 SYS n') or RUN (other stubs,
+    e.g. llvm-mos's '10 BANK 0 : 20 SYS n')
+  * CPU parked in a finished program's end loop (BRA * / JMP *; llvm-mos C programs never
+    return to BASIC -- their start code maps the BASIC ROM out): stops the CPU, loads, sets the
+    PC to the stub's SYS address and lets it run (the start code sets up the rest itself).
+Back to the shell: Ctrl+Alt+T."""
 import socket
 import sys
 import time
@@ -27,28 +31,63 @@ def ctl(cmd, port=4511, timeout=10):
     return buf.decode().strip()
 
 
-def monitor_load(addr, data):
-    s = socket.create_connection(("127.0.0.1", 4510), timeout=5)
-    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    s.settimeout(0.05)
-    try:
-        while s.recv(65536):
+class Monitor:
+    def __init__(self):
+        self.s = socket.create_connection(("127.0.0.1", 4510), timeout=5)
+        self.s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.s.settimeout(0.05)
+        try:
+            while self.s.recv(65536):
+                pass
+        except socket.timeout:
             pass
-    except socket.timeout:
-        pass
-    for o in range(0, len(data), 4096):
-        chunk = data[o:o + 4096]
-        a = addr + o
-        s.sendall(b"l%x %x\r" % (a, (a + len(chunk)) & 0xFFFF) + chunk)
+
+    def cmd(self, c, raw=b""):
+        self.s.sendall(c.encode() + b"\r" + raw)
         out, t0 = b"", time.time()
-        s.settimeout(3)
+        self.s.settimeout(3)
         while not out.rstrip(b"\r\n ").endswith(b"\n.") and time.time() - t0 < 5:
-            out += s.recv(65536)
-    s.close()
+            out += self.s.recv(65536)
+        return out.decode(errors="replace")
+
+    def load(self, addr, data):
+        for o in range(0, len(data), 4096):
+            chunk = data[o:o + 4096]
+            a = addr + o
+            self.cmd("l%x %x" % (a, (a + len(chunk)) & 0xFFFF), chunk)
+
+    def parked(self):
+        """True if the CPU spins in BRA * / JMP * (a finished program's end loop): the monitor's
+        'r' disassembles the current instruction, e.g. ',077720AC  80 FE     BRA   $20AC'.
+        (The PC itself alternates between the loop and the next address while sampled.)"""
+        for _ in range(4):
+            for line in self.cmd("r").splitlines():
+                f = line.split()
+                if line.startswith(",") and len(f) >= 4:
+                    pc = int(f[0][-4:], 16)
+                    ops = [x.upper() for x in f[1:]]
+                    for mn in ("BRA", "JMP"):
+                        if mn in ops and ops.index(mn) + 1 < len(ops):
+                            tgt = ops[ops.index(mn) + 1].lstrip("$")
+                            if all(c in "0123456789ABCDEF" for c in tgt) and tgt and int(tgt, 16) == pc:
+                                return True
+        return False
 
 
-def stub_sys(addr, data):
-    """address in a BASIC stub '10 SYS nnnn' (C64 V2 and BASIC 65 both use token $9E)"""
+def stub_sys(addr, data, any_line=False):
+    """address in a BASIC stub '10 SYS nnnn' (C64 V2 and BASIC 65 both use token $9E);
+    any_line: also later lines (llvm-mos: '10 BANK 0 : 20 SYS n')"""
+    if any_line:
+        p = 0
+        while p + 4 <= len(data):
+            nxt = (data[p] | data[p + 1] << 8) - addr
+            if nxt <= p or nxt > len(data):
+                break
+            n = stub_sys(addr, data[p:])
+            if n is not None:
+                return n
+            p = nxt
+        return None
     p = 4
     if len(data) > p and data[p] == 0x9E:
         p += 1
@@ -72,7 +111,16 @@ def main():
     r = ctl("terminal off")
     if not r.startswith("ok"):
         sys.exit("m65run: " + r)
-    monitor_load(addr, data)
+    mon = Monitor()
+    entry = int(a[a.index("--sys") + 1], 0) if "--sys" in a else stub_sys(addr, data, any_line=True)
+    if "--load" not in a and entry is not None and mon.parked():
+        mon.cmd("t1")                              # stop the parked CPU, load, start directly
+        mon.load(addr, data)
+        mon.cmd("g%x" % entry)
+        mon.cmd("t0")
+        print("m65run: %d bytes at $%04x, started at $%04x (CPU was parked)" % (len(data), addr, entry))
+        return
+    mon.load(addr, data)
     print("m65run: %d bytes at $%04x" % (len(data), addr))
     if "--load" in a:
         return

@@ -13,23 +13,9 @@ setlocal keywordprg=m65doc
 setlocal commentstring=;\ %s
 setlocal iskeyword+=.,@-@
 
-function! s:M65Make(target) abort
-  silent wall
-  execute 'silent make ' . a:target
-  redraw!
-  " not v:shell_error: :make pipes through tee, whose exit status that is
-  if !empty(filter(getqflist(), 'v:val.valid'))
-    copen
-    echohl ErrorMsg | echo 'build failed (F8/F9: errors)' | echohl None
-  else
-    cclose
-    echo a:target ==# 'run' ? 'running on the MEGA65 -- Ctrl+Alt+T comes back here' : 'build ok'
-  endif
-endfunction
-
-nnoremap <buffer> <silent> <F5> :call <SID>M65Make('run')<CR>
-nnoremap <buffer> <silent> <F7> :call <SID>M65Make('')<CR>
+nnoremap <buffer> <silent> <F5> :call M65Make('run')<CR>
+nnoremap <buffer> <silent> <F7> :call M65Make('')<CR>
 nnoremap <buffer> <silent> <F8> :cnext<CR>
 nnoremap <buffer> <silent> <F9> :cprevious<CR>
-inoremap <buffer> <silent> <F5> <Esc>:call <SID>M65Make('run')<CR>
-inoremap <buffer> <silent> <F7> <Esc>:call <SID>M65Make('')<CR>
+inoremap <buffer> <silent> <F5> <Esc>:call M65Make('run')<CR>
+inoremap <buffer> <silent> <F7> <Esc>:call M65Make('')<CR>
