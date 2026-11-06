@@ -16,3 +16,7 @@ sed -e '/report "UART_TX: Sending byte/d' -e '/use work.debugtools.all;/d' $V/UA
 ghdl -a --std=08 -frelaxed uart_tx_simcopy.vhdl tb_uart_burst.vhdl
 ghdl -e --std=08 -frelaxed tb_uart_burst
 ghdl -r --std=08 -frelaxed tb_uart_burst --stop-time=5ms 2>&1 | sed 's/.*(report note): //;s/.*(assertion failure): /FAIL: /' 
+# DDR3 attic RAM controller against a MIG native-UI model (independent app_rdy/app_wdf_rdy).
+ghdl -a --std=08 -frelaxed $V/ddr3_attic.vhdl tb_ddr3_attic.vhdl
+ghdl -e --std=08 -frelaxed tb_ddr3_attic
+ghdl -r --std=08 -frelaxed tb_ddr3_attic --stop-time=10ms 2>&1 | sed 's/.*(report note): //;s/.*(assertion failure): /FAIL: /'

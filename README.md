@@ -169,6 +169,30 @@ This board has no I²C RTC, so the ROM reports `NO-RTC` and calibrates its clock
 CIA2 32-bit timer. With the core's old CIA power-on latch values (`$0001`) that loop never
 ended. `cia6526.vhdl` now powers up with `$FFFF`, as the MOS 6526 does.
 
+## 8 MB attic RAM (DDR3)
+
+The board's 256 MB DDR3 (MT41K128M16, bank 34) provides the MEGA65's **8 MB attic RAM**
+(`$8000000-$87FFFFF`, mirrored above, like the HyperRAM of a real MEGA65).
+- `ddr3_attic.vhdl` implements the `slow_devices` expansion-RAM byte interface (the one the
+  hyperram/sdram controllers provide on real boards). Its request side runs on **pixelclock**
+  (81 MHz, slow_devices' clock). Each byte access is one masked 16-byte MIG write or one
+  16-byte read; the clock crossing uses toggle handshakes. `busy` stays high until DDR3
+  calibration completes.
+- MIG 7-series from `src/vhdl/qmtech-k325t-cm4_mig_ddr3.prj`: the board's proven DDR3-800 setup
+  (from the ~/qmtech TM project) with the MIG's own XADC disabled (`fpgatemp` owns the only
+  XADC and feeds `device_temp_i`) and its debug ports off. clock200 comes from the core's
+  (otherwise unused) eth MMCM. The project script generates the IP.
+- Synthesis for this target is **not timing driven** (`-no_timing_driven` in the impl tcl):
+  with the MIG and the live expansion-RAM path, synth_design's Timing Optimization phase never
+  finished (twice, >20 min). Placement and routing stay timing driven; timing is met.
+- Verified on hardware: HYPPO detects it (its probe pattern is at `$8000000` after boot).
+  `scripts/attic_test.py` (monitor spot tests, boundaries, mirror) passes, and the BASIC 65
+  memtest typed in by `scripts/attic_memtest_basic.sh` (DMA-fill/verify all 128 × 64 KB blocks,
+  23 address lines, 8 MB mirror, 4 patterns at 500 random addresses) prints **ATTIC RAM OK**.
+- Simulation: `sim/tb_ddr3_attic.vhdl` (MIG native-UI model with independent
+  `app_rdy`/`app_wdf_rdy`, 81 MHz request side): worst read 26 cycles against slow_devices'
+  128-cycle limit.
+
 ## Build status / hardware results
 
 - **v1** (2026-11-05): HDMI-only test. **First-light OK**: MEGAFLASH screen, clean 720x576 capture via J11.
