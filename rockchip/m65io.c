@@ -38,6 +38,9 @@
 #define MAX_CLIENTS 8
 #define XFER_MAX 4096           /* spidev default bufsiz */
 #define SPIN_S 0.02             /* keep spinning this long after the last activity */
+#define NAP_S  1.0              /* then poll every 200 us up to this long ...       */
+#define NAP_US 200              /*                                                  */
+#define DOZE_US 10000           /* ... and every 10 ms after that (idle: module cool) */
 
 static int spi_fd, img_fd, verbose;
 static uint32_t spi_hz = 25000000;   /* verified clean; 33 MHz fails (linktest.py) */
@@ -255,17 +258,24 @@ int main(int argc, char **argv)
 			busy = 1;
 		}
 
-		/* sockets.  Latency matters more than CPU: while sectors are flowing
-		 * (activity within the last SPIN_S seconds) spin without sleeping, so a
-		 * new CMD17 is answered within one status poll; when idle, sleep 200 us
-		 * per poll to keep the module cool. */
+		/* Poll pacing.  Latency matters while sectors flow, CPU/heat when idle:
+		 *   < SPIN_S since the last activity : spin (no sleep), a new CMD17 is
+		 *                                      answered within one status poll
+		 *   < NAP_S                          : poll every NAP_US
+		 *   otherwise                        : poll every DOZE_US
+		 * The first sector after a long idle waits <= 10 ms (HYPPO allows ~0.4 s);
+		 * monitor input still wakes us at once (ppoll on the sockets); monitor
+		 * output from the MEGA65 buffers in the bridge's 16 KB FIFO (~2 KB / 10 ms
+		 * at 2 Mbaud). */
 		double tnow = now();
 		if (busy)
 			last_activity = tnow;
+		double idle = tnow - last_activity;
+		long sleep_us = idle < SPIN_S ? 0 : idle < NAP_S ? NAP_US : DOZE_US;
 		struct pollfd p[MAX_CLIENTS + 1];
 		p[0].fd = srv; p[0].events = POLLIN;
 		for (int i = 0; i < ncli; i++) { p[i + 1].fd = cli[i]; p[i + 1].events = POLLIN; }
-		struct timespec ts = { 0, (tnow - last_activity < SPIN_S) ? 0 : 200000 };
+		struct timespec ts = { 0, sleep_us * 1000 };
 		if (ppoll(p, ncli + 1, &ts, NULL) > 0) {
 			if (p[0].revents & POLLIN) {
 				int c = accept(srv, NULL, NULL), one = 1;
