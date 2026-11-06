@@ -189,6 +189,13 @@ The board's 256 MB DDR3 (MT41K128M16, bank 34) provides the MEGA65's **8 MB atti
   `scripts/attic_test.py` (monitor spot tests, boundaries, mirror) passes, and the BASIC 65
   memtest typed in by `scripts/attic_memtest_basic.sh` (DMA-fill/verify all 128 × 64 KB blocks,
   23 address lines, 8 MB mirror, 4 patterns at 500 random addresses) prints **ATTIC RAM OK**.
+- **CPU fast path** (as R6's SDRAM controller): every read publishes its 8-byte line to the CPU
+  (`slowram_cache_line*`). The CPU's inc/dec toggles trigger silent next/previous-line reads, and
+  writes update the published line in place (matched on the physical address, so mirror aliases
+  stay coherent). `$D7FE.2` = cache (default on), `.3` = advance prefetch.
+  `scripts/attic_bench.py` (8 MB sequential `LDA [$FB],Z` at 40 MHz in C64 mode, A/B on one bitstream):
+  cache off 1171 KB/s → **cache on 2084 KB/s (1.8×)** → cache + advance 2395 KB/s (2.05×).
+  (C64 mode runs the CPU at 1 MHz until `POKE 0,65`; the benchmark sets it.)
 - Simulation: `sim/tb_ddr3_attic.vhdl` (MIG native-UI model with independent
   `app_rdy`/`app_wdf_rdy`, 81 MHz request side): worst read 26 cycles against slow_devices'
   128-cycle limit.

@@ -17,7 +17,7 @@ ghdl -a --std=08 -frelaxed uart_tx_simcopy.vhdl tb_uart_burst.vhdl
 ghdl -e --std=08 -frelaxed tb_uart_burst
 ghdl -r --std=08 -frelaxed tb_uart_burst --stop-time=5ms 2>&1 | sed 's/.*(report note): //;s/.*(assertion failure): /FAIL: /' 
 # DDR3 attic RAM controller against a MIG native-UI model (independent app_rdy/app_wdf_rdy).
-ghdl -a --std=08 -frelaxed $V/ddr3_attic.vhdl tb_ddr3_attic.vhdl
+ghdl -a --std=08 -frelaxed $V/cputypes.vhdl $V/ddr3_attic.vhdl tb_ddr3_attic.vhdl
 ghdl -e --std=08 -frelaxed tb_ddr3_attic
 ghdl -r --std=08 -frelaxed tb_ddr3_attic --stop-time=10ms 2>&1 | sed 's/.*(report note): //;s/.*(assertion failure): /FAIL: /'
 # Ethernet: RMII MAC model <-> eth_vphy <-> rk_bridge <-> model Rockchip (60/100/1514-byte frames).

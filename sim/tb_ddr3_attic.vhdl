@@ -5,6 +5,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.cputypes.all;
 
 entity tb_ddr3_attic is
 end entity;
@@ -19,6 +20,10 @@ architecture sim of tb_ddr3_attic is
   signal ex_address : unsigned(26 downto 0) := (others => '0');
   signal ex_wdata, ex_rdata : unsigned(7 downto 0) := (others => '0');
   signal ex_tog, ex_busy, calibrated : std_logic;
+  signal cline : cache_row_t;
+  signal caddr : unsigned(26 downto 3);
+  signal cvalid : std_logic;
+  signal cnext, cprev : std_logic := '0';
 
   signal ui_rst : std_logic := '1';
   signal calib : std_logic := '0';
@@ -43,7 +48,10 @@ begin
               app_addr => app_addr, app_cmd => app_cmd, app_en => app_en, app_rdy => app_rdy,
               app_wdf_data => app_wdf_data, app_wdf_end => app_wdf_end, app_wdf_wren => app_wdf_wren,
               app_wdf_mask => app_wdf_mask, app_wdf_rdy => app_wdf_rdy, app_rd_data => app_rd_data,
-              app_rd_data_valid => app_rd_data_valid, calibrated => calibrated);
+              app_rd_data_valid => app_rd_data_valid,
+              cache_line => cline, cache_line_addr => caddr, cache_line_valid => cvalid,
+              cache_next_toggle => cnext, cache_prev_toggle => cprev,
+              calibrated => calibrated);
 
   -- MIG model: independent pseudo-random ready patterns, masked writes, 20-cycle reads.
   mig : process
@@ -143,6 +151,32 @@ begin
     -- dense sequential pattern across several words
     for i in 0 to 63 loop wr(16#2000# + i, (i * 7 + 3) mod 256); end loop;
     for i in 0 to 63 loop rd(16#2000# + i, (i * 7 + 3) mod 256); end loop;
+    -- ---- CPU fast path: published line, write-through, mirror, prefetch ----
+    rd(16#2008#, (8 * 7 + 3) mod 256);                 -- line $2008-$200F
+    assert cvalid = '1' and caddr = to_unsigned(16#2008#, 27)(26 downto 3)
+      report "line not published after read" severity failure;
+    for i in 0 to 7 loop
+      assert to_integer(cline(i)) = ((8 + i) * 7 + 3) mod 256 report "line byte wrong" severity failure;
+    end loop;
+    wr(16#200A#, 16#C3#);                               -- write into the cached line
+    wait until rising_edge(cpuclk) and ex_busy = '0';
+    assert cline(2) = x"C3" and cvalid = '1' report "write-through failed" severity failure;
+    wr(16#80200B#, 16#3C#);                             -- same physical line via 8 MB mirror
+    wait until rising_edge(cpuclk) and ex_busy = '0';
+    assert cline(3) = x"3C" report "mirror write not coherent" severity failure;
+    t0 := now;
+    cnext <= not cnext;                                 -- CPU: prefetch next line ($2010)
+    wait until rising_edge(cpuclk) and caddr = to_unsigned(16#2010#, 27)(26 downto 3) for 5 us;
+    wait until rising_edge(cpuclk) and ex_busy = '0';
+    assert caddr = to_unsigned(16#2010#, 27)(26 downto 3) report "next-line prefetch failed" severity failure;
+    for i in 0 to 7 loop
+      assert to_integer(cline(i)) = ((16 + i) * 7 + 3) mod 256 report "prefetched byte wrong" severity failure;
+    end loop;
+    cprev <= not cprev;                                 -- back to $2008 (with the written bytes)
+    wait until rising_edge(cpuclk) and caddr = to_unsigned(16#2008#, 27)(26 downto 3) for 5 us;
+    wait until rising_edge(cpuclk) and ex_busy = '0';
+    assert cline(2) = x"C3" and cline(3) = x"3C" report "prev-line prefetch / DDR content wrong" severity failure;
+    report "cache line: publish, write-through, mirror coherence, next/prev prefetch ok";
     report "max read latency " & integer'image(maxcyc) & " cpu cycles (limit 128)";
     report "TB_DDR3_ATTIC_PASS";
     done <= true;
