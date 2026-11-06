@@ -12,7 +12,7 @@ Keyboard: positional mapping like a C64/MEGA65 keyboard on a PC layout
     Esc = RUN/STOP      PgUp = RESTORE     Home = CLR/HOME    Backspace/Del = INST/DEL
     Insert = INST       End = up-arrow     PgDn = pound       PrtSc = HELP
     Tab = TAB  Ctrl = CTRL  Alt = ALT  Win = MEGA  ScrollLock = NO SCROLL
-    CapsLock = CAPS LOCK (toggles)     cursor keys incl. up/left (= SHIFT+down/right)
+    CapsLock = CAPS LOCK (toggles)     cursor keys (up/left are the MEGA65's dedicated keys, INPUT ctrl b4/b5)
     F1/F3/F5/F7/F9/F11 direct, F2/F4/F6/F8/F10/F12 = SHIFT + the odd key
     ` = left-arrow  - = +  = = -  [ = @  ] = *  ; = :  ' = ;  \\ = =   keypad digits/operators
 Gamepad: first pad -> joystick port 2 (most C64 games), second pad -> port 1.
@@ -29,6 +29,7 @@ import fcntl
 import glob
 import os
 import struct
+import time
 
 EV_SYN, EV_KEY, EV_REL, EV_ABS = 0, 1, 2, 3
 REL_X, REL_Y = 0x00, 0x01
@@ -56,7 +57,7 @@ KEYMAP = {
     42: ["LSHIFT"], 54: ["RSHIFT"], 29: ["CTRL"], 97: ["CTRL"], 56: ["ALT"], 100: ["ALT"],
     125: ["MEGA"], 126: ["MEGA"], 70: ["NOSCRL"], 99: ["HELP"],
     102: ["HOME"], 107: ["UPARROW"], 109: ["POUND"],
-    108: ["DOWN"], 106: ["RIGHT"], 103: [S, "DOWN"], 105: [S, "RIGHT"],
+    108: ["DOWN"], 106: ["RIGHT"],     # cursor up / left: dedicated keys, see ctrl_bits()
     55: ["*"], 74: ["-"], 78: ["+"], 98: ["/"], 83: ["."],
     82: ["0"], 79: ["1"], 80: ["2"], 81: ["3"], 75: ["4"], 76: ["5"], 77: ["6"],
     71: ["7"], 72: ["8"], 73: ["9"],
@@ -70,6 +71,15 @@ for code, ch in zip([30, 31, 32, 33, 34, 35, 36, 37, 38], "ASDFGHJKL"):
 for code, ch in zip([44, 45, 46, 47, 48, 49, 50], "ZXCVBNM"):
     KEYMAP[code] = [ch]
 KEY_CAPSLOCK, KEY_PAGEUP = 58, 104       # handled as lines, not matrix keys
+MOD_NAMES = {"LSHIFT", "RSHIFT", "CTRL", "MEGA", "ALT"}
+# A PC key mapped to modifier + key (cursor up = SHIFT + CRSR DOWN, Insert, F2, ...) shows only
+# the modifier for this long first: both in one update can reach the core's scanner as
+# "key without SHIFT" for one scan, and the KERNAL decodes a key only when it changes (so
+# cursor up came out as cursor down).
+MOD_LEAD = 0.04
+# ... and the whole combination then stays in the matrix at least this long, even for a quick
+# tap (the KERNAL scans every 16-20 ms; a 60 ms tap left ~20 ms of SHIFT+key)
+MOD_HOLD = 0.10
 CTRL_KEYS, ALT_KEYS = {29, 97}, {56, 100}
 SYSTEM_KEYS = {111: "reset", 59: "core mega65", 60: "core c64", 88: "core toggle"}  # Del F1 F2 F12
 
@@ -140,6 +150,9 @@ class InputHub:
         self.caps = False
         self.restore = False
         self.actions = []                   # system-key actions for m65d (reset / core switch)
+        self.lead = {}                      # keycode -> press time (modifier-first combos)
+        self.keylog = []                    # last key events (m65ctl keylog)
+        self.held = {}                      # keycode -> release time (released early, held)
         self.sys_held = set()               # system keys swallowed while held
 
     # ---- discovery
@@ -236,6 +249,7 @@ class InputHub:
                 continue
             if typ == EV_KEY:
                 if kind == "kbd":
+                    self.keylog = (self.keylog + ["%d:%d" % (code, val)])[-20:]
                     if code == KEY_CAPSLOCK:
                         if val == 1:
                             self.caps = not self.caps       # latching key, like the real one
@@ -250,9 +264,19 @@ class InputHub:
                         elif val == 0:
                             self.sys_held.discard(code)
                     elif val:                               # 1 = press, 2 = autorepeat
+                        if val == 1 and code not in self.kbd_keys:
+                            names = KEYMAP.get(code, [])
+                            if any(n in MOD_NAMES for n in names) and \
+                               any(n not in MOD_NAMES for n in names):
+                                self.lead[code] = time.time()
+                                self.held.pop(code, None)
                         self.kbd_keys.add(code)
                     else:
+                        if code in self.lead:
+                            # quick tap of a combination: keep it until lead + hold time
+                            self.held[code] = self.lead[code] + MOD_LEAD + MOD_HOLD
                         self.kbd_keys.discard(code)
+                        self.lead.pop(code, None)
                 elif pad:
                     if code in BTN_DPAD:
                         bit = 1 << BTN_DPAD[code]
@@ -271,11 +295,31 @@ class InputHub:
         return True
 
     # ---- state for m65d
+    def lead_pending(self):
+        """True while a modifier-first combo still holds back its key (m65d re-pushes)"""
+        now = time.time()
+        expired = False
+        for code, t in list(self.lead.items()):
+            if now - t >= MOD_LEAD:
+                del self.lead[code]
+                if code in self.kbd_keys:     # still held: from now on it is a normal key
+                    self.held.pop(code, None)
+                expired = True               # push once more: now with the key part
+        for code, t in list(self.held.items()):
+            if now >= t:
+                del self.held[code]
+                expired = True               # push once more: now released
+        return bool(self.lead) or bool(self.held) or expired
+
     def matrix(self):
         cols = [0] * 9
         names = []
-        for code in self.kbd_keys:
-            names += KEYMAP.get(code, [])
+        now = time.time()
+        for code in set(self.kbd_keys) | set(self.held):
+            k = KEYMAP.get(code, [])
+            if code in self.lead and now - self.lead[code] < MOD_LEAD:
+                k = [n for n in k if n in MOD_NAMES]        # modifier first
+            names += k
         for p in self.pads:
             for code in p.keys:
                 names += PAD_KEYS[code]
@@ -308,4 +352,9 @@ class InputHub:
         return (0xFF, 0xFF, (int(self.mx) & 63) << 1, (int(self.my) & 63) << 1)
 
     def ctrl_bits(self):
-        return (2 if self.restore else 0) | (4 if self.caps else 0)
+        # b1 RESTORE, b2 CAPS LOCK, b4 / b5 cursor up / left: the MEGA65 keyboard's dedicated
+        # keys (MEGA65 core keyup/keyleft, C64 core keyboard keys 73/74) -- the cores make
+        # RIGHT SHIFT + DOWN / RIGHT from them with their own timing (SHIFT + DOWN from the
+        # matrix was not reliable for programs)
+        return ((2 if self.restore else 0) | (4 if self.caps else 0) |
+                (0x10 if 103 in self.kbd_keys else 0) | (0x20 if 105 in self.kbd_keys else 0))

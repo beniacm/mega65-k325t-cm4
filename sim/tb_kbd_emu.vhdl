@@ -21,6 +21,7 @@ architecture sim of tb_kbd_emu is
   signal col_emu : std_logic_vector(7 downto 0);
   signal restore, capslock, del_k, ret_k, fast_k, up_k, left_k : std_logic;
   signal caps_n, rest_n : std_logic := '1';
+  signal up_n, left_n : std_logic := '1';
   type mat_t is array (0 to 8) of std_logic_vector(7 downto 0);
   signal mat : mat_t := (others => (others => '1'));
 begin
@@ -38,7 +39,8 @@ begin
 
   emu : entity work.m65kbd_emu
     port map (clk => clk100, kio8 => kio8, kio10 => kio10, matrix_col_idx => col_idx_emu,
-              matrix_col => col_emu, capslock_n => caps_n, restore_n => rest_n);
+              matrix_col => col_emu, capslock_n => caps_n, restore_n => rest_n,
+              up_n => up_n, left_n => left_n);
 
   col_emu <= mat(col_idx_emu) when col_idx_emu <= 8 else (others => '1');
 
@@ -74,16 +76,18 @@ begin
       report "idle special keys wrong" severity failure;
     -- some keys: A (col 1 row 2), RETURN (col 0 row 1), SPACE (col 7 row 4), F9 col 8 row 0
     mat(1) <= "11111011"; mat(0) <= "11111101"; mat(7) <= "11101111"; mat(8) <= "11111110";
-    caps_n <= '0'; rest_n <= '0';
+    caps_n <= '0'; rest_n <= '0'; up_n <= '0'; left_n <= '0';
     frames(3);
     check_matrix("keys pressed");
     assert restore = '0' and capslock = '0' report "RESTORE / CAPS LOCK not seen" severity failure;
+    assert up_k = '1' and left_k = '1' report "cursor up / left keys not seen" severity failure;
     -- release, plus INST/DEL alone
     mat <= (others => (others => '1')); mat(0) <= "11111110";
-    caps_n <= '1'; rest_n <= '1';
+    caps_n <= '1'; rest_n <= '1'; up_n <= '1'; left_n <= '1';
     frames(3);
     check_matrix("DEL only");
     assert restore = '1' and capslock = '1' report "RESTORE / CAPS LOCK not released" severity failure;
+    assert up_k = '0' and left_k = '0' report "cursor up / left keys not released" severity failure;
     report "TB_KBD_EMU_PASS";
     done <= true;
     wait;

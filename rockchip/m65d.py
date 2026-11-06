@@ -269,6 +269,10 @@ class Daemon:
             self.input_dirty = True
             self.reset_until = time.time() + 0.2
             return "ok"
+        if cmd == "keylog":
+            # last USB keyboard events "code:value" (1 press, 0 release, 2 repeat) + matrix
+            return "ok %s | matrix %s" % (" ".join(self.inp.keylog),
+                                           " ".join("%02x" % c for c in self.inp.matrix()))
         if cmd == "core":
             if not a:
                 c = self.br.core_id()
@@ -352,7 +356,10 @@ class Daemon:
                 self.next_scan = now + 2.0
             evfds = self.inp.fds()
             socks = [self.ctl_srv] + list(self.ctl_clients) + evfds
-            r, _, _ = select.select(socks, [], [], 0.005 if self.keyq else 0.05)
+            lead = self.inp.lead_pending()
+            if lead:
+                self.input_dirty = True          # modifier-first combo: key part follows
+            r, _, _ = select.select(socks, [], [], 0.005 if self.keyq or lead else 0.05)
             for s in r:
                 if isinstance(s, int):                # evdev device
                     if self.inp.handle(s):

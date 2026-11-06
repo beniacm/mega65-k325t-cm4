@@ -82,6 +82,11 @@ harmlessly in hardware but stops GHDL.
 
 ## Keyboard, gamepads
 
+**The carrier's four USB-A ports only work with no PC cable in the mini-USB port.** The module's
+one USB pair is switched by `USBOTG_ID` (FSUSB42 mux, schematic p.2): PC cable in → the Rockchip is
+a USB device (adb) and the USB2514 hub gets no host, so it never switches port power on (keyboards
+stay dark); cable out → host mode, hub, ports powered. Use SSH / `m65ctl` while the cable is out.
+
 **USB keyboard and USB gamepads** plugged into the carrier's USB ports (the CM4 module's USB) are
 forwarded by `m65d.py` + `rockchip/m65input.py`. It reads evdev directly (no python-evdev), grabs the
 devices exclusively, hot-plugs them (rescan every 2 s), and ORs them with scripted input from the
@@ -96,7 +101,7 @@ control port.
 | CapsLock | CAPS LOCK (latching) | | ScrollLock | NO SCROLL |
 | Ctrl / Alt / Win | CTRL / ALT / MEGA | | Tab | TAB |
 | F1/3/5/7/9/11 | same | | F2/4/6/8/10/12 | SHIFT + odd F-key |
-| cursor keys | cursor (up/left = SHIFT+down/right) | | keypad | digits, + - * / . RETURN |
+| cursor keys | cursor; up/left = the MEGA65's dedicated keys (INPUT ctrl b4/b5) | | keypad | digits, + - * / . RETURN |
 | `` ` `` - = [ ] ; ' \ | ← + - @ * : ; = | | letters, digits, , . / | positional |
 
 Gamepads: **first pad → joystick port 2** (most C64 games), second → port 1. D-pad, hat or left stick
@@ -109,7 +114,13 @@ Test without hardware: `rockchip/uinput_test.py` creates a virtual keyboard or g
 inside an adb command die with the session). Verified: `print 6*7` typed on the virtual
 keyboard → ` 42`; pad fire → `$DC00=$6F`, D-pad up → `$7E`, released → `$7F`.
 
-Scripted input (control port): `type`, `typecase`, `key`, `keys`, `joy`, `restore`, `capslock`.
+Scripted input (control port): `type`, `typecase`, `key`, `keys`, `joy`, `restore`, `capslock`,
+`mouse`, `pots`; `keylog` shows the last 20 USB key events and the resulting matrix.
+
+Cursor up/left are sent as the MEGA65 keyboard's dedicated keys (MEGA65 core `keyup`/`keyleft`,
+C64 core keyboard keys 73/74), which the cores turn into RIGHT SHIFT + DOWN/RIGHT with their own
+timing; SHIFT + DOWN through the matrix was not reliable for programs. Other PC keys mapped to a
+modifier + key (Insert, F2…) get the modifier 40 ms first and a 100 ms minimum hold.
 
 ## Scripts
 
