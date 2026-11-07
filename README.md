@@ -96,10 +96,11 @@ CPU reset ─────────────────────┘    
 | SW3 / SW2 | CPU reset / RESTORE |
 | LED2/3/4 | heartbeat / SYSCTL `$D61A.4` / Rockchip SPI or SD request |
 
-**No other CM4 line is used.** The Rockchip's boot DTB (`rockchip/boot_dtb/`, from the earlier BT1120 work) muxes
-GPIO3_A1-A7/B0-B6/C1-C3 to **BT1120 video output**, so those pads are driven by the Rockchip.
-v2 had a raw UART on D13/D14, which caused contention; it was removed in v3.
-`rockchip/rk_pins.py` (run by `m65d_restart.sh`) also switches GPIO3_A7/C2/C3 back to inputs.
+**BT1120 video from the Rockchip:** the boot DTB (`rockchip/boot_dtb/`, from the earlier BT1120 work) muxes
+GPIO3_A1-A7/B0-B6/C1-C3 to **BT1120 video output** (DPI-1, 16 bit + clock). The MEGA65 bitstream receives it
+on 17 FPGA inputs (`linux_fb`, see "One HDMI output: Linux and MEGA65"); no other CM4 line is used.
+(v2 had a raw UART on D13/D14 against those outputs; until linux_fb a script switched three of the pads back
+to GPIO, which cut data bits 5, 14 and 15 of the video. Both are gone.)
 
 ### rk_bridge SPI protocol (mode 0, MSB first)
 
@@ -221,6 +222,40 @@ matrix. The hardware ASCII decoder (e.g. the Intro Disk menus) uses the former, 
 the CIA matrix (e.g. Roguecraft DX) the latter; either alone failed in one of them. Other PC keys mapped to a
 modifier + key (Insert, F2…) get the modifier 40 ms first and a 100 ms minimum hold.
 
+## One HDMI output: Linux and MEGA65
+
+The Rockchip's own Linux display (console, or anything drawn to `/dev/fb0`) can replace the
+MEGA65's picture on the same HDMI output, and the USB keyboard follows the picture:
+
+| | |
+|---|---|
+| **Ctrl+Alt+Insert** | toggle Linux / MEGA65 (picture and keyboard) |
+| `m65ctl view linux\|mega65\|toggle` | the same from a script (TCP 4511 on the Rockchip) |
+| **F5 in vim** (`make run` → `m65run`) | build, load, start on the MEGA65, then switch to it |
+
+Typical loop: edit in vim on the Linux picture, F5, the program runs on the MEGA65 picture with
+the keyboard on the MEGA65, Ctrl+Alt+Insert back to vim.
+
+**How.**  The Rockchip outputs its DPI-1 display as BT1120 (16 bit YCbCr 4:2:2 + clock,
+720x576@50, 27 MHz) on the GPIO3 lines of the CM4 bus (boot DTB, `rockchip/boot_dtb/`).
+`linux_fb.vhdl` receives it (`bt1120_rx.v`, `bt1120_video.v` from the board bring-up), keeps it
+in its **own video buffer** (720x576 RGB332 = 405 KB of block RAM; MEGA65 memory is never
+touched) and, when selected, puts it in place of the core's picture at the input of the HDMI
+encoder.  The output timing is always the core's 576p50, so switching needs no resync; the core
+keeps running underneath.  The input is cropped per line to 720x576, so other Rockchip modes
+still show their top-left part.  The switch is rk_bridge command `0x70 VIDEO`; with the Linux
+picture shown, m65input releases its keyboard/mouse grab (Linux gets them) and the MEGA65's
+matrix stays empty except for the hotkey.  Ctrl+Alt+Del is masked on the Rockchip
+(`ctrl-alt-del.target`), since it reaches Linux with the keyboard released.
+
+Diagnosis: `m65ctl view diag` (frames, lines, pixels per line, lock, the BT1120 clock, which data
+lines toggle); `m65ctl view rise|fall` picks the capture edge (falling is the default and works).
+All 17 BT1120 pads must stay in their video function on the Rockchip -- a pad switched to GPIO
+behind pinctrl still shows "bt1120hd" in debugfs (read the GRF iomux registers).  Kernel messages
+are kept off the console (`/etc/sysctl.d/90-m65-console.conf`, level 4).  `sim/tb_linux_fb.vhdl`
+tests placement, cropping, the RGB332 expansion and the switch (GHDL, `sim/unisim_iddr_sim.vhdl`
+models the IDDR).
+
 ## Linux terminal on the MEGA65 screen (cross-development)
 
 **Ctrl+Alt+T** (MEGA65 core) shows a Linux shell on the MEGA65's own screen in **90×72 text** (the
@@ -306,7 +341,7 @@ scripts/m65ctl.py       # control client: status | type <text> | typecase <Text>
                         #   reset | restore 0/1 | mon <cmd>   (typecase = capitals with SHIFT, for ASCII apps)
 scripts/sd_populate.sh  # copy system files + ROM + extra dirs into an existing (FDISK-made) card image
 rockchip/m65d.py        # Rockchip daemon (root): SD server, monitor pipe :4510, control :4511
-rockchip/m65d_restart.sh, rockchip/m65d_stop.sh, rockchip/rk_pins.py
+rockchip/m65d_restart.sh, rockchip/m65d_stop.sh
 rockchip/m65input.py    # USB keyboard/gamepad/1351-mouse bridge (imported by m65d.py); uinput_test.py = virtual devices
 rockchip/m65flash.py    # configuration flash: id | backup | write <slot> <bit> | verify | boot <slot>
 rockchip/m65d.service   # systemd (enabled): m65d, SCHED_FIFO, performance governor, Restart=always;
@@ -522,6 +557,8 @@ write, `soft_rtc.vhdl` keeps the copy you read back):
 | 0 | **1 MB chip RAM** | CPU/DMA see 384 KB; writes to `$60000-$FFFFF` are dropped | CPU/DMA see `$00000-$FFFFF` |
 | 1 | **raster DMA list** | off | DMA list at `$FFD71F4-7` runs every frame |
 | 2 | **64 KB colour RAM** | 32 KB, `$FF88000-$FF8FFFF` mirrors `$FF80000-` | 64 KB, separate halves |
+| 3 | (24 extra sprites: branch `k325t-extra-sprites`, not in this build) | | |
+| 4 | **fast RRB painting** | VIC-IV paints 1 pixel per cycle | 2 pixels per cycle: about twice the RRB layers per line |
 
 **1 MB chip RAM.**  The CPU (`gs4510`: `chipram_size`, `chipram_1mb`) and the VIC-IV
 (`chipram_size`, a 20-bit fetch port) were already written for up to 1 MB; no board had the
@@ -545,8 +582,18 @@ CPU's own DMA list address is saved/restored around them; DMA options do not car
 colour RAM addresses; real boards have 32 KB (the top half mirrors).  `colourram_k325t.vhdl` adds
 the second 32 KB; with bit 2 clear, address bit 15 is forced to 0 on both ports (the mirror).
 
+**Fast RRB painting.**  The VIC-IV draws each raster line's characters (and every raster-rewrite
+layer: GOTOX objects, the MEGA65's "sprites from characters") into a line buffer, one pixel per
+pixel clock; what does not fit into the line time is cut off.  With bit 4 the buffer is split
+into even/odd banks (`viciv.vhdl`, two `ram18x2k`) and the four paint paths (full colour, 4-bit
+NCM, mono, multicolour) write two pixels per cycle.  Same picture (0 pixel difference on the
+BASIC screen), more layers: `scripts/rrb_stress.py` finds 2 full-width 40-character layers at 1
+px/cycle and 3 at 2 px/cycle.  With the bit clear the paint timing is the original one
+(the first 47 intro-disk demos compared with the previous build: same pictures; Roguecraft DX
+checked with the bit set in-game).
+
 Tests: `sim/tb_chipram_k325t.vhdl`, `sim/tb_colourram_k325t.vhdl` (GHDL); on the board
-`scripts/chipram_test.py`, `scripts/rasterdma_test.py`.
+`scripts/chipram_test.py`, `scripts/rasterdma_test.py`, `scripts/rrb_stress.py`.
 
 ## Ethernet (MEGA65 MAC → LAN through the Rockchip)
 
@@ -653,12 +700,12 @@ check` compares a board with this list (read-only) and passed on the current boa
    vendor kernel 4.19.232, hostname `linaro-alip`, login `linaro`/`linaro`, passwordless sudo).
    It already has python3 `spidev` 3.6, gcc and python3-dev; nothing else is installed for this
    project (`dosfstools` came with the qmtech SD work, not needed here).
-2. **Boot partition (p3)**: `rockchip/boot_dtb/boot_sd.img.xz` (raw sha256 `a34f418c…`; flash
+2. **Boot partition (p3)**: `rockchip/boot_dtb/boot_sd.img.xz` (raw sha256 `35f646ee…`; flash
    recipe and recovery in `rockchip/boot_dtb/README.md`): the stock DTB plus the BT1120 video and
-   sdmmc2 edits of the earlier bring-up. This deployment does not use either, but it is the only
-   boot image it was tested on; `rk_pins.py` gives the three CM4 pads the bitstreams use back
-   from the BT1120 pinmux. With the factory image (`p3_boot_backup.img.xz`, same directory) it
-   should work in principle, untested.
+   sdmmc2 edits of the earlier bring-up, BT1120 mode 720x576@50. The BT1120 output carries the
+   Linux picture into the MEGA65 bitstream (linux_fb); the sdmmc2 edit is unused. With the factory
+   image (`p3_boot_backup.img.xz`, same directory) everything except the Linux picture should work,
+   untested.
 3. **Access**: a fixed DHCP address (the scripts default to `192.168.1.143`, `M65_HOST` overrides);
    install the PC's SSH key for `root` (`ssh-copy-id linaro@…`, then
    `sudo cp ~linaro/.ssh/authorized_keys /root/.ssh/`) and **change the default `linaro` password**.
@@ -682,7 +729,7 @@ check` compares a board with this list (read-only) and passed on the current boa
 - **v1** (2026-11-05): HDMI-only test. **First-light OK**: MEGAFLASH screen, clean 720x576 capture via J11.
 - **v2**: adds `rk_bridge` + `sd_emu` (Rockchip termination), raw UART on D13/D14 and PS/2 on D10/C9.
   Found on hardware: those CM4 pads are **BT1120 outputs on the Rockchip** → contention on D13
-  and a jammed monitor RX. Fixed at runtime with `rk_pins.py`, removed from the design in v3.
+  and a jammed monitor RX. Fixed at runtime with a pad script, removed from the design in v3.
 - **v3** (current, `bin/qmtech-k325t-cm4.bit`): CM4 bus = 4 spi3 lines only. WNS +1.006 ns,
   about 22% LUTs, 30% BRAM. **`scripts/smoke_test.sh` → SMOKE PASS**, verified on hardware:
   - JTAG program → MEGAFLASH (QSPI holds non-MEGA65 slots; two RUN/STOPs get past it)

@@ -5,8 +5,6 @@ Description=MEGA65 / C64 bridge I/O: m65io (SD card image, serial monitor :4510,
 
 [Service]
 WorkingDirectory=/root/m65
-# release the CM4 pads the bitstreams use from the boot DTB's BT1120 pinmux
-ExecStartPre=/usr/bin/python3 /root/m65/rk_pins.py
 # keep the SPI controller's clock on: runtime PM switched it off between transfers and every
 # transfer paid for the resume (measured: +34 % SPI transactions/s, +5 % SD throughput when off)
 ExecStartPre=-/bin/sh -c 'echo on > /sys/bus/platform/devices/fe640000.spi/power/control'

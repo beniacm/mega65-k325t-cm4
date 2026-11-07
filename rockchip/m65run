@@ -17,7 +17,9 @@ writes the PRG through the serial monitor (binary load, ~190 KB/s) and starts it
   * a BASIC-style program after a C program (or with the CPU parked): BASIC is broken, so the
     MEGA65 core is reset first and m65run waits for READY. (leaving the start menu with '/').
     The kind of the last program is kept in /tmp/m65run.last.
-Back to the shell: Ctrl+Alt+T."""
+Afterwards the HDMI output and the keyboard are switched to the MEGA65 (m65d 'view mega65';
+K325T bitstreams with linux_fb show the Rockchip's own picture otherwise).
+Back to the shell: Ctrl+Alt+T (shell on the MEGA65 screen) or Ctrl+Alt+Insert (Linux picture)."""
 import socket
 import sys
 import time
@@ -189,6 +191,7 @@ def main():
         mon.cmd("g%x" % entry)
         mon.cmd("t0")
         print("m65run: %d bytes at $%04x, started at $%04x (CPU was parked)" % (len(data), addr, entry))
+        ctl("view mega65")
         return
     mon.load(addr, data)
     print("m65run: %d bytes at $%04x" % (len(data), addr))
@@ -204,6 +207,7 @@ def main():
     time.sleep(0.2)
     ctl("type " + start + "\\n")
     print("m65run: typed %s" % start)
+    ctl("view mega65")                             # picture + keyboard to the MEGA65
 
 
 if __name__ == "__main__":

@@ -3,11 +3,12 @@
 **For this project:** `rockchip/deploy/setup_rockchip.sh` checks for / installs
 **`boot_sd.img.xz`** — the stock Luckfox boot image with a modified kernel DTB, carried over
 from the board bring-up (BT1120 video out on GPIO3, then `sdmmc2` enabled: `edit_dts.py`
-→ `fdt_new.dts`, `edit_dts_sd.py` → `fdt_sd.dts`, `make_boot.py` repacks).  The MEGA65 work
-does not use the video or SD-passthrough paths; what matters is that this DTB muxes
-GPIO3_A1-A7/B0-B6/C1-C3 to video **outputs** at boot, so `rockchip/rk_pins.py` releases the
-lines it shares with the FPGA (run by `m65d_restart.sh`).  `sd_mode.py` (../) is the pad-mux
-switcher from that work, kept as the reference for poking SYS_GRF behind pinctrl.
+→ `fdt_new.dts`, `edit_dts_sd.py` → `fdt_sd.dts`, `make_boot.py` repacks), with the BT1120 mode
+changed to 720x576@50 for the MEGA65's `linux_fb` (the Linux picture on the MEGA65's HDMI output).
+The DTB muxes GPIO3_A1-A7/B0-B6/C1-C3 to BT1120 **outputs**; all 17 lines must stay that way (a
+pad poked to GPIO behind pinctrl still shows "bt1120hd" in debugfs -- read the GRF iomux
+registers).  The SD-passthrough path is unused.  `sd_mode.py` (../) is the pad-mux switcher from
+that work, kept as the reference for poking SYS_GRF behind pinctrl.
 **`p3_boot_backup.img.xz`** is the untouched factory p3 dump for recovery (below).
 Both images contain the vendor (Luckfox, Linux 4.19) kernel; its source is in the Luckfox SDK.
 
@@ -75,13 +76,18 @@ verified pixel-clean: fb0 color bars captured intact through the FPGA
 `make_boot.py` = one-command boot-image rebuild from `fdt_new.dtb`.
 Note: i2c3 loses GPIO3_B5/B6 to the bt1120 pinmux (kernel log line is expected).
 
-## Deployed image: `boot_sd.img.xz` (BT1120 + sdmmc2) — on the board since 2026-07-18
-`edit_dts_sd.py` (fdt_new.dts → `fdt_sd.dts`: sdmmc2 `dwmmc@fe000000` okay, 4-bit, broken-cd,
-supports-sd, 8 MHz) on top of the BT1120 DTB, repacked like above into `boot_sd.img`
-(24,863,744 bytes, sha256 `a34f418cacd9a595b6f1876c0fe43b235d6f210ff1268d1c3aace4c96db766b7`).
-This is the boot image the MEGA65/C64 deployment (github.com/beniacm/mega65-k325t-cm4,
-`rockchip/deploy/`) was built and tested on; `setup_rockchip.sh check` there verifies it.
+## Deployed image: `boot_sd.img.xz` (BT1120 720x576@50 + sdmmc2) — on the board since 2026-11-07
+The MEGA65 bitstream shows the Rockchip's picture through its own video buffer (`linux_fb`, 720x576,
+on the core's 576p50 timing), so DPI-1 runs the CEA 576p50 mode: `fdt_sd.dts` `bt1120-panel` timing =
+27 MHz, 720/12/64/68 x 576/5/5/39 (front porch/sync/back porch), the rest unchanged. Repacked like
+above into `boot_sd.img` (24,863,744 bytes, sha256
+`35f646ee0b55285fe7d680d5a9623155fedf086a833ee4f3e85a3a27aacc8930`); `setup_rockchip.sh check` in
+the MEGA65 deployment verifies it.  The board has no `xz`: copy the unpacked image over.
 ```
-xz -dc rockchip/boot_dtb/boot_sd.img.xz | sha256sum            # expect a34f418c…
-xz -dc rockchip/boot_dtb/boot_sd.img.xz | ssh rock-root 'dd of=/dev/block/by-name/boot bs=1M conv=fsync && sync'
+xz -dc rockchip/boot_dtb/boot_sd.img.xz | sha256sum            # expect 35f646ee…
+xz -dc rockchip/boot_dtb/boot_sd.img.xz > /tmp/boot_sd.img && scp /tmp/boot_sd.img rock-root:/root/
+ssh rock-root 'dd if=/root/boot_sd.img of=/dev/block/by-name/boot bs=1M conv=fsync && sync && reboot'
 ```
+`boot_sd_720p.img.xz` (sha256 `a34f418c…`) is the previous image, 1280x720@60 (the July bring-up
+mode, 2026-07-18 .. 2026-11-07): `edit_dts_sd.py` (fdt_new.dts → sdmmc2 `dwmmc@fe000000` okay, 4-bit,
+broken-cd, supports-sd, 8 MHz) on top of the BT1120 DTB. linux_fb crops it to its top-left 720x576.

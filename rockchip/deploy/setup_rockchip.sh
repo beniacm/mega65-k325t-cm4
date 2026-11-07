@@ -17,7 +17,7 @@ HERE=$(cd "$(dirname "$0")/.." && pwd)            # .../rockchip
 DEST=/root/m65
 # files deployed to /root/m65 (everything the service and the PC-side tools call)
 FILES="m65d_restart.sh m65d_stop.sh m65_bootreset.py m65io.c m65d.py m65input.py m65flash.py
-       rk_pins.py uinput_test.py input_bench.py input_selftest.py linktest.py usbtest.sh
+       uinput_test.py input_bench.py input_selftest.py linktest.py usbtest.sh
        m65term.py m65run"
 UNITS="m65d.service m65io.service m65-bootreset.service m65term.service"
 ENABLE="m65d.service m65-bootreset.service m65term.service"   # m65io.service comes with m65d (Wants)
@@ -32,11 +32,14 @@ IDE="ide/vim/syntax/ca65.vim:/usr/share/vim/vimfiles/syntax/ca65.vim
      ide/mega65_regs.inc:/usr/local/share/m65ide/asminc/mega65_regs.inc
      ide/m65doc:/usr/local/bin/m65doc
      ide/m65new:/usr/local/bin/m65new
+     ide/sysctl-console.conf:/etc/sysctl.d/90-m65-console.conf
      m65-safe.shutdown:/lib/systemd/system-shutdown/m65-safe.shutdown"
-# sha256 of the deployed boot image (rockchip/boot_dtb/boot_sd.img.xz unpacked, 24863744 bytes) and
+# sha256 of the deployed boot image (rockchip/boot_dtb/boot_sd.img.xz unpacked, 24863744 bytes: BT1120
+# 720x576@50 for linux_fb), of its 720p60 predecessor (boot_sd_720p.img.xz) and
 # of the factory p3 dump (rockchip/boot_dtb/p3_boot_backup.img.xz)
 BOOT_LEN=24863744
-BOOT_SHA=a34f418cacd9a595b6f1876c0fe43b235d6f210ff1268d1c3aace4c96db766b7
+BOOT_SHA=35f646ee0b55285fe7d680d5a9623155fedf086a833ee4f3e85a3a27aacc8930
+BOOT720_SHA=a34f418cacd9a595b6f1876c0fe43b235d6f210ff1268d1c3aace4c96db766b7
 FACTORY_SHA=bc8d2529492bab7dbf18632f6b1653acfbcc5e8632fb3da702e6c17fb9ea9531
 
 # the board's sshd resets connections now and then: retry
@@ -57,6 +60,7 @@ check() {
     echo CA65 \$(ca65 --version 2>&1 | head -1);
     echo LLVMMOS \$(/opt/llvm-mos/bin/clang --version 2>/dev/null | head -1);
     echo TZ \$(cat /etc/timezone);
+    echo CAD \$(systemctl is-enabled ctrl-alt-del.target 2>/dev/null);
     echo CARD \$(stat -c %s $DEST/card.img 2>/dev/null)") || { echo "cannot reach $HOST"; exit 2; }
   for f in $FILES; do
     if echo "$out" | grep -q "^$(md5l "$HERE/$f")  $f\$"; then echo "ok    $DEST/$f"; else echo "DIFF  $DEST/$f"; bad=1; fi
@@ -74,7 +78,8 @@ check() {
   [ "$(echo "$out" | awk '/^GOV/{print $2}')" = performance ] && echo "ok    cpufreq governor performance" \
     || echo "WARN  cpufreq governor $(echo "$out" | awk '/^GOV/{print $2}') (m65d.service sets performance)"
   case "$(echo "$out" | awk '/^BOOT/{print $2}')" in
-    $BOOT_SHA) echo "ok    boot partition = boot_sd.img (BT1120 + sdmmc2 DTB)";;
+    $BOOT_SHA) echo "ok    boot partition = boot_sd.img (BT1120 576p50 + sdmmc2 DTB)";;
+    $BOOT720_SHA) echo "WARN  boot partition = boot_sd_720p.img (Linux picture cropped to its top-left 720x576)";;
     *) if [ "$(echo "$out" | awk '/^FACT/{print $2}')" = "$FACTORY_SHA" ]; then
          echo "WARN  boot partition = factory image (untested with this deployment, see README)"
        else echo "DIFF  boot partition: unknown image"; bad=1; fi;;
@@ -93,6 +98,10 @@ check() {
     || echo "WARN  llvm-mos missing (run deploy/build_llvm_mos.sh on the PC)"
   [ "$(echo "$out" | awk '/^TZ /{print $2}')" = "$TZ" ] && echo "ok    timezone $TZ" \
     || { echo "DIFF  timezone $(echo "$out" | awk '/^TZ /{print $2}') (want $TZ)"; bad=1; }
+  # Ctrl+Alt+Del is the MEGA65 reset; with the keyboard released to Linux (view linux) it
+  # must not reboot the Rockchip
+  [ "$(echo "$out" | awk '/^CAD /{print $2}')" = "masked" ] && echo "ok    ctrl-alt-del.target masked" \
+    || { echo "DIFF  ctrl-alt-del.target not masked"; bad=1; }
   local card; card=$(echo "$out" | awk '/^CARD/{print $2}')
   [ -n "$card" ] && echo "ok    card.img $((card / 1048576)) MB" || { echo "DIFF  $DEST/card.img missing (README: SD card image)"; bad=1; }
   [ $bad = 0 ] && echo "== $HOST matches the repo" || echo "== $HOST differs (see DIFF lines)"
@@ -108,7 +117,9 @@ install() {
            cp deploy/config.txt /boot/config.txt && echo 'config.txt replaced (old: /boot/config.txt.pre-m65)'; fi &&
          rm -r deploy && gcc -O2 -Wall -o m65io m65io.c &&
          for e in $(echo $IDE); do install -D -m \$(case \${e#*:} in /usr/local/bin/*|*.shutdown) echo 755;; *) echo 644;; esac) \${e%%:*} \${e#*:} || exit 1; done && rm -r ide m65-safe.shutdown &&
+         rm -f rk_pins.py && sysctl -q -p /etc/sysctl.d/90-m65-console.conf &&
          timedatectl set-timezone $TZ &&
+         ln -sfn /dev/null /etc/systemd/system/ctrl-alt-del.target &&    # mask (the image links it to reboot.target)
          systemctl daemon-reload && systemctl enable $ENABLE" || { echo "install FAILED"; exit 1; }
   echo "installed; m65io built.  Reboot the Rockchip (or: ssh ... sh $DEST/m65d_restart.sh), then: $0 check $HOST"
 }

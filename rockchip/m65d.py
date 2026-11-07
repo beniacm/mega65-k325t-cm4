@@ -128,6 +128,21 @@ class Bridge:
         self.spi.xfer2([0x60, (addr >> 24) & 0xFF, (addr >> 16) & 0xFF, (addr >> 8) & 0xFF,
                         addr & 0xFF, 0xA5])
 
+    def set_video(self, sel):
+        """0x70 VIDEO: b0 = 1 the Rockchip's own picture (linux_fb), b1 = BT1120 rising-edge capture"""
+        self.spi.xfer2([0x70, sel & 0xFF])
+
+    def video_diag(self):
+        """STATUS 59..63: VIDEO register + linux_fb diagnostics (older bitstreams: zeros)"""
+        r = self.spi.xfer2([0x01, 0] + [0] * 72)[2:]
+        d, w = r[60:64], r[64:72]
+        return {"sel": r[59], "frames": d[0], "lines": d[1] << 4 | d[2] >> 4,
+                "rise": d[2] >> 3 & 1, "de_seen": d[2] >> 2 & 1, "yc_swapped": d[2] >> 1 & 1,
+                "locked": d[2] & 1, "px_per_line": d[3] << 4,
+                # raw bus per 2^20-clock window: lines that were high / low at least once
+                "seen_hi": "%04x" % (w[0] << 8 | w[1]), "seen_lo": "%04x" % (w[2] << 8 | w[3]),
+                "ff_lo": w[4], "ff_hi": w[5], "clk64k": w[6] << 8 | w[7]}
+
     def set_input(self, ctrl, ja, jb, cols, pots=(0xFF, 0xFF, 0xFF, 0xFF)):
         # bytes 13..16 = pot1 x, pot1 y, pot2 x, pot2 y (SID values; older bitstreams ignore them)
         self.spi.xfer2([0x30, ctrl & 0xFF, ja & 0x1F, jb & 0x1F] + [c & 0xFF for c in cols]
@@ -430,12 +445,39 @@ class Daemon:
         if act == "terminal":
             print("m65d: terminal " + self.terminal("toggle"), flush=True)
             return
+        if act.startswith("view "):
+            print("m65d: " + self.view(act.split()[1]), flush=True)
+            return
         if self.inp.term_mode:                 # reset / core switch: give the MEGA65 back first
             self.terminal("off")
         if act == "reset":
             self.command("reset")
         elif act.startswith("core "):
             print("m65d: " + self.switch_core(act.split()[1]), flush=True)
+
+    # ---- one HDMI output, two pictures: the core's, or the Rockchip's own (linux_fb in the
+    # K325T bitstream, fed over BT1120).  The keyboard follows the picture.
+    def view(self, target):
+        if target in ("rise", "fall"):          # BT1120 capture edge (bring-up / diagnosis)
+            self.vid_edge = 2 if target == "rise" else 0
+            self.br.set_video((1 if self.inp.linux_focus else 0) | self.vid_edge)
+            return "ok view capture edge " + target
+        if target == "diag":
+            a = self.br.video_diag()
+            time.sleep(0.2)
+            b = self.br.video_diag()
+            b["frames_per_s"] = ((b["frames"] - a["frames"]) & 0xFF) * 5
+            b["bt_clk_mhz"] = round(((b["clk64k"] - a["clk64k"]) & 0xFFFF) * 65536 * 5 / 1e6, 1)
+            return "ok " + " ".join("%s=%s" % kv for kv in b.items())
+        if target == "toggle":
+            target = "mega65" if self.inp.linux_focus else "linux"
+        if target not in ("linux", "mega65"):
+            return "err view linux|mega65|toggle|rise|fall|diag"
+        if target == "linux" and self.inp.term_mode:
+            self.terminal("off")
+        self.br.set_video((1 if target == "linux" else 0) | getattr(self, "vid_edge", 0))
+        self.inp.set_linux_focus(target == "linux")
+        return "ok view " + target
 
     # ---- Linux terminal on the MEGA65 screen (m65term.py)
     def term_call(self, line, reply=True, timeout=8.0):
@@ -497,6 +539,10 @@ class Daemon:
             return self.latency(rest.strip())
         if cmd == "terminal":
             return self.terminal(a[0] if a else "state")
+        if cmd == "view":
+            # view linux|mega65|toggle: HDMI picture + keyboard focus (also Ctrl+Alt+Insert)
+            # view rise|fall: BT1120 capture edge; view diag: linux_fb receiver state
+            return self.view(a[0] if a else "toggle")
         if cmd == "rtc":
             self.rtc_schedule()
             return "ok RTC set at the next full second"

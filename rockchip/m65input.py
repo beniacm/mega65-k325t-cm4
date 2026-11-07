@@ -172,7 +172,10 @@ MOD_LEAD = 0.04
 MOD_HOLD = 0.10
 CTRL_KEYS, ALT_KEYS = {29, 97}, {56, 100}
 SYSTEM_KEYS = {111: "reset", 59: "core mega65", 60: "core c64", 88: "core toggle",  # Del F1 F2 F12
-               36: "joyswap", 20: "terminal", 107: "poweroff"}                      # J (local), T, End
+               36: "joyswap", 20: "terminal", 107: "poweroff",                      # J (local), T, End
+               110: "view toggle"}                                                  # Insert
+# (The view hotkey is not an F key: with the keyboard released to Linux, Ctrl+Alt+Fn also
+#  switches the Linux console's virtual terminals.)
 
 # Terminal mode (m65term): US layout -> bytes for the shell; special keys by name
 TERM_KEYS = {1: "\x1b", 14: "\x7f", 15: "\t", 28: "\r", 96: "\r", 57: " ",
@@ -328,6 +331,7 @@ class InputHub:
         self.term_caps = False
         self.term_out = []                  # messages for m65term ("k NAME mods" / "t hex")
         self.actions = []                   # system-key actions for m65d (reset / core switch)
+        self.linux_focus = False            # keyboards released to Linux (view linux)
         self.lead = {}                      # keycode -> press time (modifier-first combos)
         self.keylog = []                    # last key events (m65ctl keylog)
         self.held = {}                      # keycode -> release time (released early, held)
@@ -396,7 +400,8 @@ class InputHub:
             except OSError:
                 continue
             try:
-                fcntl.ioctl(fd, EVIOCGRAB, 1)
+                if not self.linux_focus:
+                    fcntl.ioctl(fd, EVIOCGRAB, 1)
             except OSError:
                 pass
             try:
@@ -549,6 +554,12 @@ class InputHub:
                 self.caps = not self.caps       # latching key, like the real one
         elif code == KEY_PAGEUP:
             self.restore = val != 0
+        elif self.linux_focus and not (code in SYSTEM_KEYS and (val == 0 and code in self.sys_held or
+                                                               val and self.kbd_keys & CTRL_KEYS
+                                                               and self.kbd_keys & ALT_KEYS)):
+            # Linux has the keyboard (released): only watch the modifiers for the hotkeys
+            if code in CTRL_KEYS or code in ALT_KEYS:
+                (dev.keys.add if val else dev.keys.discard)(code)
         elif self.term_mode and not (code in SYSTEM_KEYS and (val == 0 and code in self.sys_held or
                                                                val and self.kbd_keys & CTRL_KEYS
                                                                and self.kbd_keys & ALT_KEYS)):
@@ -609,6 +620,21 @@ class InputHub:
             data = b"\x1b" + data
         self.term_out.append("t " + data.hex())
 
+    def set_linux_focus(self, on):
+        """keyboards to Linux (released, the MEGA65 sees no keys) or back to the MEGA65 (grabbed)"""
+        self.linux_focus = on
+        for fd, dev in self.devs.items():
+            if "kbd" in dev.roles or "mouse" in dev.roles:
+                try:
+                    fcntl.ioctl(fd, EVIOCGRAB, 0 if on else 1)
+                except OSError:
+                    pass
+            dev.keys.clear()                # nothing stays pressed on either side
+        self.lead.clear()
+        self.held.clear()
+        self._merge_keys()
+        self.log("m65input: keyboard focus %s" % ("Linux" if on else "MEGA65"))
+
     def set_term_mode(self, on):
         self.term_mode = on
         self.lead.clear()
@@ -646,7 +672,9 @@ class InputHub:
             return cols
         names = []
         now = time.time()
-        for code in set(self.kbd_keys) | set(self.held):
+        # with the keyboard released to Linux the MEGA65 sees no keyboard keys at all
+        # (the modifiers are still tracked, only for the view hotkey)
+        for code in (set() if self.linux_focus else set(self.kbd_keys) | set(self.held)):
             k = self._names(code)
             if code in self.lead and now - self.lead[code] < MOD_LEAD:
                 k = [n for n in k if n in MOD_NAMES]        # modifier first
