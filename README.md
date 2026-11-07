@@ -380,12 +380,26 @@ prints `NO-RTC-2000` on ours (`$D629 = $62`).  `scripts/rom_rtcpatch.py` raises 
 07-NOV-2026 00:00:01`, `DT$` / `TI$` equal to the Rockchip's clock.  Changing the board id instead
 would make HYPPO and the tools treat the board as an R3.
 
-**Safe power-off** (the Rockchip's root file system is on eMMC): **Ctrl+Alt+End** on the USB
-keyboard (or `m65ctl poweroff`) → red screen "SHUTTING DOWN - WAIT FOR: SAFE TO SWITCH OFF" →
-`systemctl poweroff` → `/lib/systemd/system-shutdown/m65-safe.shutdown` runs once every file system
-is read-only and writes the prepared monitor commands straight over SPI → green screen "ROCKCHIP
-HALTED - SAFE TO SWITCH OFF" (~20 s).  The FPGA keeps running; the MEGA65 card writes are on the
-eMMC within 0.1 s anyway (`m65io` `fdatasync`s once writes pause).
+**Power-off** (the Rockchip's root file system is on eMMC): **Ctrl+Alt+End** on the USB
+keyboard (or `m65ctl poweroff`) → m65d asks **plugd** on the PC with the smart plug to cut the
+power → red screen "SHUTTING DOWN - POWER OFF FOLLOWS" → `systemctl poweroff` →
+`/lib/systemd/system-shutdown/m65-safe.shutdown` runs once every file system is unmounted or
+read-only: it writes the prepared monitor commands over SPI (green "ROCKCHIP HALTED") and sends
+plugd UDP "halted" → plugd cuts the plug 2 s later.  Measured: halted 3 s after the key, power
+off after 6 s.
+- `scripts/plugd.py` (port 4530, accepts only the Rockchip's address): cuts after "halted", or,
+  if that never comes, once the Rockchip's kernel has not answered a TCP connect at all for 15 s
+  (a reset still counts as alive, so this means halted, not just "sshd stopped"); if the
+  Rockchip still answers after 5 min it does NOT cut.  Install once on the PC (user service):
+  `ln -sf ~/projects/mega65/scripts/plugd.service ~/.config/systemd/user/ && systemctl --user
+  daemon-reload && systemctl --user enable --now plugd`.
+- m65d `--plug-host` (default `$M65_PLUG_HOST` or `192.168.1.133:4530`, `''` = none).  Without
+  plugd the screens read "WAIT FOR: SAFE TO SWITCH OFF" / "SAFE TO SWITCH OFF" and you switch
+  off by hand.
+- The FPGA keeps running until the plug goes; the MEGA65 card writes are on the eMMC within 0.1 s
+  anyway (`m65io` `fdatasync`s once writes pause).
+- The RTC is only set once the Rockchip's clock is NTP-synchronised (no battery: right after boot
+  it is stale -- once it set the MEGA65 to March).
 
 **SPI clock per bitstream**: how fast MISO is clean depends on the build -- one with the MISO
 register placed far from its pin failed every status read above 25 MHz, and m65io used to hang
@@ -398,10 +412,21 @@ the pad delays no longer depend on placement.  That build: linktest 0 errors in 
 (50 fails, as before), `sdlinktest.py` 200 random + 300 consecutive sectors at 40 MHz, 0 mismatches,
 298/300 cache hits.
 
-## 8 MB attic RAM (DDR3)
+## Attic RAM (DDR3): 8 MB compatible, 64 MB unlocked
 
-The board's 256 MB DDR3 (MT41K128M16, bank 34) provides the MEGA65's **8 MB attic RAM**
-(`$8000000-$87FFFFF`, mirrored above, like the HyperRAM of a real MEGA65).
+The board's 256 MB DDR3 (MT41K128M16, bank 34) provides the MEGA65's attic RAM.
+- **After any reset: 8 MB** (`$8000000-$87FFFFF`, mirrored above), exactly like the HyperRAM
+  of a real MEGA65, so unmodified software (size probes, mirror tricks) behaves as there.
+- **64 MB on request**: `POKE $BFFFFFC,64` (BASIC 65) or `lpoke(0xbfffffc,64)` →
+  `$8000000-$BFFFFEF` is RAM, mirrored from `$C000000`. `PEEK($BFFFFFC)` reads the current
+  size in MB (8 or 64); writing any other value returns to 8 MB, and so does every CPU reset.
+  Software can detect the board by writing 64 and reading 64 back.
+- `$BFFFFF0-$BFFFFFF` are controller registers in both sizes, as on a real MEGA65 (its HyperRAM
+  controller's registers sit there; it ignores writes to `$BFFFFFC`). The other 15 read 0.
+  So in 64 MB mode the top 16 bytes are not RAM; a DMA fill of the last 64 KB block must stop
+  16 bytes short, or it rewrites the size register.
+- From BASIC 65: `PEEK`/`POKE` with 28-bit addresses and `EDMA` copies/fills (as the memtest
+  does); in machine code `LDA [zp],Z` with a 32-bit pointer, or the DMAgic.
 - `ddr3_attic.vhdl` implements the `slow_devices` expansion-RAM byte interface (the one the
   hyperram/sdram controllers provide on real boards). Its request side runs on **pixelclock**
   (81 MHz, slow_devices' clock). Each byte access is one masked 16-byte MIG write or one
@@ -415,9 +440,11 @@ The board's 256 MB DDR3 (MT41K128M16, bank 34) provides the MEGA65's **8 MB atti
   with the MIG and the live expansion-RAM path, synth_design's Timing Optimization phase never
   finished (twice, >20 min). Placement and routing stay timing driven; timing is met.
 - Verified on hardware: HYPPO detects it (its probe pattern is at `$8000000` after boot).
-  `scripts/attic_test.py` (monitor spot tests, boundaries, mirror) passes, and the BASIC 65
-  memtest typed in by `scripts/attic_memtest_basic.sh` (DMA-fill/verify all 128 × 64 KB blocks,
-  23 address lines, 8 MB mirror, 4 patterns at 500 random addresses) prints **ATTIC RAM OK**.
+  `scripts/attic_test.py [mb]` (8 MB mode + register, unlock, monitor spot tests, every address
+  line, boundaries, mirror, back to 8 MB) and the BASIC 65 memtest typed in by
+  `scripts/attic_memtest_basic.sh [mb]` (unlock, DMA-fill/verify all 64 KB blocks, every address
+  line, mirror, 4 patterns at 500 random addresses; prints **ATTIC RAM OK**). Both default to
+  64 MB; `8` tests the compatible mode only. (8 MB build: both passed.)
 - **CPU fast path** (as R6's SDRAM controller): every read publishes its 8-byte line to the CPU
   (`slowram_cache_line*`). The CPU's inc/dec toggles trigger silent next/previous-line reads, and
   writes update the published line in place (matched on the physical address, so mirror aliases
@@ -425,9 +452,10 @@ The board's 256 MB DDR3 (MT41K128M16, bank 34) provides the MEGA65's **8 MB atti
   `scripts/attic_bench.py` (8 MB sequential `LDA [$FB],Z` at 40 MHz in C64 mode, A/B on one bitstream):
   cache off 1171 KB/s → **cache on 2084 KB/s (1.8×)** → cache + advance 2395 KB/s (2.05×).
   (C64 mode runs the CPU at 1 MHz until `POKE 0,65`; the benchmark sets it.)
-- Simulation: `sim/tb_ddr3_attic.vhdl` (MIG native-UI model with independent
-  `app_rdy`/`app_wdf_rdy`, 81 MHz request side): worst read 26 cycles against slow_devices'
-  128-cycle limit.
+- Simulation: `sim/tb_ddr3_attic.vhdl` (MIG native-UI model over the full address with
+  independent `app_rdy`/`app_wdf_rdy`, 81 MHz request side): 8 MB mirrors after reset, size
+  register, unlock, all 26 address lines, 64 MB mirror, registers are not RAM and never
+  prefetched, reset → 8 MB; worst read 27 cycles against slow_devices' 128-cycle limit.
 
 ## Ethernet (MEGA65 MAC → LAN through the Rockchip)
 
@@ -469,6 +497,13 @@ MEGA65 MAC ─RMII─ eth_vphy ═ rk_bridge ═ SPI ═ m65io ─AF_PACKET─ e
 | `K325T/gen_top.py` + `top_qmtech_k325t_cm4.tpl.vhd` | top generated from the R6 top: clocks, MIG, bridge, SD emulator, flash, IPROG |
 | M2M `framework.vhd` | generics `G_EXT_HR` (external memory), `G_TMDS_INVERT` (J11), `G_NO_I2C` |
 
+**REU: 16 MB** (menu "Simulate REU 16MB"; upstream: 1750 with 512 KB). MiSTer's `reu.v` already
+supports 16 MB (`cfg = "11"`); `reu_mapper` no longer wraps at the MEGA65's 8 MB HyperRAM and
+puts REU bytes 0-$FFFFFF at DDR3 4-20 MB (the M2M framework uses 0-4 MB; the CRT buffer shares
+the 4 MB start, but CRT and REU are alternative expansion-port modes). `sim/tb_c64_reu.vhdl` uses
+a full-address MIG model and checks blocks that would alias at 512 KB / 4 MB / 8 MB plus the top
+block (fails with the old mapper, as it should).
+
 Works on hardware: BASIC, keyboard, menu (HELP), SD/D64 load + save, REU, EasyFlash cartridges
 (Eye of the Beholder, Metal Warrior Trilogy), disk games (Metal Warrior), joysticks and the
 **1351 mouse** (USB mouse → evdev → SID POT values, port 2; `m65ctl mouse dx dy [btn]`).
@@ -497,7 +532,7 @@ No PC or JTAG is needed in normal use:
 | Ctrl+Alt+F12 | `core toggle` | MEGA65 ⇄ C64 |
 | Ctrl+Alt+F1 / F2 | `core mega65` / `core c64` | |
 | Ctrl+Alt+Del | `reset` | reset the running core |
-| Ctrl+Alt+End | `poweroff` | shut the Rockchip down safely (see below) |
+| Ctrl+Alt+End | `poweroff` | shut the Rockchip down safely, then plugd cuts the smart plug (see below) |
 
 Flash (S25FL128L, 16 MB), written from the Rockchip with `rockchip/m65flash.py` while either core
 runs (16 MB read 15 s, a 6 MB core about 1 min including verify):

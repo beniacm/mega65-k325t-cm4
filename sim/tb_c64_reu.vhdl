@@ -91,8 +91,11 @@ architecture sim of tb_c64_reu is
    signal app_wdf_mask : std_logic_vector(15 downto 0);
    signal app_rd_data_valid : std_logic := '0';
 
-   constant WORDS : integer := 65536;   -- MIG model: 65536 x 128 bit (1 MB), addresses wrap
-   type mem_t is array (0 to WORDS - 1) of std_logic_vector(127 downto 0);
+   -- MIG model: sparse memory over the FULL app_addr (open hashing with tags), so any
+   -- aliasing comes from the design (the 16 MB REU must not wrap at 8 or 4 MB)
+   constant SLOTS : integer := 16384;
+   type mem_t is array (0 to SLOTS - 1) of std_logic_vector(127 downto 0);
+   type tag_t is array (0 to SLOTS - 1) of integer;
    signal dig_ok : boolean := true;
    signal dig_bursts : natural := 0;
    signal ascal_on : boolean := true;
@@ -252,6 +255,20 @@ begin
    ---------------------------------------------------------------- MIG model
    mig : process
       variable mem : mem_t := (others => (others => '0'));
+      variable tag : tag_t := (others => -1);
+      variable sl : integer;
+      impure function slot(wa : integer; claim : boolean) return integer is
+         variable i : integer := wa mod 16381;
+      begin
+         for n in 0 to SLOTS - 1 loop
+            if tag(i) = wa then return i; end if;
+            if tag(i) = -1 then
+               if claim then tag(i) := wa; return i; else return -1; end if;
+            end if;
+            i := (i + 1) mod SLOTS;
+         end loop;
+         report "MIG model full" severity failure; return -1;
+      end function;
       variable lfsr : unsigned(15 downto 0) := x"BEEF";
       type q_t is array (0 to 63) of integer;
       variable rq_addr, rq_due : q_t;
@@ -278,11 +295,11 @@ begin
             if rq_n > 0 and cyc + lat <= rq_due((rq_tail + 63) mod 64) then
                lat := rq_due((rq_tail + 63) mod 64) - cyc + 1;
             end if;
-            rq_addr(rq_tail) := to_integer(unsigned(app_addr(27 downto 3))) mod WORDS;
+            rq_addr(rq_tail) := to_integer(unsigned(app_addr(27 downto 3)));
             rq_due(rq_tail) := cyc + lat;
             rq_tail := (rq_tail + 1) mod 64; rq_n := rq_n + 1;
          else
-            wq_addr(wq_n) := to_integer(unsigned(app_addr(27 downto 3))) mod WORDS; wq_n := wq_n + 1;
+            wq_addr(wq_n) := to_integer(unsigned(app_addr(27 downto 3))); wq_n := wq_n + 1;
             wc_cyc(wc_n mod 64) := cyc; wc_n := wc_n + 1;
          end if;
       end if;
@@ -296,11 +313,12 @@ begin
          dq_mask(dq_n) := to_integer(unsigned(app_wdf_mask)); dq_n := dq_n + 1;
       end if;
       while wq_n > 0 and dq_n > 0 loop
-         w := mem(wq_addr(0)); m := std_logic_vector(to_unsigned(dq_mask(0), 16));
+         sl := slot(wq_addr(0), true);
+         w := mem(sl); m := std_logic_vector(to_unsigned(dq_mask(0), 16));
          for i in 0 to 15 loop
             if m(i) = '0' then w(8 * i + 7 downto 8 * i) := dq_data(0)(8 * i + 7 downto 8 * i); end if;
          end loop;
-         mem(wq_addr(0)) := w;
+         mem(sl) := w;
          for k in 0 to 62 loop
             wq_addr(k) := wq_addr(k + 1); dq_data(k) := dq_data(k + 1); dq_mask(k) := dq_mask(k + 1);
          end loop;
@@ -308,7 +326,8 @@ begin
       end loop;
       app_rd_data_valid <= '0';
       if rq_n > 0 and rq_due(rq_head) <= cyc then
-         app_rd_data <= mem(rq_addr(rq_head));
+         sl := slot(rq_addr(rq_head), false);
+         if sl < 0 then app_rd_data <= (others => '0'); else app_rd_data <= mem(sl); end if;
          app_rd_data_valid <= '1';
          rq_head := (rq_head + 1) mod 64; rq_n := rq_n - 1;
       end if;
@@ -488,6 +507,17 @@ begin
       fetch(16#50000#, 40, 0);
       stash(16#7FFF0#, 300, 9);
       fetch(16#7FFF0#, 300, 9);
+      -- 16 MB: blocks that alias at 8 MB / 4 MB / 512 KB, plus the top of the REU
+      stash(16#850000#, 256, 3);
+      stash(16#450000#, 64, 11);
+      stash(16#0D0000#, 64, 13);
+      stash(16#FFFF00#, 256, 7);
+      fetch(16#050000#, 256, 0);
+      fetch(16#850000#, 256, 3);
+      fetch(16#450000#, 64, 11);
+      fetch(16#0D0000#, 64, 13);
+      fetch(16#FFFF00#, 256, 7);
+      report "16 MB REU: no aliasing at 512 KB / 4 MB / 8 MB, top block ok";
       report "REU blocks done: " & integer'image(errors) & " errors; ascal-like bursts " &
              integer'image(dig_bursts);
       assert errors = 0 report "REU data errors" severity failure;

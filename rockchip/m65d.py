@@ -53,6 +53,16 @@ import m65input
 
 TERM_SOCK = "/run/m65term.sock"
 
+def ntp_synced():
+    """True once systemd-timesyncd (or another NTP client) has set the clock"""
+    try:
+        r = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
+                           capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() == "yes"
+    except (OSError, subprocess.SubprocessError):
+        return True                   # cannot tell: behave as before
+
+
 # ---------------------------------------------------------------- key matrix
 # MEGA65/C64 matrix: column = CIA PA line (0..8), row = PB bit.
 MATRIX = [
@@ -300,6 +310,11 @@ class Daemon:
         self.rtc_due = int(t) + 3600                  # and again every hour
         if self.core != 1 or self.inp.term_mode:
             return
+        if not ntp_synced():
+            # no battery clock: until NTP has synchronised, the Rockchip's time is stale
+            # (2026-11-07 boot: set the MEGA65 to March) -- try again shortly
+            self.rtc_due = time.time() + 20
+            return
         lt = time.localtime(t)
         bcd = lambda v: (v // 10) << 4 | v % 10
         regs = [bcd(lt.tm_sec), bcd(lt.tm_min), bcd(lt.tm_hour) | 0x80, bcd(lt.tm_mday),
@@ -312,7 +327,9 @@ class Daemon:
 
     # ---- safe power off (Ctrl+Alt+End): MEGA65 screen says "shutting down", the Rockchip shuts
     # down; /lib/systemd/system-shutdown/m65-safe.shutdown replays /run/m65-shutdown-msg ("safe
-    # to switch off", green border) once all file systems are read-only, just before the halt
+    # to switch off", green border) once all file systems are read-only, just before the halt.
+    # With plugd running on the PC that drives the smart plug (--plug-host), the hook also
+    # sends it UDP "halted" (/run/m65-plug-host) and plugd cuts the power.
     def screen_text(self, text, border):
         """monitor commands writing text into the top row of the current text screen"""
         r = self.monitor_read(0xFFD3000, 0x80)
@@ -334,19 +351,42 @@ class Daemon:
                 cmds.append("s%x %s" % (base + i, " ".join("%02x" % v for v in data[i:i + 16])))
         return cmds
 
+    def request_plug(self):
+        """ask plugd (on the PC with the smart plug) to cut the power after the halt"""
+        if not self.args.plug_host:
+            return False
+        host, _, port = self.args.plug_host.partition(":")
+        port = int(port or 4530)
+        try:
+            with socket.create_connection((host, port), timeout=2) as c:
+                c.sendall(b"poweroff\n")
+                ok = c.recv(16).startswith(b"ok")
+        except OSError as e:
+            print("m65d: plugd at %s: %s" % (self.args.plug_host, e), flush=True)
+            return False
+        if ok:
+            with open("/run/m65-plug-host", "w") as f:
+                f.write("%s %d\n" % (host, port))
+        return ok
+
     def poweroff(self):
         if self.inp.term_mode:
             self.terminal("off")
+        plug = self.request_plug()
+        print("m65d: power off (Ctrl+Alt+End)%s" % (", plugd cuts the power" if plug else ""), flush=True)
         if self.core == 1:
+            if plug:
+                red, green = "SHUTTING DOWN - POWER OFF FOLLOWS", "ROCKCHIP HALTED - POWER OFF NOW"
+            else:
+                red, green = "SHUTTING DOWN - WAIT FOR: SAFE TO SWITCH OFF", "ROCKCHIP HALTED - SAFE TO SWITCH OFF"
             try:
-                for c in self.screen_text("  SHUTTING DOWN - WAIT FOR: SAFE TO SWITCH OFF   ", 2):
+                for c in self.screen_text(("  " + red).ljust(50), 2):
                     self.monitor(c, wait=False)
-                cmds = self.screen_text("  ROCKCHIP HALTED - SAFE TO SWITCH OFF          ", 5)
+                cmds = self.screen_text(("  " + green).ljust(50), 5)
                 with open("/run/m65-shutdown-msg", "w") as f:
                     f.write("".join(c + "\r" for c in cmds))
             except OSError as e:
                 print("m65d: shutdown message: %s" % e, flush=True)
-        print("m65d: power off (Ctrl+Alt+End)", flush=True)
         subprocess.Popen(["systemctl", "poweroff"])
 
     def switch_core(self, target):
@@ -646,6 +686,8 @@ def main():
     ap.add_argument("--ctl-port", type=int, default=4511)
     ap.add_argument("--mon-port", type=int, default=4510, help="m65io monitor pipe (for temps)")
     ap.add_argument("--stats", default="/root/m65/m65io.stats")
+    ap.add_argument("--plug-host", default=os.environ.get("M65_PLUG_HOST", "192.168.1.133:4530"),
+                    help="plugd (scripts/plugd.py) on the PC with the smart plug; '' = none")
     Daemon(ap.parse_args()).loop()
 
 

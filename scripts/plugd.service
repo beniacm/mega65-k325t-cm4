@@ -1,0 +1,15 @@
+# systemd --user unit for scripts/plugd.py (cuts the rig's smart plug after Ctrl+Alt+End).
+#   install: ln -sf ~/projects/mega65/scripts/plugd.service ~/.config/systemd/user/
+#            systemctl --user daemon-reload && systemctl --user enable --now plugd
+[Unit]
+Description=K325T rig: cut the smart plug once the Rockchip has halted
+After=matter-server.service
+Wants=matter-server.service
+
+[Service]
+ExecStart=/usr/bin/python3 -u %h/projects/mega65/scripts/plugd.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
