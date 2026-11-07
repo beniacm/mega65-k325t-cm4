@@ -36,6 +36,7 @@ IDE="ide/vim/syntax/ca65.vim:/usr/share/vim/vimfiles/syntax/ca65.vim
      ide/m65doc:/usr/local/bin/m65doc
      ide/m65new:/usr/local/bin/m65new
      ide/sysctl-console.conf:/etc/sysctl.d/90-m65-console.conf
+     ide/ssh-runtime-preserve.conf:/etc/systemd/system/ssh@.service.d/m65-preserve.conf
      m65-safe.shutdown:/lib/systemd/system-shutdown/m65-safe.shutdown"
 # sha256 of the deployed boot image (rockchip/boot_dtb/boot_sd.img.xz unpacked, 24863744 bytes: BT1120
 # 720x576@50 for linux_fb), of its 720p60 predecessor (boot_sd_720p.img.xz) and

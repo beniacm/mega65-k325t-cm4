@@ -695,6 +695,10 @@ check` compares a board with this list (read-only) and passed on the current boa
 3. **Access**: a fixed DHCP address (the scripts default to `192.168.1.143`, `M65_HOST` overrides);
    install the PC's SSH key for `root` (`ssh-copy-id linaro@…`, then
    `sudo cp ~linaro/.ssh/authorized_keys /root/.ssh/`) and **change the default `linaro` password**.
+   The image's sshd is socket-activated (one `ssh@.service` per connection) and each instance
+   deleted `/run/sshd` when it ended, so about half of all back-to-back ssh/scp calls failed with
+   `kex_exchange_identification: Connection reset by peer`; `setup_rockchip.sh install` adds a
+   drop-in (`RuntimeDirectoryPreserve=yes`). Measured: 20 of 40 failed before, 0 of 90 after.
    Optional: a smart plug driven from the PC for power-off (`scripts/plugd.py`; `PLUG=` is the
    command that switches it, e.g. a Matter or Tasmota client).
 4. **This repo's files**: `rockchip/deploy/setup_rockchip.sh install` copies the scripts and
