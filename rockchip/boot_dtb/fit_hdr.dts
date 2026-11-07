@@ -1,0 +1,73 @@
+/dts-v1/;
+
+/memreserve/	0x00007fca9cb58000 0x0000000000000600;
+/ {
+	version = <0x00>;
+	totalsize = <0x1792a00>;
+	timestamp = <0x65015e59>;
+	description = "U-Boot FIT source file for arm";
+
+	images {
+
+		fdt {
+			data-size = <0x23914>;
+			data-position = <0x800>;
+			type = "flat_dt";
+			arch = "arm64";
+			compression = "none";
+			load = <0xffffff00>;
+
+			hash {
+				value = <0x6cd79228 0x668c55f2 0x8fc0b06a 0x598f86b3 0x8cd35e95 0x2d45a52e 0xcfd53fcb 0x8b6d438>;
+				algo = "sha256";
+			};
+		};
+
+		kernel {
+			data-size = <0x15f1008>;
+			data-position = <0x24200>;
+			type = "kernel";
+			arch = "arm64";
+			os = "linux";
+			compression = "none";
+			entry = <0xffffff01>;
+			load = <0xffffff01>;
+
+			hash {
+				value = <0xb4cc79fa 0x92b167ca 0x5fabdad7 0x25c43f54 0x3c9cd5e0 0x103614e4 0x2ba5ffde 0xc315faed>;
+				algo = "sha256";
+			};
+		};
+
+		resource {
+			data-size = <0x17d200>;
+			data-position = <0x1615400>;
+			type = "multi";
+			arch = "arm64";
+			compression = "none";
+
+			hash {
+				value = <0xc6726e8a 0xc5c72b93 0x122ba0a0 0xa75d353a 0x750f1e04 0xc6ca19cd 0x93ae9d45 0x646924ae>;
+				algo = "sha256";
+			};
+		};
+	};
+
+	configurations {
+		default = "conf";
+
+		conf {
+			rollback-index = <0x00>;
+			fdt = "fdt";
+			kernel = "kernel";
+			multi = "resource";
+
+			signature {
+				algo = "sha256,rsa2048";
+				padding = "pss";
+				key-name-hint = "dev";
+				sign-images = "fdt", "kernel", "multi";
+			};
+		};
+	};
+};

@@ -13,7 +13,8 @@ CTL="$ROOT/scripts/m65ctl.py"
 fail(){ echo "SMOKE FAIL: $*"; exit 1; }
 
 if [ "${2:-}" != "--no-power" ]; then
-  /home/me/matter-plug/plug status | grep -q ON || { /home/me/matter-plug/plug on; sleep 90; }
+  PLUG="${PLUG:-$HOME/matter-plug/plug}"   # smart-plug client (optional; --no-power skips)
+  "$PLUG" status | grep -q ON || { "$PLUG" on; sleep 90; }
 fi
 adb get-state >/dev/null 2>&1 || fail "Rockchip not reachable over adb"
 "$ROOT/scripts/program.sh" "$BIT" | grep -q "PROGRAMMED=" || fail "JTAG programming"

@@ -26,7 +26,7 @@ import time
 
 ROCK_IP = os.environ.get("ROCK_IP", "192.168.1.143")
 PORT = int(os.environ.get("PLUGD_PORT", "4530"))
-PLUG = os.environ.get("PLUG", "/home/me/matter-plug/plug")
+PLUG = os.environ.get("PLUG", os.path.expanduser("~/matter-plug/plug"))
 SILENCE = 15          # s of no answer at all from the Rockchip kernel
 LIMIT = 300           # s: still alive after this -> give up, do not cut
 

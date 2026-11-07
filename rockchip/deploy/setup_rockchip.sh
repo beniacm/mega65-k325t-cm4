@@ -33,8 +33,8 @@ IDE="ide/vim/syntax/ca65.vim:/usr/share/vim/vimfiles/syntax/ca65.vim
      ide/m65doc:/usr/local/bin/m65doc
      ide/m65new:/usr/local/bin/m65new
      m65-safe.shutdown:/lib/systemd/system-shutdown/m65-safe.shutdown"
-# sha256 of the deployed boot image (~/qmtech: rockchip/boot_dtb/boot_sd.img, 24863744 bytes) and
-# of the factory p3 dump (~/qmtech: rockchip/p3_boot_backup.img.xz)
+# sha256 of the deployed boot image (rockchip/boot_dtb/boot_sd.img.xz unpacked, 24863744 bytes) and
+# of the factory p3 dump (rockchip/boot_dtb/p3_boot_backup.img.xz)
 BOOT_LEN=24863744
 BOOT_SHA=a34f418cacd9a595b6f1876c0fe43b235d6f210ff1268d1c3aace4c96db766b7
 FACTORY_SHA=bc8d2529492bab7dbf18632f6b1653acfbcc5e8632fb3da702e6c17fb9ea9531

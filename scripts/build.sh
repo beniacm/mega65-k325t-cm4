@@ -8,7 +8,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig
-export VIVADODIR="${VIVADODIR:-/home/me/Xilinx/2025.2.1/Vivado}"
+export VIVADODIR="${VIVADODIR:-$HOME/Xilinx/2025.2.1/Vivado}"
 command -v exomizer >/dev/null || { echo "exomizer missing: brew install exomizer"; exit 1; }
 mkdir -p "$ROOT/logs"
 cd "$ROOT/mega65-core"

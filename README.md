@@ -1,19 +1,60 @@
-# MEGA65 on the QMTech XC7K325T development board (CM4 carrier)
+# MEGA65 (+ C64) on the QMTech XC7K325T development board (CM4 carrier)
 
-Upstream: `mega65-core/` = github.com/MEGA65/mega65-core (`development`), local
-branch **`qmtech-k325t-cm4`** adds a new target for this board (separate repo, not tracked here;
-this repo holds the harness: scripts, Rockchip daemon, simulation).
+The [MEGA65](https://mega65.org) core and the [C64MEGA65](https://github.com/MJoergen/C64MEGA65)
+core running on a **QMTech XC7K325T "CM4" carrier** with a **Luckfox Core3566** (Rockchip)
+module in its CM4 socket.  The Rockchip replaces the MEGA65's missing peripherals: it serves
+the SD card, the keyboard (USB), gamepads, the mouse, the serial monitor, Ethernet and the
+real-time clock over one SPI link, writes the FPGA's configuration flash and switches cores.
 
-Repositories (private, github.com/beniacm):
+Not an official MEGA65 product and not affiliated with the MEGA e.V. or the C64MEGA65 authors.
+
+**Highlights**
+- Both cores standalone from flash: MEGA65 (slot 0) and C64 (slot 1), switched with
+  Ctrl+Alt+F12 on a USB keyboard; USB gamepads as joysticks, USB mouse as 1351.
+- The board's DDR3 as **64 MB attic RAM** (8 MB + mirrors after reset, like a real MEGA65;
+  `POKE $BFFFFFC,64` unlocks it) and as a **16 MB REU** for the C64 core.
+- **K325T extensions**, off after every reset (so the machine is a real MEGA65 until a
+  program asks): **1 MB chip RAM**, a **raster DMA list** (DMAgic jobs that wait for a raster
+  line: split screens / colour bars without CPU timing code) and **64 KB colour RAM** — see
+  "K325T extensions" below.
+- Battery-less **real-time clock** set from the Rockchip's NTP time; **safe power-off**
+  (Ctrl+Alt+End, optionally cutting a smart plug afterwards); Ethernet through the Rockchip.
+- Simulation testbenches (GHDL) for the bridge, the SD emulation, the DDR3 paths, the REU.
+
+**Repositories** (github.com/beniacm):
 
 | repo | content | branch |
 |---|---|---|
-| `mega65-k325t-cm4` | this harness: scripts, Rockchip daemon/tools, simulation, docs | `main` |
-| `mega65-core-k325t-cm4` | MEGA65 core with the `qmtech-k325t-cm4` target (upstream MEGA65/mega65-core) | `qmtech-k325t-cm4` |
-| `c64mega65-k325t-cm4` | C64MEGA65 V5.2 port, `K325T/` (upstream MJoergen/C64MEGA65) | `qmtech-k325t-cm4` |
-| `qmtech-k325t-cm4-lab` | `~/qmtech`: carrier bring-up, pin maps, **Rockchip boot image/DTB** (`rockchip/boot_dtb/`), `scripts/power.sh` | `bt1120-hdmi` |
+| [`mega65-k325t-cm4`](https://github.com/beniacm/mega65-k325t-cm4) | this harness: build/test scripts, Rockchip daemons and tools, Rockchip boot image, simulation, docs | `main` |
+| [`mega65-core-k325t-cm4`](https://github.com/beniacm/mega65-core-k325t-cm4) | fork of MEGA65/mega65-core with the `qmtech-k325t-cm4` target | `qmtech-k325t-cm4` |
+| [`c64mega65-k325t-cm4`](https://github.com/beniacm/c64mega65-k325t-cm4) | fork of MJoergen/C64MEGA65 (V5.2) with the `K325T/` port | `qmtech-k325t-cm4` |
 
-Clone them side by side as `mega65-core/` and `c64mega65/` inside this directory (both git-ignored here).
+```
+git clone https://github.com/beniacm/mega65-k325t-cm4.git mega65 && cd mega65
+git clone -b qmtech-k325t-cm4 https://github.com/beniacm/mega65-core-k325t-cm4.git mega65-core
+git clone -b qmtech-k325t-cm4 https://github.com/beniacm/c64mega65-k325t-cm4.git c64mega65
+```
+(`mega65-core/` and `c64mega65/` are separate repos, git-ignored here.)
+
+**You need:** the QMTech XC7K325T CM4 carrier, a Luckfox Core3566, a Sipeed DVI Pmod on J11
+(HDMI out), a Xilinx JTAG cable for the first bitstream, Vivado (2025.2 used; the free edition
+covers the XC7K325T), and a Linux PC.  **Not included** (copyright): the MEGA65 ROM (build it
+with `scripts/make_rom.sh` from a C65 ROM you own, see "SD card and ROM"), C64/1541 ROMs beyond
+what the cores ship, and any games.  The MEGA65 core boots without a ROM (OpenROMs).
+
+**Keeping up with upstream** (the forks never push upstream; their `upstream` remote is
+fetch-only):
+```
+cd mega65-core && git fetch upstream && git merge upstream/development   # then build + test
+cd c64mega65   && git fetch upstream && git merge <upstream tag>          # e.g. a V5.x release
+```
+Our changes to shared upstream files are small and gated by the target/generics, so merges
+are mostly conflict-free; the K325T description lives in `.github/README.md` of each fork so
+upstream's `README.md` is untouched.
+
+Licence: this repository GPL-3.0 (`LICENSE`); mega65-core LGPL-3.0, C64MEGA65 GPL-3.0.
+Credits: the MEGA65 team (mega65-core, OpenROMs), sy2002 and MJoergen (C64MEGA65, MiSTer2MEGA65),
+the MiSTer C64 core authors, Luckfox and QMTech for the board files.
 
 > The upstream `qmtech-k325t` target is for a *different* QMTech K325T carrier
 > (VGA + other Pmods). Same FPGA, clock (F22), LEDs and QSPI pins, but about 25 of its
@@ -55,7 +96,7 @@ CPU reset ─────────────────────┘    
 | SW3 / SW2 | CPU reset / RESTORE |
 | LED2/3/4 | heartbeat / SYSCTL `$D61A.4` / Rockchip SPI or SD request |
 
-**No other CM4 line is used.** The Rockchip's boot DTB (from the ~/qmtech BT1120 work) muxes
+**No other CM4 line is used.** The Rockchip's boot DTB (`rockchip/boot_dtb/`, from the earlier BT1120 work) muxes
 GPIO3_A1-A7/B0-B6/C1-C3 to **BT1120 video output**, so those pads are driven by the Rockchip.
 v2 had a raw UART on D13/D14, which caused contention; it was removed in v3.
 `rockchip/rk_pins.py` (run by `m65d_restart.sh`) also switches GPIO3_A7/C2/C3 back to inputs.
@@ -253,7 +294,7 @@ printf and `VICIV.bordercol` run twice in a row without a reset.
 
 ```
 scripts/build.sh        # make bin/qmtech-k325t-cm4.bit (handles pkg-config / exomizer / Vivado quirks)
-scripts/program.sh      # JTAG → SRAM via ~/qmtech/scripts/03_program.sh
+scripts/program.sh      # JTAG → SRAM (scripts/jtag/: Vivado batch tcl, udev setup)
 scripts/capture.sh      # MS2130 HDMI capture → captures/
 scripts/m65shot.py      # screenshot WITHOUT the dongle: VIC-IV registers + screen/colour RAM + font +
                         #   palette read over the serial monitor (~0.4 s), text modes rendered as the
@@ -279,8 +320,11 @@ scripts/mkd64.py        # BASIC V2 text / PRG files -> D64;  scripts/crt_banksum
 # and every field reads 0xFF (an old daemon wrote a garbage sector at LBA 0xFFFFFFFF that way).
 ```
 
-Host prerequisites already installed: `brew install exomizer`; libpng is found via
-`PKG_CONFIG_PATH` (linuxbrew's pkg-config shadows the system one).
+Host prerequisites: exomizer (`brew install exomizer` or your distro's package), libpng
+development files, GHDL for the testbenches; `scripts/build.sh` sets `PKG_CONFIG_PATH` for the
+system libpng (linuxbrew's pkg-config shadows it) and `VIVADODIR` (default
+`~/Xilinx/2025.2.1/Vivado`).  Addresses: the scripts default to the Rockchip at `192.168.1.143`
+(`M65_HOST` overrides it).
 
 ## SD card and ROM
 
@@ -439,7 +483,7 @@ The board's 256 MB DDR3 (MT41K128M16, bank 34) provides the MEGA65's attic RAM.
   16-byte read; the clock crossing uses toggle handshakes. `busy` stays high until DDR3
   calibration completes.
 - MIG 7-series from `src/vhdl/qmtech-k325t-cm4_mig_ddr3.prj`: the board's proven DDR3-800 setup
-  (from the ~/qmtech TM project) with the MIG's own XADC disabled (`fpgatemp` owns the only
+  (from an earlier DDR3 project on this board) with the MIG's own XADC disabled (`fpgatemp` owns the only
   XADC and feeds `device_temp_i`) and its debug ports off. clock200 comes from the core's
   (otherwise unused) eth MMCM. The project script generates the IP.
 - Synthesis for this target is **not timing driven** (`-no_timing_driven` in the impl tcl):
@@ -608,16 +652,17 @@ check` compares a board with this list (read-only) and passed on the current boa
    vendor kernel 4.19.232, hostname `linaro-alip`, login `linaro`/`linaro`, passwordless sudo).
    It already has python3 `spidev` 3.6, gcc and python3-dev; nothing else is installed for this
    project (`dosfstools` came with the qmtech SD work, not needed here).
-2. **Boot partition (p3)**: `boot_sd.img` from the `qmtech-k325t-cm4-lab` repo
-   (`rockchip/boot_dtb/boot_sd.img.xz`, raw sha256 `a34f418c…`; flash recipe in its README): the
-   stock DTB plus the BT1120 video and sdmmc2 edits of the earlier bring-up. This deployment does not
-   use either, but it is the only boot image it was tested on; `rk_pins.py` gives the three CM4
-   pads the bitstreams use back from the BT1120 pinmux. With the factory image (also in that repo)
-   it should work in principle, untested.
-3. **Access**: DHCP address `192.168.1.143` (keep it reserved in the router); install the PC's SSH key
-   for `root` (`ssh-copy-id linaro@…`, then `sudo cp ~linaro/.ssh/authorized_keys /root/.ssh/`).
-   `~/.ssh/config` aliases `rock` / `rock-root` and the smart-plug script `scripts/power.sh` (with
-   its git-ignored `.rock_pass`) live in `~/qmtech` (`rockchip-board.md`).
+2. **Boot partition (p3)**: `rockchip/boot_dtb/boot_sd.img.xz` (raw sha256 `a34f418c…`; flash
+   recipe and recovery in `rockchip/boot_dtb/README.md`): the stock DTB plus the BT1120 video and
+   sdmmc2 edits of the earlier bring-up. This deployment does not use either, but it is the only
+   boot image it was tested on; `rk_pins.py` gives the three CM4 pads the bitstreams use back
+   from the BT1120 pinmux. With the factory image (`p3_boot_backup.img.xz`, same directory) it
+   should work in principle, untested.
+3. **Access**: a fixed DHCP address (the scripts default to `192.168.1.143`, `M65_HOST` overrides);
+   install the PC's SSH key for `root` (`ssh-copy-id linaro@…`, then
+   `sudo cp ~linaro/.ssh/authorized_keys /root/.ssh/`) and **change the default `linaro` password**.
+   Optional: a smart plug driven from the PC for power-off (`scripts/plugd.py`; `PLUG=` is the
+   command that switches it, e.g. a Matter or Tasmota client).
 4. **This repo's files**: `rockchip/deploy/setup_rockchip.sh install` copies the scripts and
    `m65io.c` to `/root/m65`, builds `m65io`, installs `/boot/config.txt` (`deploy/config.txt`:
    `spi3cs1=on` enables SPI3 → `/dev/spidev3.0`, the rest switches stock overlays off; the old file is
@@ -627,8 +672,8 @@ check` compares a board with this list (read-only) and passed on the current boa
 5. **SD card**: create `/root/m65/card.img` as in "SD card and ROM" above (format with HYPPO, then
    `scripts/sd_populate.sh`), add `/c64` for the C64 core and the games. Not in git (copyrighted
    ROMs and games); back it up separately.
-6. **FPGA flash**: slot 0 / slot 1 with `m65flash.py write` ("Standalone" above). The original flash
-   contents are in `flashbackup/` (git-ignored, also on the board in `/root/m65/`).
+6. **FPGA flash**: slot 0 / slot 1 with `m65flash.py write` ("Standalone" above). Back up the
+   original flash contents first (`m65flash.py backup`).
 7. `rockchip/deploy/setup_rockchip.sh check` → `== root@192.168.1.143 matches the repo`.
 
 ## Build status / hardware results

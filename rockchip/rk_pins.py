@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """rk_pins.py -- release the CM4-bus pads the MEGA65 bitstream uses as FPGA inputs/outputs
-from the leftover BT1120 video mux (boot DTB of the ~/qmtech bridge work).
+from the leftover BT1120 video mux (boot DTB: rockchip/boot_dtb/).
 GPIO3_A7 (BCM26/C9), GPIO3_C2 (BCM9/D14), GPIO3_C3 (BCM11/D13) -> GPIO function, input.
-Poked in SYS_GRF / GPIO3 behind pinctrl's back (same method as ~/qmtech/rockchip/sd_mode.py).
+Poked in SYS_GRF / GPIO3 behind pinctrl's back (same method as rockchip/sd_mode.py).
 Usage: rk_pins.py [show]"""
 import mmap, os, struct, sys
 GRF, GPIO3 = 0xFDC60000, 0xFE760000
