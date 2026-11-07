@@ -1,6 +1,6 @@
 # RRB list mode (K325T extension, after upstream issue #747)
 
-Status: design, 2026-11-07. Not implemented yet. Follows the text of
+Status: implemented and verified on the board (2026-11-08); demos in `scripts/demos/`. Follows the text of
 [MEGA65/mega65-core#747](https://github.com/MEGA65/mega65-core/issues/747) ("Make RRB even more
 amazing") and its comments (relative GOTOX), plus #597 (flip per object). Our own encoding: if
 upstream implements #747 differently later, we switch to theirs.
@@ -103,3 +103,34 @@ finishes that idea in its own states instead of touching the skeleton.
 - **BASIC 65**: N bouncing objects (full-colour 2x2 characters) driven by POKEs into the list
   entries; the background row text stays untouched.
 - **B65 BASIC**: the same through its far-memory `?`/`!` operators (spec to the B65 subagent).
+
+## Things learned on the board
+
+- **A raster line ends where its last glyph was painted.** The VIC-IV's
+  `raster_buffer_max_write_address` follows the write position (it is not a maximum); the
+  display stops there and shows background colour to the right. A plain RRB row whose last
+  object sits on the left therefore cuts off everything to its right, and a GOTOX alone does not
+  move the end (only painted pixels do). List rows keep the extent of their ordinary part: at
+  the first GOTOX of the expanded part (all earlier glyphs are painted by then) the VIC-IV
+  saves the row's end, and the line ends at the larger of that and the objects' end.
+- **Vertical sub-row positioning needs full-colour (or NCM) glyphs**: the GOTOX Y offset is only
+  applied to them, not to normal 8x8 characters. Full-colour glyphs come from glyph number x 64
+  in the **first 512 KB** of chip RAM.
+- An object at pixel row y straddling two character rows uses two entries: row y/8 with Y
+  offset -(y mod 8) (sign bit) and draw mask `$FF << (y mod 8)`, row y/8+1 with Y offset
+  +(8 - y mod 8) and mask `(1 << (y mod 8)) - 1`. Unused slots: draw mask 0.
+- Updating the two entries of an object from BASIC is not atomic: a frame can show the halves
+  from different positions (tearing). List mode v2 (one Y per object, rows computed by the
+  VIC-IV) removes this.
+- An expansion still running at the next raster line is cut off and the row painted plainly;
+  the colour RAM port is always released at the end of an expansion.
+- Tests must stop the CPU (monitor `t1`): BASIC 65 rewrites VIC-IV registers while it runs.
+
+## Demos
+
+- `scripts/demos/rrblist65.bas` -- BASIC 65: 6 full-colour balls over an 80-column starfield,
+  two list entries per ball, moved with WPOKE (type it in; m65d cannot type `^`, so powers of
+  two come from a table).
+- `scripts/demos/rrblist_b65.bas` -- the same in B65 BASIC (type it in **lower case**: B65
+  swaps the case of letters like a BBC Micro). Screen rows at `$80000`, ball glyphs at `$60000`
+  (B65 uses `$40000-$5FFFF`; full-colour glyphs must stay below 512 KB).
