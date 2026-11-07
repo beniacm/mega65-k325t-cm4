@@ -67,7 +67,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--set", default="demos", choices=["demos", "all"])
     ap.add_argument("--disk")
-    ap.add_argument("--only", help="disk:category:item, e.g. 2:1:C")
+    ap.add_argument("--only", help="disk:category:item[,…], e.g. 2:1:C,1:1:6")
+    ap.add_argument("--nokeys", action="store_true", help="no SPACE/fire/RETURN between the captures")
     ap.add_argument("--t1", type=float, default=15)
     ap.add_argument("--t2", type=float, default=30)
     ap.add_argument("--run", default=time.strftime("intro_%Y%m%d_%H%M"))
@@ -82,7 +83,7 @@ def main():
         rows = []
         for item in items:
             tag = "%s:%s:%s" % (disk, cat, item)
-            if a.only and tag != a.only:
+            if a.only and tag not in a.only.split(","):
                 continue
             cold_start()
             launch(disk, cat, item)
@@ -90,13 +91,14 @@ def main():
             base = os.path.join(outdir, "d%s_%s_%s" % (disk, cname, item))
             time.sleep(max(0, a.t1 - (time.time() - t0)))
             f1 = capture(base + "_a.png")
-            ctl("key", "SPACE")
-            time.sleep(1)
-            ctl("joy", "0x10", "0x10")
-            time.sleep(0.3)
-            ctl("joy", "0", "0")
-            time.sleep(1)
-            ctl("key", "RETURN")
+            if not a.nokeys:
+                ctl("key", "SPACE")
+                time.sleep(1)
+                ctl("joy", "0x10", "0x10")
+                time.sleep(0.3)
+                ctl("joy", "0", "0")
+                time.sleep(1)
+                ctl("key", "RETURN")
             time.sleep(max(0, a.t2 - (time.time() - t0)))
             f2 = capture(base + "_b.png")
             if not (f1 and f2):

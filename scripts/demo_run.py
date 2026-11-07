@@ -61,7 +61,7 @@ def typ(text, settle=0.5):
 
 
 def capture(out):
-    r = subprocess.run([os.path.join(ROOT, "scripts/capture.sh"), "-n", "2"], capture_output=True, text=True)
+    r = subprocess.run([os.path.join(ROOT, "scripts/capture.sh"), "-n", "8"], capture_output=True, text=True)
     path = [l.split("file:")[1].strip() for l in r.stdout.splitlines() if "file:" in l]
     if not path:
         return None
