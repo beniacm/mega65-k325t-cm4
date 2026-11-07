@@ -463,6 +463,46 @@ The board's 256 MB DDR3 (MT41K128M16, bank 34) provides the MEGA65's attic RAM.
   register, unlock, all 26 address lines, 64 MB mirror, registers are not RAM and never
   prefetched, reset → 8 MB; worst read 27 cycles against slow_devices' 128-cycle limit.
 
+## K325T extensions: bigger limits, same MEGA65 model
+
+Direction: raise limits the MEGA65 already has, through mechanisms it already has (same
+registers, data formats and BASIC idioms), instead of adding new subsystems.  Everything is
+**off after every reset**, so the machine is a real MEGA65 until a program asks for more.
+
+**XCTL `$FFD71F0`** (K325T extension control, read/write, cleared by reset; the CPU snoops the
+write, `soft_rtc.vhdl` keeps the copy you read back):
+
+| bit | extension | after reset (= real MEGA65) | when set |
+|---|---|---|---|
+| 0 | **1 MB chip RAM** | CPU/DMA see 384 KB; writes to `$60000-$FFFFF` are dropped | CPU/DMA see `$00000-$FFFFF` |
+| 1 | **raster DMA list** | off | DMA list at `$FFD71F4-7` runs every frame |
+| 2 | **64 KB colour RAM** | 32 KB, `$FF88000-$FF8FFFF` mirrors `$FF80000-` | 64 KB, separate halves |
+
+**1 MB chip RAM.**  The CPU (`gs4510`: `chipram_size`, `chipram_1mb`) and the VIC-IV
+(`chipram_size`, a 20-bit fetch port) were already written for up to 1 MB; no board had the
+block RAM.  `chipram_k325t.vhdl` keeps the generated, pre-loaded 384 KB (`shadowram-k325t-lo.vhdl`,
+made from `shadowram-no-attic.vhdl` by the Makefile) and adds 640 KB as two plain blocks indexed by
+raw address bits.  The VIC-IV always sees all 1 MB (its pointers already take 28 bits), so e.g.
+a full-raster full-colour screen (720x576, 414,720 bytes of unique tiles) now fits.  From BASIC:
+`POKE $FFD71F0,1`, then `PEEK`/`POKE`/`EDMA` up to `$FFFFF`.
+
+**Raster DMA list** (a "copper" in DMAgic terms).  With bit 1 set, the DMAgic starts the enhanced
+DMA list at `$FFD71F4-$FFD71F7` (28-bit physical address) at VIC-II raster line 0 of every frame.
+A job whose option list carries **`$D0 lo` / `$D1 hi`** (new options: wait until raster >= line,
+the `$D011.7/$D012` numbering) **suspends** the list and gives the CPU back; at that line the job
+resumes at the next instruction boundary.  So split screens, colour bars and per-line scroll or
+palette changes are plain DMA jobs (e.g. a 1-byte fill of `$FFD3020`), without timed CPU code,
+and BASIC keeps running.  Jobs start only at instruction boundaries, never in the hypervisor; the
+CPU's own DMA list address is saved/restored around them; DMA options do not carry over a wait.
+`scripts/rasterdma_test.py` builds a 3-band border demo.
+
+**64 KB colour RAM.**  The VIC-IV already decodes `$FF80000-$FF8FFFF` and fetches with 16-bit
+colour RAM addresses; real boards have 32 KB (the top half mirrors).  `colourram_k325t.vhdl` adds
+the second 32 KB; with bit 2 clear, address bit 15 is forced to 0 on both ports (the mirror).
+
+Tests: `sim/tb_chipram_k325t.vhdl`, `sim/tb_colourram_k325t.vhdl` (GHDL); on the board
+`scripts/chipram_test.py`, `scripts/rasterdma_test.py`.
+
 ## Ethernet (MEGA65 MAC → LAN through the Rockchip)
 
 ```
