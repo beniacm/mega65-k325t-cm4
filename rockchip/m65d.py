@@ -380,11 +380,18 @@ class Daemon:
             else:
                 red, green = "SHUTTING DOWN - WAIT FOR: SAFE TO SWITCH OFF", "ROCKCHIP HALTED - SAFE TO SWITCH OFF"
             try:
-                for c in self.screen_text(("  " + red).ljust(50), 2):
-                    self.monitor(c, wait=False)
+                # build BOTH messages first: screen_text reads the VIC registers through the
+                # monitor, and a read right after the red commands collided with their replies
+                # (empty green message -> the screen stayed red)
+                red_cmds = self.screen_text(("  " + red).ljust(50), 2)
                 cmds = self.screen_text(("  " + green).ljust(50), 5)
                 with open("/run/m65-shutdown-msg", "w") as f:
-                    f.write("".join(c + "\r" for c in cmds))
+                    # leading CRs: end whatever half line the monitor still holds, or the
+                    # first command (the green border) merges with it and is lost
+                    f.write("\r\r" + "".join(c + "\r" for c in cmds))
+                print("m65d: halted message: %d monitor commands" % len(cmds), flush=True)
+                for c in red_cmds:
+                    self.monitor(c, wait=False)
             except OSError as e:
                 print("m65d: shutdown message: %s" % e, flush=True)
         subprocess.Popen(["systemctl", "poweroff"])

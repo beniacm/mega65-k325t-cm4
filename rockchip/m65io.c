@@ -163,6 +163,28 @@ static int link_select(uint32_t max_hz)      /* fastest clean rate <= max_hz */
 	return 0;
 }
 
+/* While the link is up below the requested rate: try the faster rates again.  A probe that
+ * ran while a freshly loaded bitstream was still starting up (or a C64-core session) can leave
+ * the link slower than this bitstream allows, and nothing else would ever raise it.  Only
+ * status reads, so it is safe between transactions; on failure the old rate is kept. */
+static void link_upgrade(void)
+{
+	static const uint32_t rates[] = { 0, 33333333, 25000000, 16666666 };
+	uint32_t old = spi_hz;
+	for (unsigned i = 0; i < sizeof rates / sizeof rates[0]; i++) {
+		uint32_t hz = i ? rates[i] : spi_hz_want;
+		if (hz <= old || (i && hz >= spi_hz_want))
+			continue;
+		spi_hz = hz;
+		if (link_ok(200)) {
+			printf("m65io: SPI link back up to %u Hz\n", hz);
+			fflush(stdout);
+			return;
+		}
+	}
+	spi_hz = old;
+}
+
 /* ---------------------------------------------------------------- Ethernet */
 static uint32_t crc_tab[256];
 
@@ -555,6 +577,7 @@ int main(int argc, char **argv)
 	double down_since = 0, next_probe = 0, glitch_t[3] = { 0 };
 	int was_ok = b.ok, glitch_i = 0;
 	uint32_t probe_max = spi_hz_want;
+	double next_up = now() + 5.0, up_every = 5.0;  /* link_upgrade() schedule, backs off on dropouts */
 
 	for (;;) {
 		int busy = 0;
@@ -574,6 +597,7 @@ int main(int argc, char **argv)
 					printf("m65io: repeated link dropouts at %u Hz\n", spi_hz);
 					next_probe = 0;
 					probe_max = spi_hz - 1;      /* only slower rates now */
+					if (up_every < 3600) up_every *= 4;   /* and fewer retries up */
 					memset(glitch_t, 0, sizeof glitch_t);
 				}
 			}
@@ -582,11 +606,17 @@ int main(int argc, char **argv)
 				link_select(probe_max);
 				probe_max = spi_hz_want;         /* next outage (core switch): try all */
 				next_probe = t + 2.0;
+				next_up = t + up_every;
 			}
 			usleep(50000);
 			goto pace;
 		}
 		was_ok = 1;
+		if (spi_hz < spi_hz_want && now() >= next_up) {
+			link_upgrade();
+			next_up = now() + up_every;
+			continue;                            /* re-read the status at the new rate */
+		}
 		busy |= serve_sd(&b);
 		busy |= prefetch_step(&b);
 		if (pkt >= 0 && b.ver >= 3)

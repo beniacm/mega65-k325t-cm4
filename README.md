@@ -384,9 +384,12 @@ would make HYPPO and the tools treat the board as an R3.
 keyboard (or `m65ctl poweroff`) → m65d asks **plugd** on the PC with the smart plug to cut the
 power → red screen "SHUTTING DOWN - POWER OFF FOLLOWS" → `systemctl poweroff` →
 `/lib/systemd/system-shutdown/m65-safe.shutdown` runs once every file system is unmounted or
-read-only: it writes the prepared monitor commands over SPI (green "ROCKCHIP HALTED") and sends
-plugd UDP "halted" → plugd cuts the plug 2 s later.  Measured: halted 3 s after the key, power
-off after 6 s.
+read-only: it writes the prepared monitor commands over SPI (green "ROCKCHIP HALTED - POWER OFF
+NOW") and sends plugd UDP "halted" → plugd cuts the plug 2 s later.  Measured: halted (green)
+3 s after the key, power off after 6 s.  m65d builds both messages before sending the red one
+(reading the VIC registers right after the red commands collided with their replies: empty
+green message), and the green one starts with two CRs (otherwise its first command, the
+border, merged with a half line left in the monitor).
 - `scripts/plugd.py` (port 4530, accepts only the Rockchip's address): cuts after "halted", or,
   if that never comes, once the Rockchip's kernel has not answered a TCP connect at all for 15 s
   (a reset still counts as alive, so this means halted, not just "sshd stopped"); if the
@@ -406,7 +409,10 @@ register placed far from its pin failed every status read above 25 MHz, and m65i
 (no monitor, no SD, no reset).  Now `m65io` checks the link (200 status reads) at start, while the
 bridge is down and after 3 dropouts in 10 s, and uses the fastest clean rate up to `-s`
 (40 → 33 → 25 → 16.7 → 10 MHz; the log says "SPI link at ... (requested rate unreliable)"); the
-sockets and stats stay alive while the bridge is away.  The XDC now packs the first SCK/MOSI/CS
+sockets and stats stay alive while the bridge is away.  While the link runs below the requested
+rate, m65io re-tests the faster rates every 5 s ("SPI link back up to ..."; the interval grows
+×4 after each case of repeated dropouts): a probe during a bitstream's start-up or a C64-core
+session (25 MHz) no longer leaves the MEGA65 slow -- tested: C64 25 MHz → MEGA65 40 MHz.  The XDC now packs the first SCK/MOSI/CS
 sampling flip-flops and the MISO register into the I/O cells (`IOB TRUE`, MISO `SLEW FAST`), so
 the pad delays no longer depend on placement.  That build: linktest 0 errors in 3000 at 10..40 MHz
 (50 fails, as before), `sdlinktest.py` 200 random + 300 consecutive sectors at 40 MHz, 0 mismatches,
