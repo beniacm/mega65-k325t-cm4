@@ -693,7 +693,7 @@ def main():
     ap.add_argument("--ctl-port", type=int, default=4511)
     ap.add_argument("--mon-port", type=int, default=4510, help="m65io monitor pipe (for temps)")
     ap.add_argument("--stats", default="/root/m65/m65io.stats")
-    ap.add_argument("--plug-host", default=os.environ.get("M65_PLUG_HOST", "192.168.1.133:4530"),
+    ap.add_argument("--plug-host", default=os.environ.get("M65_PLUG_HOST", ""),
                     help="plugd (scripts/plugd.py) on the PC with the smart plug; '' = none")
     Daemon(ap.parse_args()).loop()
 

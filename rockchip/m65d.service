@@ -14,6 +14,8 @@ WorkingDirectory=/root/m65
 # measurable temperature difference, the SoC stays ~57 C); SCHED_FIFO removes the multi-ms spikes
 ExecStartPre=-/bin/sh -c 'for g in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor; do echo performance > $$g; done'
 ExecStartPre=-/bin/mv -f /root/m65/m65d.log /root/m65/m65d.log.1
+# optional local settings, e.g. M65_PLUG_HOST=<PC running scripts/plugd.py>:4530
+EnvironmentFile=-/root/m65/m65d.env
 ExecStart=/usr/bin/python3 -u /root/m65/m65d.py
 StandardOutput=append:/root/m65/m65d.log
 StandardError=inherit

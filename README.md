@@ -440,7 +440,8 @@ border, merged with a half line left in the monitor).
   Rockchip still answers after 5 min it does NOT cut.  Install once on the PC (user service):
   `ln -sf ~/projects/mega65/scripts/plugd.service ~/.config/systemd/user/ && systemctl --user
   daemon-reload && systemctl --user enable --now plugd`.
-- m65d `--plug-host` (default `$M65_PLUG_HOST` or `192.168.1.133:4530`, `''` = none).  Without
+- m65d `--plug-host` (default `$M65_PLUG_HOST`, set in the untracked `/root/m65/m65d.env`, e.g.
+  `M65_PLUG_HOST=192.168.1.133:4530`; empty = none).  Without
   plugd the screens read "WAIT FOR: SAFE TO SWITCH OFF" / "SAFE TO SWITCH OFF" and you switch
   off by hand.
 - The FPGA keeps running until the plug goes; the MEGA65 card writes are on the eMMC within 0.1 s
