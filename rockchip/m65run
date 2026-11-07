@@ -100,6 +100,13 @@ class Monitor:
     def reset_to_basic(self, timeout=40):
         """reset the MEGA65 core and wait for BASIC's READY. (leave the start menu with '/')"""
         print("m65run: resetting the MEGA65 (BASIC is not usable after the last program)")
+        # Blank the screen memory first: after the reset the KERNAL points the VIC-IV back to
+        # $0800, which may still hold a READY. from before the last program -- seen at once, the
+        # PRG was then loaded over the starting menu system (?SYNTAX ERROR IN 670, "RUN" -> "UN").
+        r = self.read(VIC, 0x80)
+        cur = r[0x60] | r[0x61] << 8 | r[0x62] << 16 if len(r) >= 0x80 else 0x800
+        for a in sorted({0x800, cur}):
+            self.load(a, b" " * 4096)                # 80 x 50 screen codes ' '
         ctl("reset")
         t0, slashed = time.time(), False
         time.sleep(3)
@@ -176,7 +183,8 @@ def main():
         last = open(LAST).read().strip()
     except OSError:
         last = ""
-    if "--load" not in a and not is_c and ("--reset" in a or last == "c" or mon.parked()):
+    # an explicit --reset always resets (B65 BASIC's stub also starts with BANK 0, like llvm-mos's)
+    if "--load" not in a and ("--reset" in a or not is_c and (last == "c" or mon.parked())):
         if not mon.reset_to_basic():
             sys.exit("m65run: no READY. after the reset (check the MEGA65 screen)")
     try:
