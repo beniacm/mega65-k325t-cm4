@@ -176,6 +176,9 @@ SYSTEM_KEYS = {111: "reset", 59: "core mega65", 60: "core c64", 88: "core toggle
                110: "view toggle"}                                                  # Insert
 # (The view hotkey is not an F key: with the keyboard released to Linux, Ctrl+Alt+Fn also
 #  switches the Linux console's virtual terminals.)
+# With the keyboard released to Linux only these stay MEGA65 hotkeys (Linux sees every key too:
+# m65d voids Ctrl+Alt+Insert in the console keymap; Ctrl+Alt+End means nothing there)
+LINUX_FOCUS_KEYS = {110, 107}                                                       # Insert, End
 
 # Terminal mode (m65term): US layout -> bytes for the shell; special keys by name
 TERM_KEYS = {1: "\x1b", 14: "\x7f", 15: "\t", 28: "\r", 96: "\r", 57: " ",
@@ -528,7 +531,9 @@ class InputHub:
                 self.pending = (sec + usec * 1e-6, "mouse" if typ == EV_REL else
                                 "pad" if (pad and (typ == EV_ABS or code >= 0x120)) else
                                 "kbd" if code < 0x100 else "mouse")
-            if typ == EV_REL and is_mouse:
+            if is_mouse and self.linux_focus and (typ == EV_REL or 0x110 <= code < 0x118):
+                pass                                         # the mouse belongs to Linux now
+            elif typ == EV_REL and is_mouse:
                 if code == REL_X:
                     self.ax.add(val / MOUSE_SCALE)
                 elif code == REL_Y:
@@ -547,19 +552,23 @@ class InputHub:
             self._merge_keys()
         return True
 
+    def _sys_combo(self, code, val):
+        """a system key with Ctrl+Alt held (press), or the release of one that was taken"""
+        return code in SYSTEM_KEYS and (val == 0 and code in self.sys_held or
+                                        val and self.kbd_keys & CTRL_KEYS and self.kbd_keys & ALT_KEYS)
+
     def _kbd_key(self, dev, code, val):
         self.keylog = (self.keylog + ["%d:%d" % (code, val)])[-20:]
-        if code == KEY_CAPSLOCK:
+        if self.linux_focus and not (code in LINUX_FOCUS_KEYS and self._sys_combo(code, val)):
+            # Linux has the keyboard (released): nothing reaches the MEGA65 (no RESTORE from
+            # Page Up, no CAPS LOCK); only the modifiers are watched for the hotkeys
+            if code in CTRL_KEYS or code in ALT_KEYS:
+                (dev.keys.add if val else dev.keys.discard)(code)
+        elif code == KEY_CAPSLOCK:
             if val == 1:
                 self.caps = not self.caps       # latching key, like the real one
         elif code == KEY_PAGEUP:
             self.restore = val != 0
-        elif self.linux_focus and not (code in SYSTEM_KEYS and (val == 0 and code in self.sys_held or
-                                                               val and self.kbd_keys & CTRL_KEYS
-                                                               and self.kbd_keys & ALT_KEYS)):
-            # Linux has the keyboard (released): only watch the modifiers for the hotkeys
-            if code in CTRL_KEYS or code in ALT_KEYS:
-                (dev.keys.add if val else dev.keys.discard)(code)
         elif self.term_mode and not (code in SYSTEM_KEYS and (val == 0 and code in self.sys_held or
                                                                val and self.kbd_keys & CTRL_KEYS
                                                                and self.kbd_keys & ALT_KEYS)):
@@ -623,6 +632,8 @@ class InputHub:
     def set_linux_focus(self, on):
         """keyboards to Linux (released, the MEGA65 sees no keys) or back to the MEGA65 (grabbed)"""
         self.linux_focus = on
+        if on:
+            self.restore = False
         for fd, dev in self.devs.items():
             if "kbd" in dev.roles or "mouse" in dev.roles:
                 try:
@@ -630,6 +641,8 @@ class InputHub:
                 except OSError:
                     pass
             dev.keys.clear()                # nothing stays pressed on either side
+            if hasattr(dev, "buttons"):
+                dev.buttons.clear()
         self.lead.clear()
         self.held.clear()
         self._merge_keys()

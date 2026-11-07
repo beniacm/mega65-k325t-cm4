@@ -424,6 +424,8 @@ class Daemon:
         if want == cur:
             return "ok already %s" % target
         print("m65d: core %s -> %s (flash 0x%06x)" % (names.get(cur, cur), target, addr), flush=True)
+        if self.inp.linux_focus:                # the reload resets the picture to the core's
+            self.inp.set_linux_focus(False)
         if cur == 1:
             # MEGA65: its own reconfig ($D6C8..$D6CB boot address, $D6CF <- $42 triggers)
             # WBSTAR takes the SPI address in 256-byte units ("shifted by 8 bits")
@@ -475,6 +477,14 @@ class Daemon:
             return "err view linux|mega65|toggle|rise|fall|diag"
         if target == "linux" and self.inp.term_mode:
             self.terminal("off")
+        if target == "linux":
+            # the keyboard is released: the console sees the hotkey too.  Ctrl+Alt+Insert
+            # would type ESC [2~ there (vim: insert mode) -- void it in the console keymap
+            try:
+                subprocess.run(["loadkeys"], input=b"control alt keycode 110 = VoidSymbol\n",
+                               capture_output=True, timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                pass
         self.br.set_video((1 if target == "linux" else 0) | getattr(self, "vid_edge", 0))
         self.inp.set_linux_focus(target == "linux")
         return "ok view " + target

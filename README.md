@@ -244,9 +244,13 @@ touched) and, when selected, puts it in place of the core's picture at the input
 encoder.  The output timing is always the core's 576p50, so switching needs no resync; the core
 keeps running underneath.  The input is cropped per line to 720x576, so other Rockchip modes
 still show their top-left part.  The switch is rk_bridge command `0x70 VIDEO`; with the Linux
-picture shown, m65input releases its keyboard/mouse grab (Linux gets them) and the MEGA65's
-matrix stays empty except for the hotkey.  Ctrl+Alt+Del is masked on the Rockchip
-(`ctrl-alt-del.target`), since it reaches Linux with the keyboard released.
+picture shown, m65input releases its keyboard/mouse grab (Linux gets them); the MEGA65 then
+sees no key, no mouse, no RESTORE (Page Up) or CAPS LOCK -- gamepads stay on the MEGA65.  Only
+Ctrl+Alt+Insert and Ctrl+Alt+End (power-off) remain hotkeys; the other Ctrl+Alt keys belong to
+Linux (e.g. Ctrl+Alt+F2 switches the console to tty2, not the core).  Linux sees the hotkey too:
+m65d voids Ctrl+Alt+Insert in the console keymap (`loadkeys`), and Ctrl+Alt+Del is masked
+(`ctrl-alt-del.target`).  A core switch gives the keyboard back to the MEGA65 (the reload resets
+the picture to the core's).  Tested with a virtual keyboard: `uinput_test.py keys 29,56,110`.
 
 Diagnosis: `m65ctl view diag` (frames, lines, pixels per line, lock, the BT1120 clock, which data
 lines toggle); `m65ctl view rise|fall` picks the capture edge (falling is the default and works).
