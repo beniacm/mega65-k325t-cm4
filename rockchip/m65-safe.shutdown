@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+"""m65-safe.shutdown -- /lib/systemd/system-shutdown/: run by systemd-shutdown once every file
+system is unmounted or read-only, just before the halt.  Replays /run/m65-shutdown-msg (monitor
+commands m65d prepared on Ctrl+Alt+End: "ROCKCHIP HALTED - SAFE TO SWITCH OFF", green border)
+into the MEGA65 serial monitor over the SPI bridge (0x20 UART_PUT); m65io is gone by now."""
+import sys
+import time
+
+if len(sys.argv) > 1 and sys.argv[1] not in ("poweroff", "halt"):
+    sys.exit(0)                      # reboot: the core stays in use, nothing to announce
+try:
+    data = open("/run/m65-shutdown-msg", "rb").read()
+except OSError:
+    sys.exit(0)
+try:
+    import spidev
+    spi = spidev.SpiDev()
+    spi.open(3, 0)
+    spi.mode = 0
+    spi.max_speed_hz = 10000000
+    for i in range(0, len(data), 64):            # the bridge's monitor FIFO holds 1 KB
+        spi.xfer2([0x20] + list(data[i:i + 64]))
+        time.sleep(0.005)
+    time.sleep(0.2)                              # 2 Mbaud: let the monitor take it all
+except Exception:
+    pass

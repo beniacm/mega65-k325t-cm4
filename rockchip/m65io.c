@@ -58,9 +58,16 @@
 #define DOZE_US 10000           /* ... and every 10 ms after that (idle: module cool) */
 
 static int spi_fd, img_fd, verbose;
+/* MEGA65 writes reach the eMMC soon, not after the kernel's ~30 s writeback: fdatasync once
+ * no further sector was written for SYNC_IDLE_S (a save of many sectors -> one flush) */
+#define SYNC_IDLE_S 0.1
+static int img_dirty;
+static double last_write;
+static double now(void);
 /* 40 MHz: linktest.py clean at 25/33/40 MHz (50 MHz fails), and sdlinktest.py: 300 random sectors
  * read by the MEGA65's SD controller through the whole path, 0 mismatches (2026-11-06) */
 static uint32_t spi_hz = 40000000;
+static uint32_t spi_hz_want;           /* -s: the link runs here unless it proves unreliable */
 static uint64_t img_sectors;
 static struct {
 	unsigned long rd, wr, rd_err, wr_drop, mon_in, mon_out, bridge_down, polls;
@@ -115,6 +122,45 @@ static void bridge_status(struct bstat *b)
 	b->eth_txlen = b->ver >= 3 ? ((r[16] & 7) << 8 | r[17]) : 0;
 	b->eth_rxfree = b->ver >= 3 ? r[18] : 0;
 	b->eth_drops = b->ver >= 3 ? r[19] : 0;
+}
+
+/* Link check: n STATUS reads at the current clock, each with the magic and the same version.
+ * How fast MISO is clean depends on the bitstream (a build whose MISO register sat far from its
+ * pin failed every read above 25 MHz), so the clock is chosen per bitstream: the requested rate
+ * if it is clean, else the next lower one.  Run at start, while the bridge is down (another
+ * core configuring, or a bad clock) and after repeated single dropouts (a marginal clock). */
+static int link_ok(int n)
+{
+	struct bstat b;
+	int ver = -1;
+	for (int i = 0; i < n; i++) {
+		bridge_status(&b);
+		if (!b.ok || (ver >= 0 && b.ver != ver))
+			return 0;
+		ver = b.ver;
+	}
+	return 1;
+}
+
+static int link_select(uint32_t max_hz)      /* fastest clean rate <= max_hz */
+{
+	static const uint32_t rates[] = { 0, 33333333, 25000000, 16666666, 10000000 };
+	uint32_t old = spi_hz;
+	for (unsigned i = 0; i < sizeof rates / sizeof rates[0]; i++) {
+		uint32_t hz = i ? rates[i] : spi_hz_want;
+		if (hz > max_hz || (i && hz >= spi_hz_want))
+			continue;
+		spi_hz = hz;
+		if (link_ok(200)) {
+			if (hz != old || hz != spi_hz_want)
+				printf("m65io: SPI link at %u Hz%s\n", hz,
+				       hz != spi_hz_want ? " (requested rate unreliable with this bitstream)" : "");
+			fflush(stdout);
+			return 1;
+		}
+	}
+	spi_hz = spi_hz_want;                  /* no bridge answering at any rate (yet) */
+	return 0;
 }
 
 /* ---------------------------------------------------------------- Ethernet */
@@ -250,6 +296,8 @@ static int serve_sd(const struct bstat *b)
 			if (pwrite(img_fd, rx + 2, 512, (off_t)b->lba * 512) != 512)
 				perror("pwrite");
 			st.wr++;
+			img_dirty = 1;
+			last_write = now();
 		} else {
 			st.wr_drop++;
 		}
@@ -472,6 +520,7 @@ int main(int argc, char **argv)
 	ioctl(spi_fd, SPI_IOC_WR_MODE, &mode);
 	ioctl(spi_fd, SPI_IOC_WR_BITS_PER_WORD, &bits);
 	ioctl(spi_fd, SPI_IOC_WR_MAX_SPEED_HZ, &spi_hz);
+	spi_hz_want = spi_hz;
 
 	img_fd = open(image, O_RDWR);
 	if (img_fd < 0) { perror(image); return 1; }
@@ -480,6 +529,7 @@ int main(int argc, char **argv)
 	img_sectors = sb.st_size / 512;
 
 	struct bstat b;
+	link_select(spi_hz_want);
 	bridge_status(&b);
 	printf("m65io: %s at %u Hz, image %s (%llu sectors), bridge %s v%u\n", dev, spi_hz,
 	       image, (unsigned long long)img_sectors, b.ok ? "found" : "NOT found", b.ver);
@@ -502,18 +552,41 @@ int main(int argc, char **argv)
 	static uint8_t txq[65536];
 	size_t txq_len = 0;
 	double next_stats = 0, last_activity = 0;
+	double down_since = 0, next_probe = 0, glitch_t[3] = { 0 };
+	int was_ok = b.ok, glitch_i = 0;
+	uint32_t probe_max = spi_hz_want;
 
 	for (;;) {
 		int busy = 0;
 		bridge_status(&b);
 		st.polls++;
 		if (!b.ok) {
-			/* FPGA being reprogrammed / other bitstream: MISO floats, every
-			 * field would read 0xFF.  Act on nothing. */
+			/* FPGA being reprogrammed / other bitstream (MISO floats), or a clock this
+			 * bitstream's MISO cannot follow.  Act on nothing from the bridge, keep the
+			 * sockets and the stats alive, and look for a clock that works. */
+			double t = now();
 			st.bridge_down++;
+			if (was_ok) {
+				down_since = t;
+				glitch_t[glitch_i] = t;              /* 3 dropouts in 10 s: marginal clock */
+				glitch_i = (glitch_i + 1) % 3;
+				if (glitch_t[glitch_i] && t - glitch_t[glitch_i] < 10.0) {
+					printf("m65io: repeated link dropouts at %u Hz\n", spi_hz);
+					next_probe = 0;
+					probe_max = spi_hz - 1;      /* only slower rates now */
+					memset(glitch_t, 0, sizeof glitch_t);
+				}
+			}
+			was_ok = 0;
+			if ((t - down_since > 0.5 || next_probe == 0) && t >= next_probe) {
+				link_select(probe_max);
+				probe_max = spi_hz_want;         /* next outage (core switch): try all */
+				next_probe = t + 2.0;
+			}
 			usleep(50000);
-			continue;
+			goto pace;
 		}
+		was_ok = 1;
 		busy |= serve_sd(&b);
 		busy |= prefetch_step(&b);
 		if (pkt >= 0 && b.ver >= 3)
@@ -560,6 +633,7 @@ int main(int argc, char **argv)
 		 * monitor input still wakes us at once (ppoll on the sockets); monitor
 		 * output from the MEGA65 buffers in the bridge's 16 KB FIFO (~2 KB / 10 ms
 		 * at 2 Mbaud). */
+pace:	;
 		double tnow = now();
 		if (busy)
 			last_activity = tnow;
@@ -593,6 +667,10 @@ int main(int argc, char **argv)
 		}
 
 		double t = now();
+		if (img_dirty && t - last_write >= SYNC_IDLE_S) {
+			fdatasync(img_fd);
+			img_dirty = 0;
+		}
 		if (t >= next_stats) {
 			cache_stats();
 			write_stats(stats, &b);

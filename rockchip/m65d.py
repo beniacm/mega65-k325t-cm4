@@ -29,6 +29,8 @@ Control: TCP port 4511, one text command per line, reply "ok ..."/"err ...":
     mouse off                  no mouse (POTs read $FF)
     pots <p1x> <p1y> <p2x> <p2y>   raw SID POT values in hex (paddles); "pots off" = back to mouse
     restore 0|1  capslock 0|1  sd emu|phys
+    rtc                        set the MEGA65's clock now (also on core start and hourly)
+    poweroff                   shut the Rockchip down safely (USB keyboard: Ctrl+Alt+End)
     terminal [on|off|toggle]   Linux shell on the MEGA65 screen (m65term; USB keyboard: Ctrl+Alt+T)
     inputs                     live USB input state: joystick bits per port, POTs, keys, devices
     joyswap                    swap joystick ports 1 <-> 2 (pads and mouse; USB keyboard: Ctrl+Alt+J)
@@ -37,6 +39,7 @@ Control: TCP port 4511, one text command per line, reply "ok ..."/"err ...":
 Run as root (spidev3.0 is root-only).
 """
 import argparse
+import subprocess
 import glob
 import os
 import select
@@ -146,6 +149,8 @@ class Daemon:
             traceback.print_exc()
         self.core = None
         self.next_core_check = 0.0
+        self.rtc_due = 0
+        self.last_down = None
         self.term_sock = None
         st = self.term_call("state", timeout=2.0)        # m65d restarted while the terminal was up?
         if st == "ok on":
@@ -250,10 +255,99 @@ class Daemon:
     # ---- cores (flash slots: 0 = MEGA65 at 0x000000, 1 = C64 at 0x800000)
     CORES = {"mega65": (1, 0x000000), "c64": (2, 0x800000)}
 
-    def monitor(self, line):
+    def monitor(self, line, wait=True):
         with socket.create_connection(("127.0.0.1", self.args.mon_port), timeout=2) as s:
             s.sendall(line.encode() + b"\r")
-            time.sleep(0.3)
+            if wait:
+                time.sleep(0.3)
+            # (closing at once is fine: m65io queues what it received for the monitor)
+
+    def monitor_read(self, addr, n):
+        """read n <= 256 bytes through the monitor ('M' dumps 256 from addr)"""
+        with socket.create_connection(("127.0.0.1", self.args.mon_port), timeout=2) as s:
+            s.settimeout(1.0)
+            s.sendall(b"M%x\r" % addr)
+            out, t0 = b"", time.time()
+            while not out.rstrip(b"\r\n ").endswith(b"\n.") and time.time() - t0 < 2:
+                try:
+                    out += s.recv(65536)
+                except socket.timeout:
+                    break
+        data = b""
+        for line in out.decode(errors="replace").splitlines():
+            if line.startswith(":") and line.count(":") >= 2:
+                data += bytes.fromhex(line.split(":")[2].strip())
+        return data[:n]
+
+    # ---- real-time clock: soft_rtc in the MEGA65 bitstream ($FFD7110..), no battery: set it
+    # from the Rockchip's NTP-synchronised local time, at a second boundary, in one monitor
+    # command starting with the seconds (which restarts the clock's sub-second counter)
+    def rtc_schedule(self, delay=0.0):
+        self.rtc_due = int(time.time() + delay) + 1
+
+    def bridge_down(self):
+        """m65io's count of status polls without the bridge (FPGA configuring, link problems)"""
+        try:
+            for f in open(self.args.stats).read().split():
+                if f.startswith("bridge_down="):
+                    return int(f.split("=")[1])
+        except (OSError, ValueError):
+            pass
+        return None
+
+    def rtc_write(self):
+        t = self.rtc_due
+        self.rtc_due = int(t) + 3600                  # and again every hour
+        if self.core != 1 or self.inp.term_mode:
+            return
+        lt = time.localtime(t)
+        bcd = lambda v: (v // 10) << 4 | v % 10
+        regs = [bcd(lt.tm_sec), bcd(lt.tm_min), bcd(lt.tm_hour) | 0x80, bcd(lt.tm_mday),
+                bcd(lt.tm_mon), bcd(lt.tm_year % 100), (lt.tm_wday + 1) % 7]   # 0 = Sunday
+        try:
+            self.monitor("sffd7110 " + " ".join("%02x" % v for v in regs), wait=False)
+            print("m65d: RTC set to %s" % time.strftime("%Y-%m-%d %H:%M:%S", lt), flush=True)
+        except OSError as e:
+            print("m65d: RTC set failed: %s" % e, flush=True)
+
+    # ---- safe power off (Ctrl+Alt+End): MEGA65 screen says "shutting down", the Rockchip shuts
+    # down; /lib/systemd/system-shutdown/m65-safe.shutdown replays /run/m65-shutdown-msg ("safe
+    # to switch off", green border) once all file systems are read-only, just before the halt
+    def screen_text(self, text, border):
+        """monitor commands writing text into the top row of the current text screen"""
+        r = self.monitor_read(0xFFD3000, 0x80)
+        if len(r) < 0x80:
+            return []
+        scr = r[0x60] | r[0x61] << 8 | r[0x62] << 16
+        col = 0xFF80000 + (r[0x64] | r[0x65] << 8)
+        chr16 = r[0x54] & 1
+        code = lambda c: ord(c) - 64 if "A" <= c <= "Z" else ord(c)
+        cells = [code(c) for c in text]
+        if chr16:
+            scr_b = sum(([c, 0] for c in cells), [])
+            col_b = sum(([0, 1] for c in cells), [])
+        else:
+            scr_b, col_b = cells, [1] * len(cells)
+        cmds = ["sffd3020 %02x %02x" % (border, border)]
+        for base, data in ((scr, scr_b), (col, col_b)):
+            for i in range(0, len(data), 16):        # the monitor takes short lines only
+                cmds.append("s%x %s" % (base + i, " ".join("%02x" % v for v in data[i:i + 16])))
+        return cmds
+
+    def poweroff(self):
+        if self.inp.term_mode:
+            self.terminal("off")
+        if self.core == 1:
+            try:
+                for c in self.screen_text("  SHUTTING DOWN - WAIT FOR: SAFE TO SWITCH OFF   ", 2):
+                    self.monitor(c, wait=False)
+                cmds = self.screen_text("  ROCKCHIP HALTED - SAFE TO SWITCH OFF          ", 5)
+                with open("/run/m65-shutdown-msg", "w") as f:
+                    f.write("".join(c + "\r" for c in cmds))
+            except OSError as e:
+                print("m65d: shutdown message: %s" % e, flush=True)
+        print("m65d: power off (Ctrl+Alt+End)", flush=True)
+        subprocess.Popen(["systemctl", "poweroff"])
 
     def switch_core(self, target):
         cur = self.br.core_id()
@@ -283,6 +377,9 @@ class Daemon:
         return "ok switching to %s" % target
 
     def system_action(self, act):
+        if act == "poweroff":
+            self.poweroff()
+            return
         if act == "terminal":
             print("m65d: terminal " + self.terminal("toggle"), flush=True)
             return
@@ -353,6 +450,12 @@ class Daemon:
             return self.latency(rest.strip())
         if cmd == "terminal":
             return self.terminal(a[0] if a else "state")
+        if cmd == "rtc":
+            self.rtc_schedule()
+            return "ok RTC set at the next full second"
+        if cmd == "poweroff":
+            self.poweroff()
+            return "ok shutting down"
         if cmd == "inputs":
             # live view of the USB input state, e.g. while pressing pad buttons
             j1, j2 = self.inp.joysticks()
@@ -471,8 +574,15 @@ class Daemon:
                 self.inp.set_term_mode(st == "ok on")    # e.g. m65term restarted
                 self.input_dirty = True
             c = self.br.core_id()
+            down = self.bridge_down()
+            if c == 1 and down is not None and self.last_down is not None and down > self.last_down:
+                self.rtc_schedule(2.0)                # the FPGA was away (reconfigured): set it again
+            if down is not None:
+                self.last_down = down
             if c is not None and c != self.core:
                 self.core = c
+                if c == 1:
+                    self.rtc_schedule(2.0)            # MEGA65 (re)configured: its RTC is unset
                 self.inp.matrix_cursor = c != 2
                 self.input_dirty = True
                 print("m65d: core %s, cursor up/left %s" % (
@@ -481,7 +591,11 @@ class Daemon:
                     flush=True)
         while self.inp.term_out:              # terminal mode: keys for the shell
             self.term_call(self.inp.term_out.pop(0), reply=False)
+        if self.rtc_due and time.time() >= self.rtc_due:
+            self.rtc_write()
         changed, wait = self.inp.maintain(time.monotonic())   # hot-plug, mouse rate limit
+        if self.rtc_due:
+            wait = min(wait, max(0.0, self.rtc_due - time.time()))
         if changed:
             self.input_dirty = True
         self.push_input()

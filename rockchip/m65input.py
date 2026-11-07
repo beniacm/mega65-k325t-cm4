@@ -23,6 +23,7 @@ System keys (never passed to the core), Ctrl + Alt + ...:
     Del = reset the core     F1 = MEGA65     F2 = C64     F12 = toggle MEGA65 <-> C64
     J = swap joystick ports 1 <-> 2 (pads and mouse)
     T = Linux terminal on the MEGA65 screen and back (m65term; keys then go to the shell, US layout)
+    End = shut the Rockchip down safely; the MEGA65 screen says when it is safe to switch off
 Mouse: Commodore 1351 in proportional mode on port 2 (all mice summed): the SID POTX/POTY
     values carry the position mod 64 (bits 6..1), left button = fire, right button = up.
     MOUSE_SCALE divides PC mouse counts (modern mice report far more counts than a 1351).
@@ -171,7 +172,7 @@ MOD_LEAD = 0.04
 MOD_HOLD = 0.10
 CTRL_KEYS, ALT_KEYS = {29, 97}, {56, 100}
 SYSTEM_KEYS = {111: "reset", 59: "core mega65", 60: "core c64", 88: "core toggle",  # Del F1 F2 F12
-               36: "joyswap", 20: "terminal"}                                       # J (local), T
+               36: "joyswap", 20: "terminal", 107: "poweroff"}                      # J (local), T, End
 
 # Terminal mode (m65term): US layout -> bytes for the shell; special keys by name
 TERM_KEYS = {1: "\x1b", 14: "\x7f", 15: "\t", 28: "\r", 96: "\r", 57: " ",

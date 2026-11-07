@@ -362,6 +362,42 @@ CMD17 -- the cache gives us the same.
 Audio recorded through the capture dongle: no gaps or repeated buffers in the music. The C64 core
 uses the same bridge and needs its own build to get the cache.
 
+## Real-time clock and safe power-off
+
+The board has no RTC chip and no battery.  **`soft_rtc.vhdl`** (MEGA65 core, `qmtechk325t` only)
+puts the MEGA65 RTC registers at `$FFD7110-$FFD7116` (seconds, minutes, hours with bit 7 = 24 h,
+day, month, year 20yy, day of week; BCD, the R3..R6 layout) and counts by itself from the CPU
+clock with month lengths and leap years; until set it reads day 0.  **m65d** sets it from the
+Rockchip's NTP-synchronised **local** time (time zone `Europe/Bratislava`, set by
+`setup_rockchip.sh`, `M65_TZ=` to change) at a full second, with one monitor command that starts
+with the seconds (a seconds write restarts the 1 Hz divider): when the MEGA65 core appears, when
+m65io saw the bridge go away (the FPGA was reconfigured), hourly, and on `m65ctl rtc`.
+`sim/tb_soft_rtc.vhdl`: leap day, month ends, 2099 → 2000 -- TB_SOFT_RTC_PASS.
+
+**ROM patch**: BASIC 65 reads the RTC (banner, `DT$`, `TI$`) only on board ids below `$0A` and
+prints `NO-RTC-2000` on ours (`$D629 = $62`).  `scripts/rom_rtcpatch.py` raises both checks
+(`LDA $D629 / CMP #$0A / BCS`) to `#$63`; `make_rom.sh` applies it.  Result: `BASIC 65 V920413
+07-NOV-2026 00:00:01`, `DT$` / `TI$` equal to the Rockchip's clock.  Changing the board id instead
+would make HYPPO and the tools treat the board as an R3.
+
+**Safe power-off** (the Rockchip's root file system is on eMMC): **Ctrl+Alt+End** on the USB
+keyboard (or `m65ctl poweroff`) → red screen "SHUTTING DOWN - WAIT FOR: SAFE TO SWITCH OFF" →
+`systemctl poweroff` → `/lib/systemd/system-shutdown/m65-safe.shutdown` runs once every file system
+is read-only and writes the prepared monitor commands straight over SPI → green screen "ROCKCHIP
+HALTED - SAFE TO SWITCH OFF" (~20 s).  The FPGA keeps running; the MEGA65 card writes are on the
+eMMC within 0.1 s anyway (`m65io` `fdatasync`s once writes pause).
+
+**SPI clock per bitstream**: how fast MISO is clean depends on the build -- one with the MISO
+register placed far from its pin failed every status read above 25 MHz, and m65io used to hang
+(no monitor, no SD, no reset).  Now `m65io` checks the link (200 status reads) at start, while the
+bridge is down and after 3 dropouts in 10 s, and uses the fastest clean rate up to `-s`
+(40 → 33 → 25 → 16.7 → 10 MHz; the log says "SPI link at ... (requested rate unreliable)"); the
+sockets and stats stay alive while the bridge is away.  The XDC now packs the first SCK/MOSI/CS
+sampling flip-flops and the MISO register into the I/O cells (`IOB TRUE`, MISO `SLEW FAST`), so
+the pad delays no longer depend on placement.  That build: linktest 0 errors in 3000 at 10..40 MHz
+(50 fails, as before), `sdlinktest.py` 200 random + 300 consecutive sectors at 40 MHz, 0 mismatches,
+298/300 cache hits.
+
 ## 8 MB attic RAM (DDR3)
 
 The board's 256 MB DDR3 (MT41K128M16, bank 34) provides the MEGA65's **8 MB attic RAM**
@@ -461,6 +497,7 @@ No PC or JTAG is needed in normal use:
 | Ctrl+Alt+F12 | `core toggle` | MEGA65 ⇄ C64 |
 | Ctrl+Alt+F1 / F2 | `core mega65` / `core c64` | |
 | Ctrl+Alt+Del | `reset` | reset the running core |
+| Ctrl+Alt+End | `poweroff` | shut the Rockchip down safely (see below) |
 
 Flash (S25FL128L, 16 MB), written from the Rockchip with `rockchip/m65flash.py` while either core
 runs (16 MB read 15 s, a 6 MB core about 1 min including verify):

@@ -12,6 +12,7 @@
 set -u
 MODE=${1:-check}
 HOST=${2:-root@192.168.1.143}
+TZ=${M65_TZ:-Europe/Bratislava}                    # the MEGA65's RTC is set in local time
 HERE=$(cd "$(dirname "$0")/.." && pwd)            # .../rockchip
 DEST=/root/m65
 # files deployed to /root/m65 (everything the service and the PC-side tools call)
@@ -30,7 +31,8 @@ IDE="ide/vim/syntax/ca65.vim:/usr/share/vim/vimfiles/syntax/ca65.vim
      ide/45gs02.txt:/usr/local/share/m65ide/45gs02.txt
      ide/mega65_regs.inc:/usr/local/share/m65ide/asminc/mega65_regs.inc
      ide/m65doc:/usr/local/bin/m65doc
-     ide/m65new:/usr/local/bin/m65new"
+     ide/m65new:/usr/local/bin/m65new
+     m65-safe.shutdown:/lib/systemd/system-shutdown/m65-safe.shutdown"
 # sha256 of the deployed boot image (~/qmtech: rockchip/boot_dtb/boot_sd.img, 24863744 bytes) and
 # of the factory p3 dump (~/qmtech: rockchip/p3_boot_backup.img.xz)
 BOOT_LEN=24863744
@@ -54,6 +56,7 @@ check() {
     for f in $(for e in $IDE; do printf '%s ' ${e#*:}; done); do echo IDE \$(md5sum < \$f 2>/dev/null | cut -d' ' -f1) \$f; done;
     echo CA65 \$(ca65 --version 2>&1 | head -1);
     echo LLVMMOS \$(/opt/llvm-mos/bin/clang --version 2>/dev/null | head -1);
+    echo TZ \$(cat /etc/timezone);
     echo CARD \$(stat -c %s $DEST/card.img 2>/dev/null)") || { echo "cannot reach $HOST"; exit 2; }
   for f in $FILES; do
     if echo "$out" | grep -q "^$(md5l "$HERE/$f")  $f\$"; then echo "ok    $DEST/$f"; else echo "DIFF  $DEST/$f"; bad=1; fi
@@ -88,6 +91,8 @@ check() {
     || echo "WARN  ca65 missing (run deploy/build_tools.sh on the Rockchip)"
   echo "$out" | grep -q "^LLVMMOS clang version" && echo "ok    llvm-mos: $(echo "$out" | sed -n 's/^LLVMMOS //p' | cut -c1-60)" \
     || echo "WARN  llvm-mos missing (run deploy/build_llvm_mos.sh on the PC)"
+  [ "$(echo "$out" | awk '/^TZ /{print $2}')" = "$TZ" ] && echo "ok    timezone $TZ" \
+    || { echo "DIFF  timezone $(echo "$out" | awk '/^TZ /{print $2}') (want $TZ)"; bad=1; }
   local card; card=$(echo "$out" | awk '/^CARD/{print $2}')
   [ -n "$card" ] && echo "ok    card.img $((card / 1048576)) MB" || { echo "DIFF  $DEST/card.img missing (README: SD card image)"; bad=1; }
   [ $bad = 0 ] && echo "== $HOST matches the repo" || echo "== $HOST differs (see DIFF lines)"
@@ -96,13 +101,14 @@ check() {
 
 install() {
   echo "copying to $HOST:$DEST"
-  tar -C "$HERE" -cf - $FILES $UNITS deploy/config.txt ide | \
+  tar -C "$HERE" -cf - $FILES $UNITS deploy/config.txt ide m65-safe.shutdown | \
     rsh "mkdir -p $DEST && tar -C $DEST -xf - && cd $DEST && chmod 644 $(echo $FILES) && rm -f /usr/local/bin/m65run && install -m 755 m65run /usr/local/bin/m65run && rm -f m65io &&
          for u in $UNITS; do install -m 644 \$u /etc/systemd/system/\$u && rm \$u || exit 1; done &&
          if ! cmp -s deploy/config.txt /boot/config.txt; then cp /boot/config.txt /boot/config.txt.pre-m65 &&
            cp deploy/config.txt /boot/config.txt && echo 'config.txt replaced (old: /boot/config.txt.pre-m65)'; fi &&
          rm -r deploy && gcc -O2 -Wall -o m65io m65io.c &&
-         for e in $(echo $IDE); do install -D -m \$(case \${e#*:} in /usr/local/bin/*) echo 755;; *) echo 644;; esac) \${e%%:*} \${e#*:} || exit 1; done && rm -r ide &&
+         for e in $(echo $IDE); do install -D -m \$(case \${e#*:} in /usr/local/bin/*|*.shutdown) echo 755;; *) echo 644;; esac) \${e%%:*} \${e#*:} || exit 1; done && rm -r ide m65-safe.shutdown &&
+         timedatectl set-timezone $TZ &&
          systemctl daemon-reload && systemctl enable $ENABLE" || { echo "install FAILED"; exit 1; }
   echo "installed; m65io built.  Reboot the Rockchip (or: ssh ... sh $DEST/m65d_restart.sh), then: $0 check $HOST"
 }

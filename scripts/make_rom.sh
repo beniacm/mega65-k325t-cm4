@@ -17,4 +17,5 @@ python3 "$ROOT/scripts/rdfpatch.py" "$BASE" "$T/rdf.rom" "$RDF" >/dev/null
 python3 "$ROOT/scripts/bspatch.py"  "$BASE" "$T/bdf.rom" "$BDF" >/dev/null
 cmp -s "$T/rdf.rom" "$T/bdf.rom" || { echo "RDF and BDF results differ -> wrong base ROM (need C65 910828)"; exit 1; }
 mkdir -p "$ROOT/sdimage/extra"; cp "$T/bdf.rom" "$ROOT/sdimage/extra/MEGA65.ROM"
+"$ROOT/scripts/rom_rtcpatch.py" "$ROOT/sdimage/extra/MEGA65.ROM"     # RTC on board id $62 (soft_rtc)
 echo "MEGA65.ROM $(grep -aoE 'V9[0-9]{5}' "$T/bdf.rom" | head -1)  sha1 $(sha1sum "$T/bdf.rom" | cut -c1-40)  (RDF==BDF)"
