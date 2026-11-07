@@ -8,11 +8,11 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 entity tb_rrb_list_expander is
-  generic ( LIMIT : integer := 1020 );
+  generic ( LIMIT : integer := 1020; MLAT : integer := 4 );
 end entity;
 
 architecture sim of tb_rrb_list_expander is
-  constant MLAT : integer := 4;
+
   signal clk : std_logic := '0';
   signal start, busy, done, mreq, bwe : std_logic := '0';
   signal ent_addr : unsigned(19 downto 0) := x"10000";
@@ -27,7 +27,7 @@ architecture sim of tb_rrb_list_expander is
   function chip(a : unsigned(19 downto 0)) return unsigned is
     type r_t is array (natural range <>) of integer;
     constant E : r_t := (16#64#, 16#40#, 16#F0#, 16#12#, 0, 0, 0, 16#40#,   -- X 100, Y+2, mask F0, FLIPX
-                         16#28#, 16#04#, 16#FF#, 16#62#, 0, 0, 0, 16#40#,   -- REL +40, FLIPY, transparent
+                         16#64#, 16#04#, 16#FF#, 16#62#, 0, 0, 0, 16#40#,   -- REL +100 (200; a REL recomputed after last_x moved gives 300), FLIPY, transparent
                          16#FF#, 16#FF#, 0, 0, 0, 0, 0, 0);                 -- end of lists
     constant O : r_t := (16#23#, 16#01#, 16#08#, 16#00#, 16#24#, 16#01#,    -- glyph, GOTOX 8, glyph
                          16#FF#, 16#FF#, 16#AA#, 16#AA#, 16#AA#, 16#AA#, 16#AA#, 16#AA#);
@@ -75,7 +75,7 @@ begin
   process (clk) begin
     if rising_edge(clk) then
       mp(1) <= chip(maddr);
-      for n in 2 to MLAT - 1 loop mp(n) <= mp(n - 1); end loop;
+      for n in 2 to MLAT - 1 loop mp(n) <= mp(n - 1); end loop;   -- (no stage for MLAT 2)
       cdata <= col(caddr);
       if bwe = '1' then
         bs(to_integer(baddr)) <= bscreen; bc(to_integer(baddr)) <= bcolour;
@@ -89,7 +89,7 @@ begin
     type exp_t is array (natural range <>) of integer;
     -- buffer from index 10: (screen, colour) per byte
     constant XS : exp_t := (16#64#, 16#40#,  16#23#, 16#01#, 16#08#, 16#00#, 16#24#, 16#01#,
-                            16#8C#, 16#00#,  16#23#, 16#01#, 16#08#, 16#00#, 16#24#, 16#01#,
+                            16#C8#, 16#00#,  16#23#, 16#01#, 16#08#, 16#00#, 16#24#, 16#01#,
                             16#FF#, 16#FF#);
     constant XC : exp_t := (16#18#, 16#F0#,  16#40#, 16#05#, 16#10#, 16#00#, 16#00#, 16#07#,
                             16#90#, 16#FF#,  16#80#, 16#05#, 16#10#, 16#00#, 16#C0#, 16#07#,
