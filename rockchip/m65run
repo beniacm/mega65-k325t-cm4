@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""m65run -- run a cross-assembled program on the MEGA65 (from the m65term shell or anywhere).
+"""m65run -- run a cross-assembled program on the MEGA65 (from the Rockchip's shell, vim F5, ...).
 
     m65run prog.prg            load at the PRG's address, start it with SYS <stub address>
     m65run prog.prg --sys N    start with SYS N (decimal or 0x hex)
@@ -7,8 +7,7 @@
     m65run prog.prg --load     only load
     m65run prog.prg --reset    reset the MEGA65 to BASIC READY first
 
-Leaves the terminal (m65d 'terminal off': the MEGA65 picture and the frozen program come back),
-writes the PRG through the serial monitor (binary load, ~190 KB/s) and starts it:
+Writes the PRG through the serial monitor (binary load, ~190 KB/s) and starts it:
   * MEGA65 at the BASIC READY prompt: types SYS <address> (stub '10 SYS n') or RUN (other stubs,
     e.g. llvm-mos's '10 BANK 0 : 20 SYS n')
   * llvm-mos C programs (stub '10 BANK 0 : 20 SYS n') never return to BASIC -- their start
@@ -17,9 +16,8 @@ writes the PRG through the serial monitor (binary load, ~190 KB/s) and starts it
   * a BASIC-style program after a C program (or with the CPU parked): BASIC is broken, so the
     MEGA65 core is reset first and m65run waits for READY. (leaving the start menu with '/').
     The kind of the last program is kept in /tmp/m65run.last.
-Afterwards the HDMI output and the keyboard are switched to the MEGA65 (m65d 'view mega65';
-K325T bitstreams with linux_fb show the Rockchip's own picture otherwise).
-Back to the shell: Ctrl+Alt+T (shell on the MEGA65 screen) or Ctrl+Alt+Insert (Linux picture)."""
+Afterwards the HDMI output and the keyboard are switched to the MEGA65 (m65d 'view mega65').
+Back to the Linux picture (vim, the shell): Ctrl+Alt+Insert."""
 import socket
 import sys
 import time
@@ -168,7 +166,7 @@ def main():
         sys.exit(__doc__)
     raw = open(a[0], "rb").read()
     addr, data = raw[0] | raw[1] << 8, raw[2:]
-    r = ctl("terminal off")
+    r = ctl("status")                              # m65d reachable?
     if not r.startswith("ok"):
         sys.exit("m65run: " + r)
     mon = Monitor()

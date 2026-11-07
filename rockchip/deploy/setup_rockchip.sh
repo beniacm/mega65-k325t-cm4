@@ -18,9 +18,12 @@ DEST=/root/m65
 # files deployed to /root/m65 (everything the service and the PC-side tools call)
 FILES="m65d_restart.sh m65d_stop.sh m65_bootreset.py m65io.c m65d.py m65input.py m65flash.py
        uinput_test.py input_bench.py input_selftest.py linktest.py usbtest.sh
-       m65term.py m65run"
-UNITS="m65d.service m65io.service m65-bootreset.service m65term.service"
-ENABLE="m65d.service m65-bootreset.service m65term.service"   # m65io.service comes with m65d (Wants)
+       m65run"
+UNITS="m65d.service m65io.service m65-bootreset.service"
+ENABLE="m65d.service m65-bootreset.service"   # m65io.service comes with m65d (Wants)
+# removed from the deployment (install takes them off the board)
+GONE_UNITS="m65term.service"
+GONE_FILES="m65term.py rk_pins.py /run/m65term.sock /run/m65term.saved"
 # MEGA65 assembler IDE (vim + ca65): repo path under rockchip/ -> installed path
 IDE="ide/vim/syntax/ca65.vim:/usr/share/vim/vimfiles/syntax/ca65.vim
      ide/vim/ftdetect/ca65.vim:/usr/share/vim/vimfiles/ftdetect/ca65.vim
@@ -117,7 +120,8 @@ install() {
            cp deploy/config.txt /boot/config.txt && echo 'config.txt replaced (old: /boot/config.txt.pre-m65)'; fi &&
          rm -r deploy && gcc -O2 -Wall -o m65io m65io.c &&
          for e in $(echo $IDE); do install -D -m \$(case \${e#*:} in /usr/local/bin/*|*.shutdown) echo 755;; *) echo 644;; esac) \${e%%:*} \${e#*:} || exit 1; done && rm -r ide m65-safe.shutdown &&
-         rm -f rk_pins.py && sysctl -q -p /etc/sysctl.d/90-m65-console.conf &&
+         for u in $GONE_UNITS; do systemctl disable --now \$u 2>/dev/null; rm -f /etc/systemd/system/\$u; done;
+         rm -f $GONE_FILES && sysctl -q -p /etc/sysctl.d/90-m65-console.conf &&
          timedatectl set-timezone $TZ &&
          ln -sfn /dev/null /etc/systemd/system/ctrl-alt-del.target &&    # mask (the image links it to reboot.target)
          systemctl daemon-reload && systemctl enable $ENABLE" || { echo "install FAILED"; exit 1; }

@@ -9,6 +9,6 @@ function! M65Make(target) abort
     echohl ErrorMsg | echo 'build failed (F8/F9: errors)' | echohl None
   else
     cclose
-    echo a:target ==# 'run' ? 'running on the MEGA65 -- Ctrl+Alt+T comes back here' : 'build ok'
+    echo a:target ==# 'run' ? 'running on the MEGA65 -- Ctrl+Alt+Insert comes back here' : 'build ok'
   endif
 endfunction

@@ -9,7 +9,7 @@ C=; [ "$1" = "-c" ] && { C=1; shift; }
 mkdir "$1"; cd "$1"
 if [ -n "$C" ]; then
 cat > main.c <<'S'
-// main.c -- MEGA65 program in C (llvm-mos).  F5 in vim: build and run, Ctrl+Alt+T: back here
+// main.c -- MEGA65 program in C (llvm-mos).  F5 in vim: build and run, Ctrl+Alt+Insert: back here
 // Registers by name: VICIV.bordercol, DMA, ... (<mega65.h>, /opt/llvm-mos/mos-platform/mega65)
 #include <stdio.h>
 #include <mega65.h>
@@ -40,7 +40,7 @@ echo "m65new: C project $1 created -- cd $1 && vi main.c  (F5 = build + run on t
 exit 0
 fi
 cat > main.s <<'S'
-; main.s -- MEGA65 program (BASIC 65 mode).  F5 in vim: build and run, Ctrl+Alt+T: back here
+; main.s -- MEGA65 program (BASIC 65 mode).  F5 in vim: build and run, Ctrl+Alt+Insert: back here
         .setcpu "45GS02"
         .include "cbm_kernal.inc"       ; KERNAL routines: CHROUT, GETIN, PLOT, ...
         .include "mega65.inc"           ; C64-compatible VIC/SID/CIA names, zero page (cc65)

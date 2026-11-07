@@ -22,7 +22,7 @@ Gamepad: first pad -> joystick port 2 (most C64 games), second pad -> port 1; a 
 System keys (never passed to the core), Ctrl + Alt + ...:
     Del = reset the core     F1 = MEGA65     F2 = C64     F12 = toggle MEGA65 <-> C64
     J = swap joystick ports 1 <-> 2 (pads and mouse)
-    T = Linux terminal on the MEGA65 screen and back (m65term; keys then go to the shell, US layout)
+    Insert = HDMI picture + keyboard: Linux (the Rockchip's own display, linux_fb) <-> MEGA65
     End = shut the Rockchip down safely; the MEGA65 screen says when it is safe to switch off
 Mouse: Commodore 1351 in proportional mode on port 2 (all mice summed): the SID POTX/POTY
     values carry the position mod 64 (bits 6..1), left button = fire, right button = up.
@@ -172,7 +172,7 @@ MOD_LEAD = 0.04
 MOD_HOLD = 0.10
 CTRL_KEYS, ALT_KEYS = {29, 97}, {56, 100}
 SYSTEM_KEYS = {111: "reset", 59: "core mega65", 60: "core c64", 88: "core toggle",  # Del F1 F2 F12
-               36: "joyswap", 20: "terminal", 107: "poweroff",                      # J (local), T, End
+               36: "joyswap", 107: "poweroff",                                     # J (local), End
                110: "view toggle"}                                                  # Insert
 # (The view hotkey is not an F key: with the keyboard released to Linux, Ctrl+Alt+Fn also
 #  switches the Linux console's virtual terminals.)
@@ -180,24 +180,6 @@ SYSTEM_KEYS = {111: "reset", 59: "core mega65", 60: "core c64", 88: "core toggle
 # m65d voids Ctrl+Alt+Insert in the console keymap; Ctrl+Alt+End means nothing there)
 LINUX_FOCUS_KEYS = {110, 107}                                                       # Insert, End
 
-# Terminal mode (m65term): US layout -> bytes for the shell; special keys by name
-TERM_KEYS = {1: "\x1b", 14: "\x7f", 15: "\t", 28: "\r", 96: "\r", 57: " ",
-             12: "-", 13: "=", 26: "[", 27: "]", 39: ";", 40: "'", 41: "`", 43: "\\", 51: ",",
-             52: ".", 53: "/", 55: "*", 74: "-", 78: "+", 98: "/", 83: ".", 82: "0",
-             79: "1", 80: "2", 81: "3", 75: "4", 76: "5", 77: "6", 71: "7", 72: "8", 73: "9"}
-TERM_SHIFT = {12: "_", 13: "+", 26: "{", 27: "}", 39: ":", 40: '"', 41: "~", 43: "|", 51: "<",
-              52: ">", 53: "?"}
-for _i, (_c, _s) in enumerate(zip("1234567890", "!@#$%^&*()")):
-    TERM_KEYS[2 + _i], TERM_SHIFT[2 + _i] = _c, _s
-for _codes, _chars in (([16, 17, 18, 19, 20, 21, 22, 23, 24, 25], "qwertyuiop"),
-                       ([30, 31, 32, 33, 34, 35, 36, 37, 38], "asdfghjkl"),
-                       ([44, 45, 46, 47, 48, 49, 50], "zxcvbnm")):
-    for _c, _ch in zip(_codes, _chars):
-        TERM_KEYS[_c], TERM_SHIFT[_c] = _ch, _ch.upper()
-TERM_SPECIAL = {103: "UP", 108: "DOWN", 105: "LEFT", 106: "RIGHT", 102: "HOME", 107: "END",
-                104: "PGUP", 109: "PGDN", 110: "INS", 111: "DEL", 87: "F11", 88: "F12"}
-TERM_SPECIAL.update({59 + i: "F%d" % (i + 1) for i in range(10)})
-SHIFT_KEYS = {42, 54}
 
 # Gamepad buttons
 BTN_FIRE = set(range(0x120, 0x12c)) | {0x130, 0x131, 0x132, 0x133, 0x134, 0x135,
@@ -330,9 +312,6 @@ class InputHub:
         self.restore = False
         self.joy_swap = False
         self.matrix_cursor = True           # cursor up/left also as RSHIFT + cursor in the matrix
-        self.term_mode = False              # keys go to the Linux terminal (m65term), not the MEGA65
-        self.term_caps = False
-        self.term_out = []                  # messages for m65term ("k NAME mods" / "t hex")
         self.actions = []                   # system-key actions for m65d (reset / core switch)
         self.linux_focus = False            # keyboards released to Linux (view linux)
         self.lead = {}                      # keycode -> press time (modifier-first combos)
@@ -569,13 +548,7 @@ class InputHub:
                 self.caps = not self.caps       # latching key, like the real one
         elif code == KEY_PAGEUP:
             self.restore = val != 0
-        elif self.term_mode and not (code in SYSTEM_KEYS and (val == 0 and code in self.sys_held or
-                                                               val and self.kbd_keys & CTRL_KEYS
-                                                               and self.kbd_keys & ALT_KEYS)):
-            self._term_key(dev, code, val)
-        elif code in SYSTEM_KEYS and (val == 0 and code in self.sys_held or
-                                      val and self.kbd_keys & CTRL_KEYS
-                                      and self.kbd_keys & ALT_KEYS):
+        elif self._sys_combo(code, val):
             if val == 1:
                 if SYSTEM_KEYS[code] == "joyswap":
                     self.swap_ports()
@@ -599,36 +572,6 @@ class InputHub:
             dev.keys.discard(code)
             self.lead.pop(code, None)
 
-    def _term_key(self, dev, code, val):
-        (dev.keys.add if val else dev.keys.discard)(code)     # modifier state
-        if not val:
-            return
-        if code == KEY_CAPSLOCK:
-            if val == 1:
-                self.term_caps = not self.term_caps
-            return
-        keys = self.kbd_keys | dev.keys
-        shift = bool(keys & SHIFT_KEYS)
-        ctrl, alt = bool(keys & CTRL_KEYS), bool(keys & ALT_KEYS)
-        if code in TERM_SPECIAL:
-            self.term_out.append("k %s %d" % (TERM_SPECIAL[code], shift | alt << 1 | ctrl << 2))
-            return
-        ch = TERM_SHIFT.get(code) if shift else TERM_KEYS.get(code)
-        if ch is None:
-            return
-        if self.term_caps and ch.isalpha():
-            ch = ch.swapcase()
-        if ctrl:
-            if ch.isalpha():
-                ch = chr(ord(ch.lower()) - 96)
-            else:
-                ch = {" ": "\x00", "2": "\x00", "[": "\x1b", "\\": "\x1c", "]": "\x1d",
-                      "6": "\x1e", "-": "\x1f", "/": "\x1f"}.get(ch, ch)
-        data = ch.encode()
-        if alt:
-            data = b"\x1b" + data
-        self.term_out.append("t " + data.hex())
-
     def set_linux_focus(self, on):
         """keyboards to Linux (released, the MEGA65 sees no keys) or back to the MEGA65 (grabbed)"""
         self.linux_focus = on
@@ -647,11 +590,6 @@ class InputHub:
         self.held.clear()
         self._merge_keys()
         self.log("m65input: keyboard focus %s" % ("Linux" if on else "MEGA65"))
-
-    def set_term_mode(self, on):
-        self.term_mode = on
-        self.lead.clear()
-        self.held.clear()
 
     def swap_ports(self):
         self.joy_swap = not self.joy_swap
@@ -681,8 +619,6 @@ class InputHub:
 
     def matrix(self):
         cols = [0] * 9
-        if self.term_mode:
-            return cols
         names = []
         now = time.time()
         # with the keyboard released to Linux the MEGA65 sees no keyboard keys at all
@@ -713,8 +649,6 @@ class InputHub:
         """(port1 bits, port2 bits): first pad -> port 2, second -> port 1; mouse on port 2
         (all swapped with Ctrl+Alt+J)"""
         j = {1: 0, 2: 0}
-        if self.term_mode:
-            return 0, 0
         for p in self.pads:
             j[(3 - p.port) if self.joy_swap else p.port] |= p.joy()
         btn = set().union(*(m.buttons for m in self.mice)) if self.mice else set()
@@ -734,7 +668,7 @@ class InputHub:
     def pots(self):
         """SID values (pot1 x, pot1 y, pot2 x, pot2 y); $FF = nothing connected.
         1351 proportional mode: bits 6..1 = position mod 64, bit 0 = noise (0 here)."""
-        if not self.mouse_active() or self.term_mode:
+        if not self.mouse_active():
             return (0xFF, 0xFF, 0xFF, 0xFF)
         m = ((int(self.ax.out) & 63) << 1, (int(self.ay.out) & 63) << 1)
         return (m + (0xFF, 0xFF)) if self._mouse_port() == 1 else ((0xFF, 0xFF) + m)
@@ -743,7 +677,5 @@ class InputHub:
         # b1 RESTORE, b2 CAPS LOCK, b4 / b5 cursor up / left: the MEGA65 keyboard's dedicated
         # keys (MEGA65 core keyup/keyleft, C64 core keyboard keys 73/74); the matrix gets
         # RIGHT SHIFT + DOWN / RIGHT as well (KEYMAP), as from a real MEGA65 keyboard
-        if self.term_mode:
-            return 4 if self.caps else 0
         return ((2 if self.restore else 0) | (4 if self.caps else 0) |
                 (0x10 if 103 in self.kbd_keys else 0) | (0x20 if 105 in self.kbd_keys else 0))

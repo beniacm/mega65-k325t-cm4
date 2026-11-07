@@ -1,5 +1,5 @@
 " ca65 / MEGA65 cross-development in vim
-"   F5  build and run on the MEGA65 (make run -> m65run; back here: Ctrl+Alt+T)
+"   F5  build and run on the MEGA65 (make run -> m65run; back here: Ctrl+Alt+Insert)
 "   F7  build                  F8 / F9  next / previous error      K  45GS02 instruction help
 if exists("b:did_ftplugin")
   finish

@@ -31,7 +31,7 @@ Control: TCP port 4511, one text command per line, reply "ok ..."/"err ...":
     restore 0|1  capslock 0|1  sd emu|phys
     rtc                        set the MEGA65's clock now (also on core start and hourly)
     poweroff                   shut the Rockchip down safely (USB keyboard: Ctrl+Alt+End)
-    terminal [on|off|toggle]   Linux shell on the MEGA65 screen (m65term; USB keyboard: Ctrl+Alt+T)
+    view linux|mega65|toggle   HDMI picture + keyboard: Linux (linux_fb) or the MEGA65 (Ctrl+Alt+Insert)
     inputs                     live USB input state: joystick bits per port, POTs, keys, devices
     joyswap                    swap joystick ports 1 <-> 2 (pads and mouse; USB keyboard: Ctrl+Alt+J)
     latency [reset]            USB input event (kernel timestamp) -> INPUT register written:
@@ -51,7 +51,6 @@ import traceback
 
 import m65input
 
-TERM_SOCK = "/run/m65term.sock"
 
 def ntp_synced():
     """True once systemd-timesyncd (or another NTP client) has set the clock"""
@@ -176,11 +175,6 @@ class Daemon:
         self.next_core_check = 0.0
         self.rtc_due = 0
         self.last_down = None
-        self.term_sock = None
-        st = self.term_call("state", timeout=2.0)        # m65d restarted while the terminal was up?
-        if st == "ok on":
-            self.inp.set_term_mode(True)
-            print("m65d: terminal is on (m65term)", flush=True)
         self.sent = None
         self.lat = []           # (device kind, event -> SPI write seconds), last 4000
         self.ctl_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -323,7 +317,7 @@ class Daemon:
     def rtc_write(self):
         t = self.rtc_due
         self.rtc_due = int(t) + 3600                  # and again every hour
-        if self.core != 1 or self.inp.term_mode:
+        if self.core != 1:
             return
         if not ntp_synced():
             # no battery clock: until NTP has synchronised, the Rockchip's time is stale
@@ -385,8 +379,8 @@ class Daemon:
         return ok
 
     def poweroff(self):
-        if self.inp.term_mode:
-            self.terminal("off")
+        if self.inp.linux_focus:                # the halt message is on the MEGA65 picture
+            self.view("mega65")
         plug = self.request_plug()
         print("m65d: power off (Ctrl+Alt+End)%s" % (", plugd cuts the power" if plug else ""), flush=True)
         if self.core == 1:
@@ -444,14 +438,9 @@ class Daemon:
         if act == "poweroff":
             self.poweroff()
             return
-        if act == "terminal":
-            print("m65d: terminal " + self.terminal("toggle"), flush=True)
-            return
         if act.startswith("view "):
             print("m65d: " + self.view(act.split()[1]), flush=True)
             return
-        if self.inp.term_mode:                 # reset / core switch: give the MEGA65 back first
-            self.terminal("off")
         if act == "reset":
             self.command("reset")
         elif act.startswith("core "):
@@ -475,8 +464,6 @@ class Daemon:
             target = "mega65" if self.inp.linux_focus else "linux"
         if target not in ("linux", "mega65"):
             return "err view linux|mega65|toggle|rise|fall|diag"
-        if target == "linux" and self.inp.term_mode:
-            self.terminal("off")
         if target == "linux":
             # the keyboard is released: the console sees the hotkey too.  Ctrl+Alt+Insert
             # would type ESC [2~ there (vim: insert mode) -- void it in the console keymap
@@ -488,49 +475,6 @@ class Daemon:
         self.br.set_video((1 if target == "linux" else 0) | getattr(self, "vid_edge", 0))
         self.inp.set_linux_focus(target == "linux")
         return "ok view " + target
-
-    # ---- Linux terminal on the MEGA65 screen (m65term.py)
-    def term_call(self, line, reply=True, timeout=8.0):
-        """one line to m65term over its unix socket; its reply line (or None)"""
-        for attempt in (1, 2):
-            try:
-                if self.term_sock is None:
-                    self.term_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                    self.term_sock.settimeout(timeout)
-                    self.term_sock.connect(TERM_SOCK)
-                self.term_sock.sendall((line + "\n").encode())
-                if not reply:
-                    return None
-                buf = b""
-                while not buf.endswith(b"\n"):
-                    d = self.term_sock.recv(4096)
-                    if not d:
-                        raise OSError("m65term closed the connection")
-                    buf += d
-                return buf.decode().strip()
-            except OSError as e:
-                if self.term_sock:
-                    self.term_sock.close()
-                self.term_sock = None
-                if attempt == 2:
-                    return "err m65term: %s" % e
-        return None
-
-    def terminal(self, how):
-        on = self.inp.term_mode
-        want = (not on) if how == "toggle" else (how == "on")
-        if how == "state":
-            return "ok %s" % ("on" if on else "off")
-        if want == on:
-            return "ok %s" % ("on" if on else "off")
-        if want and self.core not in (None, 1):
-            return "err the terminal needs the MEGA65 core (it uses its serial monitor)"
-        r = self.term_call("enter" if want else "leave")
-        if r and r.startswith("ok"):
-            self.inp.set_term_mode(want)
-            self.input_dirty = True
-            return "ok %s" % ("on" if want else "off")
-        return r or "err no reply"
 
     # ---- control commands
     def command(self, line):
@@ -547,8 +491,6 @@ class Daemon:
             return "ok " + self.temps()
         if cmd == "latency":
             return self.latency(rest.strip())
-        if cmd == "terminal":
-            return self.terminal(a[0] if a else "state")
         if cmd == "view":
             # view linux|mega65|toggle: HDMI picture + keyboard focus (also Ctrl+Alt+Insert)
             # view rise|fall: BT1120 capture edge; view diag: linux_fb receiver state
@@ -671,11 +613,6 @@ class Daemon:
             self.system_action(self.inp.actions.pop(0))
         if now >= self.next_core_check:        # which core runs: cursor key encoding
             self.next_core_check = now + 2.0
-            st = self.term_call("state", timeout=1.0) if os.path.exists(TERM_SOCK) else "ok off"
-            if st in ("ok on", "ok off") and (st == "ok on") != self.inp.term_mode:
-                print("m65d: terminal state from m65term: %s" % st[3:], flush=True)
-                self.inp.set_term_mode(st == "ok on")    # e.g. m65term restarted
-                self.input_dirty = True
             c = self.br.core_id()
             down = self.bridge_down()
             if c == 1 and down is not None and self.last_down is not None and down > self.last_down:
@@ -692,8 +629,6 @@ class Daemon:
                     {1: "mega65", 2: "c64"}.get(c, c),
                     "as dedicated keys + RSHIFT/cursor matrix" if c != 2 else "as dedicated keys only"),
                     flush=True)
-        while self.inp.term_out:              # terminal mode: keys for the shell
-            self.term_call(self.inp.term_out.pop(0), reply=False)
         if self.rtc_due and time.time() >= self.rtc_due:
             self.rtc_write()
         changed, wait = self.inp.maintain(time.monotonic())   # hot-plug, mouse rate limit

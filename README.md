@@ -260,34 +260,18 @@ are kept off the console (`/etc/sysctl.d/90-m65-console.conf`, level 4).  `sim/t
 tests placement, cropping, the RGB332 expansion and the switch (GHDL, `sim/unisim_iddr_sim.vhdl`
 models the IDDR).
 
-## Linux terminal on the MEGA65 screen (cross-development)
+## Cross-development on the Rockchip
 
-**Ctrl+Alt+T** (MEGA65 core) shows a Linux shell on the MEGA65's own screen in **90×72 text** (the
-whole 720×576 picture, 8×8 font), and
-the USB keyboard types into it (US layout); Ctrl+Alt+T again gives the MEGA65 back, exactly where
-it was. No FPGA change: `rockchip/m65term.py` (service `m65term`) drives the display through the
-MEGA65 serial monitor (m65io's pipe, TCP 4510):
+The Rockchip is the development machine: its Linux console (or an ssh session) on the HDMI
+output via the Linux picture (see "One HDMI output: Linux and MEGA65"), vim, assembler and C
+compiler; **F5** in vim builds, loads and starts the program on the MEGA65 and switches picture
+and keyboard to it, **Ctrl+Alt+Insert** comes back to vim.  (Until the linux_fb bitstream a
+separate terminal emulator drew a shell into the MEGA65's own screen memory through the serial
+monitor, Ctrl+Alt+T; it is gone, the Linux picture replaces it.)
 
-- enter (~0.3 s): `t1` stops the CPU; the VIC-IV registers it changes and the memory it borrows
-  (chip RAM `$5D000` screen 6480 B + `$5F000` font 2 KB, colour RAM offset `$2000` 6480 B) are read
-  and saved to `/run/m65term.saved` *before* anything changes (a restarted m65term still restores);
-  the 8×8 `Lat15-VGA8` console font is loaded and 90×72 set: H640 + V400 + ATTR, CHRYSCL 0 (no line
-  doubling), 90 chars/row, `$D07B`=71, own SCRNPTR/CHARPTR/COLPTR, hot registers off while set, and
-  text window + borders at the picture's edges (PAL: VIC-IV x 40–760, y 17–593, measured on
-  captures; TEXTYPOS 16 showed row 1 twice and lost row 72).
-- drawing: the monitor's binary load `L` (measured **189 KB/s**; a full screen with colours ~45 ms);
-  only changed rows are sent, ≤ 30 updates/s. Colours: ANSI → C64 palette, reverse/blinking cursor
-  via the VIC-III attribute bits; a cell background shows as reverse video.
-- leave (~0.1 s): memory and registers written back, `t0` lets the CPU run on.
-- the shell (`su - linaro`, `TERM=xterm`, 90×72) is emulated by m65term's own xterm/VT102 subset
-  (cursor addressing, scroll regions, insert/delete, SGR colours, alternate screen for vi/nano/less,
-  DEC line drawing); it keeps running while the MEGA65 is shown.
-- m65d sends the keys (`terminal on|off|toggle` control command; it follows m65term's state every
-  2 s); reset / core switch keys leave the terminal first. The C64 core has no monitor: MEGA65 only.
-
-`m65run prog.prg [--sys N | --run | --load]` (in `/usr/local/bin`): leaves the terminal, loads the
-PRG through the monitor at its load address and types `SYS <address from the BASIC stub>` (or RUN)
-on the MEGA65, which should be at the READY prompt. Back to the shell: Ctrl+Alt+T.
+`m65run prog.prg [--sys N | --run | --load | --reset]` (in `/usr/local/bin`): loads the PRG
+through the monitor at its load address, types `SYS <address from the BASIC stub>` (or RUN) on
+the MEGA65, which should be at the READY prompt, and switches to the MEGA65 picture.
 
 **Toolchain:** cc65 V2.19 (ca65 assembler, ld65 linker, cc65 C compiler; `--cpu 45GS02`
 verified, Q instructions encode correctly), built from the official github.com/cc65/cc65 on the
@@ -316,7 +300,7 @@ printf and `VICIV.bordercol` run twice in a row without a reset.
   65CE02/4510, 32-bit Q), ca65 directives, labels, numbers, MEGA65 I/O addresses, strings, comments.
 - `m65new -c <name>`: the same for C (llvm-mos); F5/F7/F8/F9 also work in C files of such projects
   (clang's `file:line:col: error:` lands in the quickfix list).
-- **F5** build + run on the MEGA65 (`make run` → `m65run`; Ctrl+Alt+T comes back to vim), **F7**
+- **F5** build + run on the MEGA65 (`make run` → `m65run`; Ctrl+Alt+Insert comes back to vim), **F7**
   build, **F8/F9** next/previous error (quickfix from ca65's `file:line: Error:` messages),
   **K** on an instruction: `m65doc` (45GS02 notes, `rockchip/ide/45gs02.txt`).
 - **Symbolic names, no magic addresses** (`jsr CHROUT`, `inc VIC_BORDERCOLOR`, `tsb VIC4_CHR16`): the
@@ -326,8 +310,6 @@ printf and `VICIV.bordercol` run twice in a row without a reset.
   `rockchip/ide/gen_mega65_regs.py` from mega65-core's `iomap.txt` (the VHDL's `@IO`
   annotations, so the hardware's own names and descriptions). The Makefile passes both include
   directories (this ca65 has no built-in asminc path).
-- Colours: the terminal loads its own 16-colour ANSI palette (palette bank 2, saved/restored),
-  256-colour and RGB requests map to the nearest of the 16; a cell background shows as reverse.
 
 ## Scripts
 
