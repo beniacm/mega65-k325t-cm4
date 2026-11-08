@@ -337,6 +337,9 @@ rockchip/input_bench.py, rockchip/input_selftest.py   # input latency / function
 rockchip/deploy/        # setup_rockchip.sh check|install + the board's /boot/config.txt
 scripts/c64_run.sh      # C64 core: load, mount k325t.d64, LOAD+RUN a program, capture
 scripts/mkd64.py        # BASIC V2 text / PRG files -> D64;  scripts/crt_banksum.py: expected CRT bank sums
+scripts/b65_run.sh      # B65 BASIC: build/load/start it; `demo FILE.bas` also types a program
+scripts/rrb_list_test.py, scripts/rrb_diag.py   # RRB list mode: pixel-exact board test, hardware counters
+scripts/demos/          # BASIC 65 / B65 demos (type them in; see docs/rrb_list_mode.md)
 # m65d ignores any status without the bridge magic: while the FPGA is reprogrammed, MISO floats
 # and every field reads 0xFF (an old daemon wrote a garbage sector at LBA 0xFFFFFFFF that way).
 ```
@@ -578,8 +581,43 @@ px/cycle and 3 at 2 px/cycle.  With the bit clear the paint timing is the origin
 (the first 47 intro-disk demos compared with the previous build: same pictures; Roguecraft DX
 checked with the bit set in-game).
 
-Tests: `sim/tb_chipram_k325t.vhdl`, `sim/tb_colourram_k325t.vhdl` (GHDL); on the board
-`scripts/chipram_test.py`, `scripts/rasterdma_test.py`, `scripts/rrb_stress.py`.
+**RRB list mode** (bits 5 and 6, `docs/rrb_list_mode.md`; after upstream issue #747 "Make RRB
+even more amazing" and #597).  Raster-rewrite objects moved like sprites: with bit 5 a CHR16
+row may end with a LIST token (`$FFFC`) followed by 8-byte entries (X, Y offset, draw mask,
+FLIPX/FLIPY, transparent/behind, the address of the object's tokens); the VIC-IV expands them
+into the row buffer at the badline (`rrb_list_expander.vhdl`, with a colour row buffer).  With
+bit 6 one table of up to 255 16-byte objects with X **and** Y (`$FFD71F8-FC`: address, count,
+HOLD) is snapshotted once per frame and scanned for every row, so a program writes only X/Y and
+objects can never tear.  Verified pixel-exact against plain GOTOX rows (`scripts/rrb_list_test.py`,
+cases A-F); hardware counters at `$FFD71E0-E3` (`scripts/rrb_diag.py`) count aborts, plain rows,
+port collisions and copy/expansion times.  Demos: `scripts/demos/rrblist65*.bas` (BASIC 65) and
+`rrblist_b65*.bas` (B65 BASIC).  Known limit (step 1 in the design note): objects at the left
+edge can lose the first raster line of a row in V400 because the expansion runs in the badline's
+time; the fix (expanding the next row one line early) is in progress.
+
+Tests: `sim/tb_chipram_k325t.vhdl`, `sim/tb_colourram_k325t.vhdl`, `sim/tb_rrb_list_expander.vhdl`,
+`sim/tb_rrb_list_v2.vhdl` (GHDL, all in `sim/run_sim.sh`); on the board `scripts/chipram_test.py`,
+`scripts/rasterdma_test.py`, `scripts/rrb_stress.py`, `scripts/rrb_list_test.py`.
+
+## B65 BASIC (BBC BASIC v5 for the MEGA65)
+
+[B65 BASIC](https://github.com/beniacm/b65-basic) is R.T. Russell's BBC BASIC (Z80) v5
+re-implemented for the 45GS02: immediate mode, line editor, the BBC program format, 40-bit floats
+on the math unit, PROC/FN, the inline 45GS02 assembler, files on the card (incl. its own FAT32
+writer), and MEGA65 extensions -- raster-interrupt TIME with EVERY/AFTER timers, SOUND/ENVELOPE
+on the SIDs, MODE 1 graphics (320x200x256) with FILL/ELLIPSE, sprites, MOUSE, 28-bit `?`/`!`/`|`
+indirection, 60 KB programs in bank 1, arrays in attic RAM.  On a confirmed K325T it enables the
+1 MB chip RAM and detects the attic size; a standard MEGA65 is never touched beyond the standard
+registers (the standard MEGA65 path is tested in Xemu only).  Everything above was verified on
+this rig (its `tests/hw` transcripts equal the Xemu ones; the card is fsck-checked before and after
+each file test).  It is the second BASIC for the list-mode demos: `rrblist_b65.bas` /
+`rrblist_b65v2.bas` are the B65 twins of the BASIC 65 ones, written with its far-memory `?`/`!`
+operators (one 4-byte `!` write moves an object).
+
+`scripts/b65_run.sh` builds it if needed, loads `build/b65.prg` through the monitor and starts it
+(fresh reset); `scripts/b65_run.sh demo scripts/demos/rrblist_b65v2.bas` also types a demo (B65
+swaps letter case like a BBC Micro, so programs are typed in lower case).  `B65_DIR` points to the
+checkout (default `~/projects/bbcbasic65`).
 
 ## Ethernet (MEGA65 MAC → LAN through the Rockchip)
 
