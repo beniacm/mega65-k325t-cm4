@@ -6,6 +6,8 @@ real use; LINESTEP 0 only refetches the row buffer by accident) twice:
   A) list mode: 40 background glyphs, LIST token, 3 list entries -> one 2-glyph object at
      (absolute X 50), (X 150, Y offset 3 down), (REL +100 -> X 250, FLIPX)
   B) reference: the same row written out with ordinary GOTOX tokens and the object's tokens
+  C) list mode v2 (XCTL bit 6): the plain background rows, the same three objects from the
+     global object table (X 50; REL +100; X 250 FLIPX; Y 0, 25 rows high, stride 0)
 and compares the HDMI captures pixel by pixel (expected: identical).  Also: B with the bit off
 must equal B with the bit on (list mode changes nothing in rows without a LIST token).
 Stops the CPU (monitor t1) while it runs, so BASIC 65 cannot touch the VIC-IV; leaves the
@@ -23,6 +25,7 @@ from rasterdma_test import peek, poke, mon                  # monitor helpers
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 XCTL, SCR, COLOFS = 0xFFD71F0, 0x40000, 0x4000            # row: screen $40000, colour offset $4000
 OBJ, OBJCOL = 0x48000, 0x6000                             # object data (clear of the 25 rows)
+TAB = 0x4A000                                             # v2 object table
 COLRAM = 0xFF80000
 BG = 40
 NOISE = 20                                                # px
@@ -108,9 +111,15 @@ def setup(scr, col, chars):
     poke(0xFFD3064, [COLOFS & 0xFF, COLOFS >> 8])
 
 
-def xctl(bit5):
-    x = peek(XCTL)[0]
-    poke(XCTL, [(x | 0x20) if bit5 else (x & ~0x20)])
+def xctl(bit5, bit6=0):
+    x = peek(XCTL)[0] & ~0x60
+    poke(XCTL, [x | bit5 << 5 | bit6 << 6])
+
+
+def v2obj(x, rel=0, y=0, h=ROWS, flipx=0, mask=0xFF):
+    """16-byte list mode v2 object (docs/rrb_list_mode.md)"""
+    return w(x | rel << 10) + w(y) + [mask, h, (OBJ >> 16 & 0xF) | flipx << 4, 0] \
+        + w(OBJ & 0xFFFF) + w(OBJCOL) + w(0) + w(0)
 
 
 def main():
@@ -151,6 +160,16 @@ def run():
     setup(lst_s, lst_c + [0] * (len(lst_s) - len(lst_c)), BG + 1)   # CHRCOUNT up to LIST
     p_lst, img_lst = capture()
 
+    # C) list mode v2: plain rows, objects from the global table (copied by the VIC-IV per frame)
+    tab = v2obj(50) + v2obj(100, rel=1) + v2obj(250, flipx=1)
+    xctl(0)
+    poke(TAB, tab)
+    poke(0xFFD71F8, [TAB & 0xFF, TAB >> 8 & 0xFF, TAB >> 16 & 0xF, 3])
+    poke(0xFFD71FC, [0])
+    setup(bs, bc, BG)
+    xctl(0, 1)
+    p_v2, img_v2 = capture()
+
     from PIL import ImageChops
 
     def diff(a, b):
@@ -160,11 +179,14 @@ def run():
 
     n1, e1 = diff(img_off, img_ref)
     n2, e2 = diff(img_lst, img_ref)
+    n3, e3 = diff(img_v2, img_ref)
     print("reference, bit 5 off vs on: %d px differ %s" % (n1, e1))
     print("list mode vs reference:     %d px differ %s" % (n2, e2))
-    print("captures: off %s, ref %s, list %s" % tuple(os.path.basename(p) for p in (p_off, p_ref, p_lst)))
+    print("list mode v2 vs reference:  %d px differ %s" % (n3, e3))
+    print("captures: off %s, ref %s, list %s, v2 %s"
+          % tuple(os.path.basename(p) for p in (p_off, p_ref, p_lst, p_v2)))
     # a handful of pixels differ between any two captures of the same picture (capture noise)
-    print("RRB_LIST_TEST_%s" % ("PASS" if n1 <= NOISE and n2 <= NOISE else "FAIL"))
+    print("RRB_LIST_TEST_%s" % ("PASS" if max(n1, n2, n3) <= NOISE else "FAIL"))
 
 
 if __name__ == "__main__":

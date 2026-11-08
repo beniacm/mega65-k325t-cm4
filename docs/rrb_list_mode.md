@@ -54,6 +54,55 @@ two rows with complementary draw masks, exactly as with GOTOX today.
 
 Normal tokens before the LIST token work as before (background, HUD).
 
+## List mode v2: global object table
+
+Gated by **XCTL bit 6**. Instead of entries per row, one table of up to 255 objects, each with
+its own X **and Y**, like a sprite table; the VIC-IV works out the rows, Y offsets and draw masks.
+Moving an object = writing its X and Y (4 bytes), nothing else.
+
+Registers (cleared by reset):
+
+| address | meaning |
+|---|---|
+| `$FFD71F8-$FFD71FA` | table address in chip RAM (20 bits, little endian) |
+| `$FFD71FB` | number of objects (0..255) |
+| `$FFD71FC` | bit 0 HOLD: keep the last snapshot (no copy per frame) |
+
+Object (16 bytes):
+
+| offset | meaning |
+|---|---|
+| +0 | X 9..0 (as GOTOX); bit 10 REL: X = previous table object's X + signed offset |
+| +2 | Y 9..0, signed: pixel rows from the top of character row 0; bit 10 REL (as X) |
+| +4 | draw mask, ANDed with the computed one (`$FF` normally, `0` hides the object) |
+| +5 | height in character rows (0 = 1) |
+| +6 | bits 3..0 screen address 19..16, 4 FLIPX, 5 FLIPY, 6 transparent, 7 behind |
+| +7 | reserved (collision group, step 3) |
+| +8 | screen address 15..0 of object row 0's tokens (an RRB token list ending with `$FFFF`) |
+| +10 | colour RAM offset of object row 0's tokens |
+| +12 | row stride: bytes from one object row's tokens to the next (screen and colour) |
+| +14 | reserved |
+
+- **Snapshot per frame**: at the top of every frame (unless HOLD is set) the VIC-IV copies the
+  table into its own BRAM (4 KB, one RAMB36). All rows of a frame use the same copy: an object
+  can never be shown in two places or in halves. A program may rewrite the table at any time;
+  writing X and Y in one go (B65 `!`) or with HOLD set makes even the X/Y pair atomic.
+- **Per character row** the VIC-IV scans the snapshot (one object per cycle, from BRAM, no chip
+  RAM time) and turns every object covering the row into one or two entries exactly as in v1:
+  the top part of object row k = row - floor(Y/8) (Y offset -(Y mod 8), mask `$FF << (Y mod 8)`)
+  and the bottom part of object row k-1 (offset +(8 - Y mod 8), the complementary mask).
+  FLIPY reverses the object rows and swaps the offset's sign (the VIC-IV applies the offset to
+  the flipped glyph row).
+- Rows need **no LIST token**: the objects are appended after the row's last token (CHRCOUNT).
+  A row with a LIST token gets them at the token, after its own v1 entries if bit 5 is on too.
+- Objects later in the table are painted later (on top).
+- REL lets a group follow an anchor: write the anchor's X/Y only. A hidden anchor (mask 0) is
+  fine.
+- Limits: the scan costs about one cycle per object per character row plus ~20 cycles per
+  object part drawn, in the badline's line time (shared with the row fetch and painting the
+  row's first raster line: see step 1 in the TODO); vertical sub-row positioning needs
+  full-colour/NCM glyphs, as in v1.
+
 ## How the VIC-IV does it
 
 Today: at the badline the VIC-IV copies the screen row (screen RAM) into the 1 KB row buffer
@@ -121,7 +170,7 @@ finishes that idea in its own states instead of touching the skeleton.
   +(8 - y mod 8) and mask `(1 << (y mod 8)) - 1`. Unused slots: draw mask 0.
 - Updating the two entries of an object from BASIC is not atomic: a frame can show the halves
   from different positions (tearing). List mode v2 (one Y per object, rows computed by the
-  VIC-IV) removes this.
+  VIC-IV from a per-frame snapshot) removes this.
 - An expansion still running at the next raster line is cut off and the row painted plainly;
   the colour RAM port is always released at the end of an expansion.
 - Tests must stop the CPU (monitor `t1`): BASIC 65 rewrites VIC-IV registers while it runs.
@@ -134,3 +183,6 @@ finishes that idea in its own states instead of touching the skeleton.
 - `scripts/demos/rrblist_b65.bas` -- the same in B65 BASIC (type it in **lower case**: B65
   swaps the case of letters like a BBC Micro). Screen rows at `$80000`, ball glyphs at `$60000`
   (B65 uses `$40000-$5FFFF`; full-colour glyphs must stay below 512 KB).
+- `scripts/demos/rrblist65v2.bas`, `scripts/demos/rrblist_b65v2.bas` -- the same with list mode
+  v2: plain 80-column rows, a 6-object table, the main loop writes X and Y per ball (B65: one
+  4-byte `!` write).
