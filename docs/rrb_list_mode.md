@@ -225,7 +225,7 @@ Candidates, judged against the timeline:
 
 Implementation (`viciv.vhdl`, `rl_shift`), active when bit 5 or 6 is on, NORRDEL = 1 and DBLRR
 (`$D051` bit 6) = 0, latched at the top of each frame (with NORRDEL = 0 a program already has
-the delay; DBLRR paints every other line only: both keep their own timing):
+the delay and keeps its own timing; DBLRR gets the two-line version `rl_shift2`, below):
 
 1. the fetch side's vertical position is `displayy + 1` (`pixels_since_last_char`,
    `before_y_chargen_start`, `justbefore_y_chargen_start`): the whole row schedule -- chargen_y,
@@ -234,11 +234,35 @@ the delay; DBLRR paints every other line only: both keep their own timing):
 2. the raster buffer write half is chosen as with NORRDEL = 0: the painting that starts at F of
    line N is shown in line N + 2 (instead of N + 1), i.e. in the same line as before;
 3. the display side's text-area mask (`chargen_active` forced off above and below the text)
-   is the fetch side's mask of the line before (captured at F, taken over at x = 0), which is
-   the original mask of the line shown.
+   is the fetch side's mask of the line before (sampled at x = 0 at the end of that line),
+   which is the original mask of the line shown.
 
-Nothing changes with bits 5 and 6 off (`rl_shift` = 0: every changed expression reduces to the
-original). In the simulation the plain 80-column screen is pixel-identical with the lead on
+**DBLRR** (`$D051` bit 6: a line start only every other raster line, so a painting has two
+lines, 5184 cycles, and is shown on two lines): with list mode on the lead is two lines
+(`rl_shift2`): fetch side at `displayy + 2`, double buffered (the painting started in line N is
+shown in N + 3 and N + 4 instead of N + 1 and N + 2), the mask two lines late. Without it (and on
+a plain MEGA65) the first line of each pair races the beam; with it both lines are complete.
+
+**DBLRR needs the V400 schedule** (upstream behaviour, not list mode): the row schedule advances
+one glyph row per line start (`$D05B` CHRYSCL counts line starts). In V200 (CHRYSCL 1, two line
+starts per glyph row) DBLRR therefore makes every text row 32 lines tall (simulated: badlines
+every 32 lines, the picture stretched twice from the top -- mostly the top rows). For the V200
+look with DBLRR use V400 timing with 25 rows: `$D031` bit 3, `$D05B` = 0, `$D07B` = 24 (HOTREG
+off), `$D051` = `$C0`; every glyph row is then one painting shown on two lines.
+
+**A line start can be lost** (upstream rule): the line-start code sets the FSM's state, but the
+state's own case arm comes later in the same process and wins whenever it assigns a state in
+that cycle -- while painting (RRB overtime) and during the sprite fetch that follows it. So a
+line whose fetch + expansion + painting + sprite fetch (~100 cycles for 8 sprites) runs past the
+next line start makes the *next* line unpainted (it shows its buffer half's old content). With
+the lead the budget is therefore ~2490 cycles per line for fetch + expansion + painting
+(DBLRR: ~5080 per pair). Example `scripts/demos/parallax65.bas` (25 rows of 246 tokens, V200):
+badline 2477 cycles plain, 2498 with v2 on (+8 ListWait, +13 empty scan), more with birds
+in the row: with the one-line lead the line after every badline is lost (simulated: 24 of 400
+lines); on the DBLRR schedule above with the two-line lead every line is complete.
+
+Nothing changes with bits 5 and 6 off (`rl_shift` = `rl_shift2` = 0: every changed expression
+reduces to the original). In the simulation the plain 80-column screen is pixel-identical with the lead on
 and off (V400), and v2 equals the plain GOTOX reference painted with the lead.
 
 **For programs, with list mode on:** everything the VIC-IV uses *while painting* takes effect
@@ -260,10 +284,11 @@ line behind with NORRDEL = 1); rows whose lines all end at the same X look the s
   start is cut off and the row painted plainly.
 - Line time (see "First raster line budget"): with list mode on, every pixel a line's painting
   writes before the next line start is shown, also on the first line of a row (the lead). The
-  badline's row fetch (1 + 2 x CHRCOUNT cycles) + expansion + painting must end within one
-  line, 2592 pixel cycles: 80 tokens + 30 object parts (one-glyph full-colour objects) need
-  2330. The 8 sprites are fetched after the painting (~100 cycles): a line that paints longer
-  loses them (as any RRB line). Counter 25 shows the longest painting.
+  badline's row fetch (1 + 2 x CHRCOUNT cycles) + expansion + painting + the sprite fetch
+  (~100 cycles) must end within one line, 2592 pixel cycles, or the next line is not painted
+  (upstream's lost line start): 80 tokens + 30 object parts (one-glyph full-colour objects)
+  need 2330 + sprites. Heavier rows: DBLRR on the V400 schedule (two lines per painting, the
+  two-line lead). Counter 25 shows the longest painting.
 - Painting time per raster line is unchanged: objects still cost RRB time (fast RRB, XCTL bit 4,
   doubles it): GOTOX 8 or 16 cycles (16 with X >= 256 or a Y offset sign while the glyph number
   counts as full colour), full-colour glyph 16, normal glyph 8 (11 without fast RRB).
@@ -314,7 +339,7 @@ VIC-IV), so it works for any CPU write timing. Counters are 16 bit and stick at 
 | 22 | line starts in ListWait while copying, in the border-line branch (its FetchFirstCharacter wins over the line start; also in 5) |
 | 23 | late pixels: raster buffer write cycles (1 or 2 pixels) into the half the display reads, at or left of the pixel it reads, inside the text area, before the line start (must stay 0; with the list mode lead 0 by construction) |
 | 24 | `ycounter` at the last late pixel (value) |
-| 25 | max pixel cycles from a line start to the end of its painting (`EndOfChargen`; a painting cut off by the next line start counts the cycles it had, ~2592): the RRB time used |
+| 25 | max pixel cycles from a line start to the end of its painting (`EndOfChargen`; a painting cut off by the next line start counts the cycles it had, ~2592): the RRB time used. Values above 2592 (without DBLRR) come from the vertical blank, where no line starts happen for ~48 lines (the last painting of a frame); a lost line start shows as ~2591 |
 | 26 | max pixel cycles from a line start to the dispatch of the first GOTOX of a list row's expanded part (its first object part) |
 
 Expected with HOLD off: 0 == 1 (one per frame); 2 == 3 + 4; 7 == 0 and 19 == 0 always; 10 and
@@ -335,12 +360,14 @@ before 2592.
   `viciv.vhdl` (report-stripped copy) with a PAL frame, a chip RAM model and fastio register /
   colour RAM writes, V400, fast RRB; frame dumps and the counters per line. Checks: plain rows
   identical with the lead on and off; plain GOTOX reference with the lead == v2 (6 objects at
-  X 0/10/600, and 30 parts in one row); no late pixels with the lead; late pixels without it.
+  X 0/10/600, and 30 parts in one row); no late pixels with the lead; late pixels without it;
+  DBLRR on the V400 schedule with `parallax65.bas`-like rows (246 tokens): the two-line lead
+  changes only the first line of each pair, no late pixels, v2 with an empty table changes nothing.
   The same checks pass in V200 (`-gV400=0`, run by hand).
 - Board: `scripts/rrb_list_test.py` (pixel-exact comparison of a list-mode screen with the same
   picture built with plain GOTOX tokens; v2 two-row objects, short rows, a sprite in the opened
   top border during the copy; G/G2: V400 objects at the left edge and 30 parts in a row, late
-  pixel counter), then the demos.
+  pixel counter; G3: the same with DBLRR on the V400 schedule), then the demos.
 - Regression: intro-disk demo run with the bit clear.
 
 ## Demos

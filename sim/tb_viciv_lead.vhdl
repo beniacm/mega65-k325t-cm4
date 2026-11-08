@@ -8,6 +8,11 @@
 --   SC 2: the same rows, bit 5 on (no LIST token: only the list mode lead)
 --   SC 3: plain background rows, v2 object table (bit 6)
 --   SC 4: plain background rows only, bits off;  SC 5: the same with bit 5 on
+--   SC 6: parallax65.bas rows (V200, 3 layers, 246 tokens), bits off; SC 7: the same + v2
+--         objects (OBJS 2: six one-glyph birds); D051: $D051 (DBLRR = $C0); SC 8: the rows
+--         with bit 5 only (lead, no LIST token); SC 9: v2 with an empty table; SC 10: the
+--         parallax rows with three full-colour layers (glyphs FCM_G..+3), bits off
+-- V400 2: V400 timing with 25 rows ($D05B 0, $D07B 24), the schedule DBLRR needs
 -- OBJS 0: 6 two-row objects, 2 glyphs wide (case D's object), (X 0/10/600 on rows 10-12/20-22/30-32, all three on 40-42)
 -- OBJS 1: 15 two-row objects, 1 glyph wide, at Y = 8*20+3, X = 42 k (30 parts in row 21)
 library ieee;
@@ -18,7 +23,7 @@ use work.victypes.all;
 
 entity tb_viciv_lead is
   generic (SC : integer := 3; OBJS : integer := 0; V400 : integer := 1; FAST : integer := 1;
-           BG : integer := 80; OUTF : string := "/dev/null");
+           BG : integer := 80; D051 : integer := 16#80#; OUTF : string := "/dev/null");
 end entity;
 
 architecture sim of tb_viciv_lead is
@@ -50,7 +55,11 @@ architecture sim of tb_viciv_lead is
   shared variable mem : mem_t := (others => 0);
 
   constant SCR : natural := 16#40000#;
-  constant STEP : natural := 512;
+  function stepsel(sc : integer) return natural is
+  begin
+    if sc >= 6 then return 492; else return 512; end if;
+  end function;
+  constant STEP : natural := stepsel(SC);           -- 492: parallax65.bas rows
   constant OBJD : natural := 16#48100#;
   constant OBJDCOL : natural := 16#7F00#;
   constant FCM_G : natural := 16#1400#;
@@ -142,7 +151,11 @@ begin
     variable tp : natural;
   begin
     -- objects
-    if OBJS = 0 then
+    if OBJS = 2 then
+      -- parallax65.bas birds: six one-row, one-glyph objects
+      no := 6;
+      for i in 0 to 5 loop ox(i) := 40 + 100 * i; oy(i) := 30 + 12 * i; end loop;
+    elsif OBJS = 0 then
       no := 6;
       ox(0 to 5) := (0, 10, 600, 0, 10, 600);
       oy(0 to 5) := (8*10+3, 8*20+3, 8*30+3, 8*40+3, 8*40+3, 8*40+3);
@@ -150,6 +163,14 @@ begin
       no := 15;
       for i in 0 to 14 loop ox(i) := 42 * i; oy(i) := 8*20+3; end loop;
     end if;
+    -- charset at $54000 ($D068): 160 solid, 32 blank, others a pattern per glyph and row
+    for gl in 0 to 255 loop
+      for yy in 0 to 7 loop
+        if gl = 160 then mem(16#54000# + 8 * gl + yy) := 255;
+        elsif gl = 32 then mem(16#54000# + 8 * gl + yy) := 0;
+        else mem(16#54000# + 8 * gl + yy) := (gl * 37 + yy * 11 + 5) mod 256; end if;
+      end loop;
+    end loop;
     -- full-colour glyphs FCM_G..+3: every pixel row its own colour
     for gl in 0 to 3 loop
       for yy in 0 to 7 loop
@@ -167,7 +188,8 @@ begin
     -- object table (v2), 16 bytes each
     for i in 0 to no - 1 loop
       tp := 16#4A000# + 16 * i;
-      w16(tp, ox(i)); w16(tp, oy(i)); mem(tp) := 255; mem(tp + 1) := 2;
+      w16(tp, ox(i)); w16(tp, oy(i)); mem(tp) := 255;
+      if OBJS = 2 then mem(tp + 1) := 1; else mem(tp + 1) := 2; end if;
       mem(tp + 2) := (OBJD / 65536) mod 16; mem(tp + 3) := 0; tp := tp + 4;
       w16(tp, OBJD mod 65536); w16(tp, OBJDCOL); w16(tp, 2 * W + 2); w16(tp, 0);
     end loop;
@@ -186,6 +208,26 @@ begin
 
     -- rows: screen at SCR + STEP r, colour at STEP r
     ntok := BG;
+    if SC >= 6 then
+      -- parallax65.bas rows: 3 layers = GOTOX (fine X) + 81 normal glyphs, 246 tokens, 492 bytes;
+      -- GOTOX colour byte 0 $50 (behind), $D0 (transparent + behind), $90 (transparent)
+      ntok := 246;
+      for r in 0 to 24 loop
+        sp := SCR + STEP * r; cp := STEP * r;
+        for ly in 0 to 2 loop
+          w16(sp, 3 + ly);
+          if ly = 0 then c16(cp, 16#50#, 255); elsif ly = 1 then c16(cp, 16#D0#, 255);
+          else c16(cp, 16#90#, 255); end if;
+          for i in 0 to 80 loop
+            if SC = 10 then w16(sp, FCM_G + (i + r + ly) mod 4);   -- full-colour layers
+            elsif ly = 0 then w16(sp, 160);                   -- solid
+            elsif (i + r + ly) mod 3 = 0 then w16(sp, 1 + (i + r) mod 26);   -- letters
+            else w16(sp, 32); end if;                          -- space: transparent
+            c16(cp, 0, 1 + (ly * 5 + r) mod 15);
+          end loop;
+        end loop;
+      end loop;
+    end if;
     if SC <= 2 then
       -- reference rows: count the longest
       for r in 0 to ROWS - 1 loop
@@ -199,6 +241,7 @@ begin
       end loop;
     end if;
     for r in 0 to ROWS - 1 loop
+      exit when SC >= 6;
       sp := SCR + STEP * r; cp := STEP * r;
       for i in 0 to BG - 1 loop
         w16(sp, 160);
@@ -247,6 +290,8 @@ begin
     reg(16#20#, 0); reg(16#21#, 11);
     if V400 = 1 then
       reg(16#31#, 16#88#); reg(16#5B#, 0); reg(16#7B#, ROWS - 1);
+    elsif V400 = 2 then                     -- DBLRR's schedule: V400 timing, 25 rows of 2 x 8
+      reg(16#31#, 16#88#); reg(16#5B#, 0); reg(16#7B#, ROWS / 2 - 1);
     else
       reg(16#31#, 16#80#); reg(16#5B#, 1); reg(16#7B#, ROWS / 2 - 1);
     end if;
@@ -256,9 +301,12 @@ begin
     reg(16#60#, SCR mod 256); reg(16#61#, (SCR / 256) mod 256); reg(16#62#, (SCR / 65536) mod 256);
     reg(16#63#, ((ntok / 256) mod 4) * 16);
     reg(16#64#, 0); reg(16#65#, 0);         -- colour RAM offset 0
+    reg(16#68#, 0); reg(16#69#, 16#40#); reg(16#6A#, 5);   -- charset $54000
     if FAST = 1 then fast_en <= '1'; end if;
-    if SC = 2 or SC = 5 then rl_en <= '1'; end if;
-    if SC = 3 then v2_en <= '1'; end if;
+    if SC = 2 or SC = 5 or SC = 8 then rl_en <= '1'; end if;
+    if SC = 3 or SC = 7 or SC = 9 then v2_en <= '1'; end if;
+    if SC = 9 then ocount <= x"00"; end if;
+    reg(16#51#, D051);                      -- NORRDEL (bit 7), DBLRR (bit 6)
     setup_done <= '1';
     wait;
   end process;

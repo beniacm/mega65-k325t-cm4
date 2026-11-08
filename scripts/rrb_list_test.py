@@ -26,7 +26,9 @@ must equal B with the bit on (list mode changes nothing in rows without a LIST t
      rows painted with XCTL bit 5 on (the list mode lead makes them complete); G2: 15 one-glyph
      two-row objects, 30 parts in one row.  The late-pixel counter (23) must stay 0 with the
      lead; without it the plain reference is late on its badlines (printed, expected > 0).
-     Restores $D031/$D07B/$D05B/$D054 and XCTL.
+  G3) the same as G with DBLRR ($D051 = $C0) on its schedule: V400 timing with 25 rows (paints
+     every other line, each painting shown on two lines), the two-line list mode lead.
+     Restores $D031/$D07B/$D05B/$D054/$D051 and XCTL.
 Stops the CPU (monitor t1) while it runs, so BASIC 65 cannot touch the VIC-IV; leaves the
 VIC-IV changed (reset afterwards).
 
@@ -375,7 +377,7 @@ def case_g(d_s, d_c):
     reference with the lead and for v2; the reference with bits 5/6 off is incomplete on its
     badlines (objects painted after 80 glyphs and the row fetch): informational."""
     from PIL import ImageChops
-    regs = {a: peek(a)[0] for a in (0xFFD3031, 0xFFD307B, 0xFFD305B, 0xFFD3054)}
+    regs = {a: peek(a)[0] for a in (0xFFD3031, 0xFFD307B, 0xFFD305B, 0xFFD3054, 0xFFD3051)}
     x0 = peek(XCTL)[0]
     bs, bc = background(80)
     obj_e, objcol_g = 0x48200, 0x7E00                         # G2 object; colour of G's objects
@@ -383,15 +385,23 @@ def case_g(d_s, d_c):
     poke(COLRAM + objcol_g, d_c[0] + d_c[1])                  # G: case D's object (stride 6)
     poke(COLRAM + objcol_g + 0x10, [0, 1, 0, 0, 0, 1, 0, 0])  # G2 (stride 4)
     e_s, e_c = [w(FCM_G) + w(0xFFFF), w(FCM_G + 2) + w(0xFFFF)], [[0, 1, 0, 0]] * 2
+    # name, objects, object rows (screen, colour), data, colour, stride, rows, $D051
     cases = (("G", [(0, 83, 2), (10, 163, 2), (600, 243, 2), (0, 323, 2), (10, 323, 2),
-                    (600, 323, 2)], d_s, d_c, OBJD, objcol_g, 6),
-             ("G2", [(42 * k, 163, 2) for k in range(15)], e_s, e_c, obj_e, objcol_g + 0x10, 4))
+                    (600, 323, 2)], d_s, d_c, OBJD, objcol_g, 6, 50, 0x80),
+             ("G2", [(42 * k, 163, 2) for k in range(15)], e_s, e_c, obj_e, objcol_g + 0x10, 4,
+              50, 0x80),
+             # G3: DBLRR ($D051 bit 6) on its own schedule: V400 timing with 25 rows (a painting
+             # every other line, shown on two lines: the V200 look with twice the RRB time);
+             # list mode uses the two-line lead there
+             ("G3", [(0, 83, 2), (10, 163, 2), (600, 43, 2), (0, 123, 2), (10, 123, 2),
+                    (600, 123, 2)], d_s, d_c, OBJD, objcol_g, 6, 25, 0xC0))
     ok = True
     try:
         poke(0xFFD3054, [regs[0xFFD3054] | 4])                # FCLRHI: glyphs > $FF full colour
-        for name, objs, os_, oc_, oaddr, ocol, stride in cases:
+        for name, objs, os_, oc_, oaddr, ocol, stride, nrows, d051 in cases:
+            poke(0xFFD3051, [d051])                           # NORRDEL (bit 7) + DBLRR (bit 6)
             rows_s, rows_c = [], []
-            for r in range(50):
+            for r in range(nrows):
                 ps, pc = parts(r, objs, os_, oc_)
                 rows_s.append(bs + ps)
                 rows_c.append(bc + pc)
@@ -409,9 +419,9 @@ def case_g(d_s, d_c):
                 if bit6:
                     v2table(b"".join(bytes(v2obj(x, y=y, h=h, obj=oaddr, objcol=ocol,
                                                  stride=stride)) for x, y, h in objs))
-                    setup(bs, bc, 80, step=512, rows=50, colofs=0, v400=True)
+                    setup(bs, bc, 80, step=512, rows=nrows, colofs=0, v400=True)
                 else:
-                    setup(rows_s, rows_c, n_tok + 2, step=512, rows=50, colofs=0, v400=True)
+                    setup(rows_s, rows_c, n_tok + 2, step=512, rows=nrows, colofs=0, v400=True)
                 poke(XCTL, [x0 & ~0x60 | 0x10 | bit5 << 5 | bit6 << 6])
                 shots[shot] = late_capture()
             poke(XCTL, [x0 & ~0x60 | 0x10])
@@ -425,14 +435,15 @@ def case_g(d_s, d_c):
             n0, e0 = diff(shots["off"][1], shots["ref"][1])
             cr, cv, co = shots["ref"][2], shots["v2"][2], shots["off"][2]
             print("%s v2 vs ref (lead): %d px differ %s; late pixels ref %d, v2 %d (must be 0); "
-                  "longest painting ref %d, v2 %d cycles (must be < 2590: none cut off); first "
+                  "longest painting ref %d, v2 %d cycles (must be < 2590, DBLRR 5180: none cut off); first "
                   "object of a v2 line at most %d cycles after its line start"
                   % (name, n, e, cr[23], cv[23], cr[25], cv[25], cv[26]))
             print("%s ref without the lead vs with: %d px differ %s, late pixels %d (expected > 0:"
                   " the plain badlines are late)  (%s)" % (name, n0, e0, co[23],
                   " ".join(os.path.basename(p) for p, _, _ in shots.values())))
-            ok = ok and n <= NOISE and cr[23] == 0 and cv[23] == 0 and cr[25] < 2590 \
-                and cv[25] < 2590
+            limit = 5180 if d051 & 0x40 else 2590             # DBLRR: two lines per painting
+            ok = ok and n <= NOISE and cr[23] == 0 and cv[23] == 0 and cr[25] < limit \
+                and cv[25] < limit
     finally:
         poke(XCTL, [x0])
         for a, v in regs.items():

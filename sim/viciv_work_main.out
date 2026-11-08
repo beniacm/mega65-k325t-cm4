@@ -1,0 +1,13 @@
+s4 vs s5: 0 lines differ (frame 576 lines)
+s2 vs s3: 0 lines differ (frame 576 lines)
+g2 vs g3: 0 lines differ (frame 576 lines)
+s1: 58 lines with late pixels, longest painting 1169 cycles, latest first object 0, longest expansion 0
+s2: 0 lines with late pixels, longest painting 1175 cycles, latest first object 0, longest expansion 0
+s3: 0 lines with late pixels, longest painting 1241 cycles, latest first object 953, longest expansion 128
+s4: 0 lines with late pixels, longest painting 817 cycles, latest first object 0, longest expansion 0
+s5: 0 lines with late pixels, longest painting 823 cycles, latest first object 0, longest expansion 0
+g1: 24 lines with late pixels, longest painting 1925 cycles, latest first object 0, longest expansion 0
+g2: 0 lines with late pixels, longest painting 1931 cycles, latest first object 0, longest expansion 0
+g3: 0 lines with late pixels, longest painting 2330 cycles, latest first object 1370, longest expansion 545
+TB_VICIV_LEAD_PASS
+MAIN_DONE
