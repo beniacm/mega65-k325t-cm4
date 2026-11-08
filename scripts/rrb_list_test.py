@@ -30,6 +30,9 @@ must equal B with the bit on (list mode changes nothing in rows without a LIST t
      H1 3 x 81 glyphs on DBLRR's schedule (the old path completes there), bit 7 off == on, and
      V200 one line per painting with bit 7 (counters); H2 V400 3 x 41 glyphs, bit 7 off == on; H3 V200 and V400 3 x 81 glyphs
      + 12 v2 object parts in one row == the parts as plain tokens; counter 25 < 2590, 23 == 0.
+  J) 64 one-glyph v2 objects on one row of 48 tokens (bit 7): timing in V400 (counter 25 <
+     2590 for the pile's badline, prints 26 and 10; sparse rows: no pixel compare), and pixels
+     over an opaque base on DBLRR's schedule: v2 == plain parts
   I) list mode v2 collisions: objects placed to collide / not collide (groups, mask 0, group 0,
      negative Y, REL, width, height, touching edges); the table $FFD71A0-BF, the partners
      ($FFD71C1/C2), the count ($FFD71C3) and $FFD71C0 against a model; IRQ pending with the
@@ -374,10 +377,12 @@ def run():
     ok_h = case_h(d_s, d_c)
     # I) list mode v2 collisions ($FFD71A0-C3)
     ok_i = case_i()
+    # J) a pile of 64 objects on one row (expansion time)
+    ok_j = case_j()
 
     # a handful of pixels differ between any two captures of the same picture (capture noise)
     print("RRB_LIST_TEST_%s" % ("PASS" if max(n1, n2, n3, n4, n5, n6, n7, n8) <= NOISE and ok_g
-                                and ok_h and ok_i else "FAIL"))
+                                and ok_h and ok_i and ok_j else "FAIL"))
 
 
 FCM_H = 0x1410                                            # H: full-colour layer glyphs ($50400)
@@ -581,6 +586,105 @@ def case_i():
         poke(COL + 0x20, [0x01])                              # IRQ off, cleared
         xctl(0)
         poke(XCTL, [x0])
+    return ok
+
+
+def case_j():
+    """J: 64 one-glyph v2 objects on one row (a pile on the floor); rows of 48 tokens = 6 groups
+    of 4 x (GOTOX, one full-colour glyph), fast RRB + fast token path.
+      J timing: V400, one line per painting, no base: counter 25 (longest painting: the pile's
+        badline = fetch + expansion of 64 parts + painting) < 2590, 23 (late) == 0; prints 26
+        (first object part) and 10 (expansion).  No pixel comparison: the rows are sparse, so
+        their gaps show the raster buffer's history, which differs between two different rows.
+      J pixels: the same rows over an opaque 80-glyph base (the background() stripes) on DBLRR's
+        V400 schedule (25 rows, two lines per painting: base + rows + 64 parts need more than one
+        line), v2 (bits 6 + 7) == the object parts as plain GOTOX tokens (bits 5 + 7)."""
+    from PIL import ImageChops
+    from rrb_diag import read_counter
+    regs = {a: peek(a)[0] for a in (0xFFD3031, 0xFFD307B, 0xFFD305B, 0xFFD3054, 0xFFD3051)}
+    x0 = peek(XCTL)[0]
+    for g in range(4):
+        poke(FCM_H * 64 + 64 * g, [0 if (x + y + g) % 5 == 0 else 1 + (3 * g + y + 5 * x) % 15
+                                   for y in range(8) for x in range(8)])
+    obj, objcol = 0x48300, 0x7E20
+    poke(obj, w(FCM_H + 1) + w(0xFFFF))
+    poke(COLRAM + objcol, [0, 1, 0, 0])
+    o_s, o_c = [w(FCM_H + 1) + w(0xFFFF)], [[0, 1, 0, 0]]
+    objs = [(10 * k, 80, 1) for k in range(64)]                # all in row 10
+    bs, bc = background(80)
+
+    def rows(nrows, base):
+        rs, rc = [], []
+        for r in range(nrows):
+            s_, c_ = (list(bs), list(bc)) if base else ([], [])
+            for g in range(6):
+                for t in range(4):
+                    s_ += gotox(100 * g + 20 * t) + w(FCM_H + t)
+                    c_ += [0x10, 0xFF, 0, 1 + (g + t + r) % 15]
+            rs.append(s_)
+            rc.append(c_)
+        return rs, rc
+
+    def with_parts(rs, rc):
+        ps_rows, pc_rows = [], []
+        for r in range(len(rs)):
+            ps, pc = parts(r, objs, o_s, o_c)
+            ps_rows.append(rs[r] + ps)
+            pc_rows.append(rc[r] + pc)
+        n_tok = max(len(x) for x in ps_rows) // 2
+        for a_, b_ in zip(ps_rows, pc_rows):
+            while len(a_) // 2 < n_tok:                        # GOTOX: paints nothing
+                a_ += gotox(560)
+                b_ += [0x10, 0xFF]
+        return ps_rows, pc_rows, n_tok
+
+    def diff(a, b):
+        d = ImageChops.difference(a, b)
+        pts = [(i % a.size[0], i // a.size[0]) for i, p in enumerate(d.getdata()) if max(p) > 40]
+        return len(pts), pts[:6]
+
+    ok = True
+    try:
+        poke(0xFFD3054, [regs[0xFFD3054] | 4])
+        # J timing: V400 one line per painting, 48-token rows, v2
+        poke(0xFFD3051, [0x80])
+        poke(XCTL, [x0 & ~0xE0 | 0x10])
+        v2table(b"".join(bytes(v2obj(x, y=y, h=h, obj=obj, objcol=objcol)) for x, y, h in objs))
+        rs, rc = rows(50, False)
+        setup(rs, rc, 48, step=512, rows=50, colofs=0, v400=True)
+        poke(XCTL, [x0 & ~0xE0 | 0xD0])                        # v2: bits 4 + 6 + 7
+        p_t = late_capture()
+        exp_max = read_counter(10)
+        c = p_t[2]
+        good = c[23] == 0 and c[25] < 2590
+        print("J timing, 64 objects on a 48-token row (V400, bit 7): longest painting %d (< 2590), "
+              "first object part %d, expansion %d, late %d%s  (%s)" % (c[25], c[26], exp_max, c[23],
+              "" if good else "  <-- FAIL", os.path.basename(p_t[0])))
+        ok = good
+        # J pixels: opaque base, DBLRR's V400 schedule (25 rows), v2 vs plain parts
+        rs, rc = rows(25, True)
+        ps_rows, pc_rows, n_tok = with_parts(rs, rc)
+        poke(XCTL, [x0 & ~0xE0 | 0x10])
+        poke(0xFFD3051, [0xC0])
+        setup(ps_rows, pc_rows, n_tok, step=512, rows=25, colofs=0, v400=True)
+        poke(XCTL, [x0 & ~0xE0 | 0xB0])                        # plain parts: bits 4 + 5 + 7
+        p_ref = late_capture()
+        poke(XCTL, [x0 & ~0xE0 | 0x10])
+        setup(rs, rc, 128, step=512, rows=25, colofs=0, v400=True)
+        poke(XCTL, [x0 & ~0xE0 | 0xD0])                        # v2: bits 4 + 6 + 7
+        p_v2 = late_capture()
+        n, e = diff(p_v2[1], p_ref[1])
+        cv, cr = p_v2[2], p_ref[2]
+        good = n <= NOISE and cv[23] == 0 and cr[23] == 0 and cv[25] < 5180 and cr[25] < 5180
+        print("J pixels, opaque base + 48 tokens + 64 objects (DBLRR schedule), v2 vs plain parts: "
+              "%d px differ %s; longest painting v2 %d, ref %d (< 5180), late %d/%d%s  (%s %s)"
+              % (n, e, cv[25], cr[25], cv[23], cr[23], "" if good else "  <-- FAIL",
+                 os.path.basename(p_v2[0]), os.path.basename(p_ref[0])))
+        ok = ok and good
+    finally:
+        poke(XCTL, [x0])
+        for a, v in regs.items():
+            poke(a, [v])
     return ok
 
 

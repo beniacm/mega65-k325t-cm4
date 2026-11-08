@@ -15,6 +15,8 @@
 --         same with bit 5 (lead).  FT 1: XCTL bit 7 (fast token path).  SC 12-15: rows of 3 x
 --         (GOTOX + 81 tokens) for per-token costs: all full colour / plain / GOTOX+FCM / NCM;
 --         SC 16: the SC 11 layers with v2 objects instead of bit 5 (OBJS 3: 12 parts in row 11)
+--         SC 17: 48 tokens = 6 x 4 x (GOTOX, FCM glyph), LINESTEP 96, v2 (OBJS 4: 64 one-glyph
+--         objects in row 10)
 -- V400 2: V400 timing with 25 rows ($D05B 0, $D07B 24), the schedule DBLRR needs
 -- OBJS 0: 6 two-row objects, 2 glyphs wide (case D's object), (X 0/10/600 on rows 10-12/20-22/30-32, all three on 40-42)
 -- OBJS 1: 15 two-row objects, 1 glyph wide, at Y = 8*20+3, X = 42 k (30 parts in row 21)
@@ -62,7 +64,7 @@ architecture sim of tb_viciv_lead is
   constant SCR : natural := 16#40000#;
   function stepsel(sc : integer) return natural is
   begin
-    if sc >= 6 then return 492; else return 512; end if;
+    if sc = 17 then return 96; elsif sc >= 6 then return 492; else return 512; end if;
   end function;
   constant STEP : natural := stepsel(SC);           -- 492: parallax65.bas rows
   constant OBJD : natural := 16#48100#;
@@ -155,14 +157,18 @@ begin
       wr(16#80000# + p, lo, true); wr(16#80000# + p + 1, hi, true); p := p + 2;
     end procedure;
     variable sp, cp, ntok, nt : natural;
-    variable ox, oy : objs_t(0 to 14);
+    variable ox, oy : objs_t(0 to 254);
     variable no : natural;
     variable k, o, rr, mask : integer;
     variable tp : natural;
     variable fl : natural;
   begin
     -- objects
-    if OBJS = 3 then
+    if OBJS = 4 then
+      -- 64 one-glyph, one-row objects all in row 10 (step 4: a pile on one row)
+      no := 64;
+      for i in 0 to 63 loop ox(i) := 10 * i; oy(i) := 80; end loop;
+    elsif OBJS = 3 then
       -- six two-row objects at Y = 8*10 + 3: 12 parts in row 11 (rrb_list_test.py case H)
       no := 6;
       for i in 0 to 5 loop ox(i) := 40 + 100 * i; oy(i) := 83; end loop;
@@ -209,7 +215,7 @@ begin
     for i in 0 to no - 1 loop
       tp := 16#4A000# + 16 * i;
       w16(tp, ox(i)); w16(tp, oy(i)); mem(tp) := 255;
-      if OBJS = 2 then mem(tp + 1) := 1; else mem(tp + 1) := 2; end if;
+      if OBJS = 2 or OBJS = 4 then mem(tp + 1) := 1; else mem(tp + 1) := 2; end if;   -- height
       mem(tp + 2) := (OBJD / 65536) mod 16; mem(tp + 3) := 0; tp := tp + 4;
       w16(tp, OBJD mod 65536); w16(tp, OBJDCOL); w16(tp, 2 * W + 2); w16(tp, 0);
     end loop;
@@ -228,7 +234,19 @@ begin
 
     -- rows: screen at SCR + STEP r, colour at STEP r
     ntok := BG;
-    if SC >= 6 then
+    if SC = 17 then
+      -- step 4: 48 tokens = 6 groups of 4 x (GOTOX, one full-colour glyph), LINESTEP 96
+      ntok := 48;
+      for r in 0 to ROWS - 1 loop
+        sp := SCR + STEP * r; cp := STEP * r;
+        for g in 0 to 5 loop
+          for t in 0 to 3 loop
+            w16(sp, 100 * g + 20 * t); c16(cp, 16#10#, 255);
+            w16(sp, FCM_G + t); c16(cp, 0, 1);
+          end loop;
+        end loop;
+      end loop;
+    elsif SC >= 6 then
       -- parallax65.bas rows: 3 layers = GOTOX (fine X) + 81 normal glyphs, 246 tokens, 492 bytes;
       -- GOTOX colour byte 0 $50 (behind), $D0 (transparent + behind), $90 (transparent)
       ntok := 246;
@@ -346,8 +364,8 @@ begin
     reg(16#68#, 0); reg(16#69#, 16#40#); reg(16#6A#, 5);   -- charset $54000
     if FAST = 1 then fast_en <= '1'; end if;
     if FT = 1 then ft_en <= '1'; end if;
-    if SC = 2 or SC = 5 or SC = 8 or (SC >= 11 and SC /= 16) then rl_en <= '1'; end if;
-    if SC = 3 or SC = 7 or SC = 9 or SC = 16 then v2_en <= '1'; end if;
+    if SC = 2 or SC = 5 or SC = 8 or (SC >= 11 and SC /= 16 and SC /= 17) then rl_en <= '1'; end if;
+    if SC = 3 or SC = 7 or SC = 9 or SC = 16 or SC = 17 then v2_en <= '1'; end if;
     if SC = 9 then ocount <= x"00"; end if;
     reg(16#51#, D051);                      -- NORRDEL (bit 7), DBLRR (bit 6)
     setup_done <= '1';

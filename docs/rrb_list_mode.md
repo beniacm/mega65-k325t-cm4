@@ -225,7 +225,7 @@ What the FSM spends after F (fast RRB, XCTL bit 4):
 | to the first token's dispatch | 9 |
 | badline: row fetch (`FetchScreenRamLine2`, one byte per cycle) | 1 + 2 x CHRCOUNT: **161** for 80 tokens |
 | list mode (bit 5 or 6): `ListWait` + start + `ListRun` exit | ~8 |
-| list mode: expansion (counter 10) | v2 scan ~7 + 1 per table object (13 for 6, 22 for 15 objects without a part in the row); per object part ~16-36 (1 part 36, 6 parts 128 -- the board measured 137 --, 15 parts 335, 30 parts 545) |
+| list mode: expansion (counter 10) | v2 scan ~7 + 1 per table object (13 for 6, 22 for 15 objects without a part in the row); per object part ~16-36 (1 part 36, 6 parts 128 -- the board measured 137 --, 15 parts 335, 30 parts 545; these are before step 4's expander speed-up: now 17 per one-glyph part, 13 for a two-row object's second part) |
 | per token: normal glyph, or GOTOX whose high byte bits 4..0 are 0 | 8 (without fast RRB a normal glyph waits for the painter: ~11; fast token path, bit 7: 6) |
 | per token: full-colour glyph (8 chip RAM reads) | 16 (fast token path: 4) |
 | per token: GOTOX with X >= 256 or the Y offset sign (high byte bits 4..0 /= 0) while FCLRHI/FCLRLO make that glyph number full colour | 16 (it takes the full-colour fetch path) |
@@ -410,6 +410,31 @@ expansion 245, first object part at 1871), no late pixels; + the sprite fetch (~
   doubles it): GOTOX 8 or 16 cycles (16 with X >= 256 or a Y offset sign while the glyph number
   counts as full colour), full-colour glyph 16, normal glyph 8 (11 without fast RRB). With the
   fast token path (bit 7 + bit 4): FCM 4, NCM 8, plain 6, GOTOX ~9 ("Fast token path").
+- **Stale pixels**: the raster line buffer is never cleared. A pixel no token of the line
+  paints shows what an earlier line painted into that buffer half, and the line ends at its
+  last painted pixel. Sparse rows (glyphs behind GOTOX tokens with gaps) therefore need an
+  opaque base layer first (e.g. GOTOX 0 + 80 glyphs, ~330 cycles with bit 7, ~640 without);
+  tests comparing two different rows must make them opaque
+  (cases E, J) because the gaps' history differs between the two.
+- **Many objects on one row** (a pile on the floor). The badline of such a row does, one
+  after the other: the row fetch (1 + 2 x CHRCOUNT), the expansion of all its object parts
+  (they are emitted one by one, before any painting), then the painting of the row's tokens
+  and of the parts. So counter 26 (first object part) = fetch + expansion + the row's own
+  tokens: it is large by design, not a stall. Expansion per part (one-glyph objects,
+  `tb_rrb_list_v2` timing case): 22 cycles before step 4, now **17** (a finished object's
+  extra reads are ignored instead of waited for, HitB0's read starts in the hit cycle, the
+  scan's next table read is issued while the hit ends; 13 per part for the second part of a
+  two-row object). Measured in GHDL, V400, 48-token row (24 GOTOX + 24 FCM), bit 7, 64 objects
+  in the row: expansion 1413 -> 1094, first object part 1839 -> 1520, painting of the badline
+  2591 (cut off: the next line was lost) -> **2350**; the other lines of the row 1151. Row
+  buffer: 231 one-glyph parts fit after 48 tokens (1 KB); 231 parts expand in 3933 cycles.
+- To go well below that, painting must overlap the expansion (the row's tokens and the first
+  parts painted while later parts are still emitted): ~fetch + expansion + one part = ~1200
+  for 64 objects, ~4000 for 231 parts (within DBLRR's 5184). It needs the row's colour bytes in
+  the colour row buffer (the expander owns the colour RAM port while it runs), the expander's
+  chip RAM reads in the VIC-IV's idle port cycles (and the mono glyph byte latched instead of
+  held on the port), and the token decoder waiting at the expander's write position: not done
+  yet (step 4 note).
 - Raster effects: with list mode on, paint-time registers take effect one raster line later
   (write them one line earlier), see "First raster line budget".
 - BRAM: one more 18 Kb block for the colour row buffer (the lead needs none).
@@ -496,7 +521,8 @@ before 2592.
   top border during the copy; G/G2: V400 objects at the left edge and 30 parts in a row, late
   pixel counter; G3: the same with DBLRR on the V400 schedule; H: three full-colour layers with
   the fast token path against the old path / plain parts; I: collisions against a model, the
-  registers and the IRQ pending bit), then the demos.
+  registers and the IRQ pending bit; J: 64 objects on one row against plain parts, counter
+  25 < 2590), then the demos.
 - Regression: intro-disk demo run with the bit clear.
 
 ## Demos

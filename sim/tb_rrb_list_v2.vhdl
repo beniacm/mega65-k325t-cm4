@@ -41,6 +41,7 @@ architecture sim of tb_rrb_list_v2 is
   signal mdata, cdata, bscreen, bcolour : unsigned(7 downto 0) := x"00";
   signal row : unsigned(7 downto 0) := x"00";
   signal cnt : unsigned(7 downto 0) := x"00";
+  signal part_s : std_logic := '0';
 
   type r_t is array (natural range <>) of integer;
   -- object table 1: X lo/hi, Y lo/hi, mask, height, flags, res, addr lo/hi, col lo/hi,
@@ -105,7 +106,8 @@ begin
               mreq => mreq, maddr => maddr, mdata => mdata, caddr => caddr, cdata => cdata,
               bwe => bwe, baddr => baddr, bscreen => bscreen, bcolour => bcolour,
               scan_en => scan_en, start_scan => start_scan, row => row, obj_count => cnt,
-              copy_start => copy_start, tab_addr => x"30000", mfree => mfree, copying => copying);
+              copy_start => copy_start, tab_addr => x"30000", mfree => mfree, copying => copying,
+              part => part_s);
 
   -- memories, buffer and port checks
   process (clk)
@@ -146,6 +148,7 @@ begin
 
   process
     variable errs : integer := 0;
+    variable tcnt, tfirst, tlast, nparts : integer := 0;
     -- 4 numbers per token: screen lo, screen hi, colour 0, colour 1
     constant REMPTY : r_t := (16#FF#, 16#FF#, 0, 0);
     constant R0 : r_t := (16#2C#, 16#61#, 16#18#, 16#1F#,  1, 1, 0, 5,                -- 3 bottom
@@ -418,6 +421,45 @@ begin
     copy(255, false);
     for os in 0 to 3 loop
       expand(1, '1', 2 * os); check_full("overflow, 2 parts, at " & integer'image(2 * os), 2 * os, 2);
+    end loop;
+
+    -- timing (no check): object parts appended after a 48-token row (out_start 96), one-glyph
+    -- objects; cycles from start to done, to the first part, and per part
+    for tcase in 0 to 3 loop
+      tabm <= (others => x"00");
+      wait for 0 ns;
+      if tcase = 0 then        -- 64 objects inside row 5
+        for k in 0 to 63 loop put(k, 10 * k, 40, 16#FF#, 1, 16#02#, 0, 16#4000#, 0); end loop;
+        copy(64, false);
+      elsif tcase = 1 then     -- 64 objects at Y = 43: row 5 has their top parts
+        for k in 0 to 63 loop put(k, 10 * k, 43, 16#FF#, 1, 16#02#, 0, 16#4000#, 0); end loop;
+        copy(64, false);
+      elsif tcase = 2 then     -- 32 two-row objects at Y = 35: two parts each in row 5
+        for k in 0 to 31 loop put(k, 10 * k, 35, 16#FF#, 2, 16#02#, 0, 16#4000#, 16); end loop;
+        copy(32, false);
+      else                     -- 255 objects inside row 5 (the buffer ends the expansion)
+        for k in 0 to 254 loop put(k, 4 * k, 40, 16#FF#, 1, 16#02#, 0, 16#4000#, 0); end loop;
+        copy(255, false);
+      end if;
+      clr <= '1'; tick; clr <= '0';
+      row <= to_unsigned(5, 8); start_scan <= '1'; scan_en <= '1'; out_start <= to_unsigned(96, 10);
+      tick; start <= '1';
+      tick; start <= '0';
+      tcnt := 0; tfirst := -1; nparts := 0;
+      for n in 1 to 20000 loop
+        tick; tcnt := tcnt + 1;
+        if part_s = '1' then
+          nparts := nparts + 1;
+          if tfirst < 0 then tfirst := tcnt; end if;
+          tlast := tcnt;
+        end if;
+        exit when done = '1';
+      end loop;
+      report "TIMING case " & integer'image(tcase) & ": " & integer'image(nparts) & " parts, "
+        & integer'image(tcnt) & " cycles start -> done, first part at " & integer'image(tfirst)
+        & ", per part " & integer'image((tlast - tfirst) / maximum(nparts - 1, 1))
+        & " (MLAT " & integer'image(MLAT) & ")";
+      tick;
     end loop;
 
     if port_errs /= 0 then
