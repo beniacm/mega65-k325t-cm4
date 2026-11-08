@@ -14,6 +14,7 @@
 130 REM chip RAM (bank 5): rows, DMA lists, cells, charset, maps, sprites, birds
 140 SC%=&50000:LS%=492:DL%=&53100:CE%=&53700:TL%=&53800:CH%=&54000:MP%=&54800
 150 CO%=&0800:CB%=&FF80000+CO%:K%=(?&6E1=&FF)
+155 IF K% THEN DB%=0:REM K325T: DBLRR with list mode loses the layers (core issue); its list-mode lead gives the time
 160 ON ERROR PROCtext:REPORT:PRINT " at line ";ERL:END
 170 PRINT "Building the scene..."
 180 REM clear rows, charset, maps; colour RAM of the rows
@@ -76,6 +77,7 @@
 738 ?&D027=2:?&D028=7:?&D01B=1:?&D017=0:?&D01D=0:?&D01C=0:?&D015=3
 740 IF K% THEN ?&FFD71F0=?&FFD71F0 OR &50
 760 REM main loop: positions, one DMA list, sprites, birds, wait for vsync
+765 REM v2 X/Y must be 0..1023 (10-bit; Y signed): negative values are masked with AND 1023
 770 P%=0:T%=TIME
 780 REPEAT
 790 P%=P%+1:X%=P%:?(CE%+4)=7-(X% AND 7):?(CE%+5)=(X% DIV 8 AND 127)*2
@@ -84,7 +86,7 @@
 820 ?&D702=DL% DIV 65536:?&D704=0:?&D701=(DL% DIV 256) AND 255:?&D705=DL% AND 255:REM (the list address advances: set it each time)
 830 X%=(P% DIV 2) MOD 400:?&D000=X% AND 255:?&D010=X% DIV 256:?&D001=166+(P% DIV 8) MOD 8
 840 X%=400-(P%*3) MOD 400:?&D002=X% AND 255:?&D010=?&D010 AND 1 OR (X% DIV 256)*2:?&D003=184
-850 IF K% THEN FOR I%=0 TO 5:X%=(640-(P%*5+I%*110) MOD 700):!(&5F800+16*I%)=X%+(30+I%*12+(P% DIV 4+I%*3) MOD 8)*65536:NEXT
+850 IF K% THEN FOR I%=0 TO 5:X%=(640-(P%*5+I%*110) MOD 700) AND 1023:!(&5F800+16*I%)=X%+((30+I%*12+(P% DIV 4+I%*3) MOD 8) AND 1023)*65536:NEXT
 860 WAIT
 870 UNTIL P%=BN%
 880 T%=TIME-T%

@@ -14,6 +14,7 @@
 130 rem chip ram (bank 5): rows, dma lists, cells, charset, maps, sprites, birds
 140 sc=$50000:ls=492:dl=$53100:ce=$53700:tl=$53800:ch=$54000:mp=$54800
 150 co=$0800:cb=$ff80000+co:k=(peek($d629)=98)
+155 if k then db=0:rem k325t: dblrr with list mode loses the layers (core issue); its list-mode lead gives the time
 160 trap 1500
 170 print "building the scene..."
 175 v0=peek($d054):v1=peek($d058):v2=peek($d059):v3=peek($d05c):v4=peek($d05d):v5=peek($d05e)
@@ -79,6 +80,7 @@
 738 poke $d027,2,7:poke $d01b,1:poke $d017,0:poke $d01d,0:poke $d01c,0:poke $d015,3
 740 if k then poke $ffd71f0,peek($ffd71f0) or $50
 760 rem main loop: positions, one dma list, sprites, birds, wait for vsync
+765 rem v2 x/y must be 0..1023 (10-bit; y signed): negative values are masked with and 1023
 770 p=0:t=ti
 790 p=p+1:x=p:poke ce+4,7-mod(x,8),mod(int(x/8),128)*2
 800 x=int(p/2):poke ce+2,7-mod(x,8),mod(int(x/8),128)*2
@@ -86,7 +88,7 @@
 820 poke $d701,$31,5,0,0,0:rem list at $53100: the trigger ($d705) is written last
 830 x=mod(int(p/2),400):poke $d000,mod(x,256):poke $d010,int(x/256):poke $d001,166+mod(int(p/8),8)
 840 x=400-mod(p*3,400):poke $d002,mod(x,256):poke $d010,(peek($d010) and 1) or int(x/256)*2:poke $d003,184
-850 if k then for i=0 to 5:x=640-mod(p*5+i*110,700):e=$5f800+16*i:wpoke e,x:wpoke e+2,30+i*12+mod(int(p/4)+i*3,8):next i
+850 if k then for i=0 to 5:x=(640-mod(p*5+i*110,700)+1024) and 1023:e=$5f800+16*i:wpoke e,x:wpoke e+2,30+i*12+mod(int(p/4)+i*3,8):next i
 860 vsync 251
 870 if p<>bn then 790
 880 t=ti-t
