@@ -316,6 +316,7 @@ printf and `VICIV.bordercol` run twice in a row without a reset.
 ```
 scripts/build.sh        # make bin/qmtech-k325t-cm4.bit (handles pkg-config / exomizer / Vivado quirks)
 scripts/program.sh      # JTAG → SRAM (scripts/jtag/: Vivado batch tcl, udev setup)
+scripts/jtag/run_vivado.sh sysmon.tcl   # XADC over JTAG: die temperature, VCCINT/VCCAUX/VCCBRAM, DONE (read-only)
 scripts/capture.sh      # MS2130 HDMI capture → captures/
 scripts/m65shot.py      # screenshot WITHOUT the dongle: VIC-IV registers + screen/colour RAM + font +
                         #   palette read over the serial monitor (~0.4 s), text modes rendered as the
