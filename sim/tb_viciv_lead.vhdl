@@ -11,7 +11,10 @@
 --   SC 6: parallax65.bas rows (V200, 3 layers, 246 tokens), bits off; SC 7: the same + v2
 --         objects (OBJS 2: six one-glyph birds); D051: $D051 (DBLRR = $C0); SC 8: the rows
 --         with bit 5 only (lead, no LIST token); SC 9: v2 with an empty table; SC 10: the
---         parallax rows with three full-colour layers (glyphs FCM_G..+3), bits off
+--         parallax rows with three full-colour layers (glyphs FCM_G..+3), bits off; SC 11: the
+--         same with bit 5 (lead).  FT 1: XCTL bit 7 (fast token path).  SC 12-15: rows of 3 x
+--         (GOTOX + 81 tokens) for per-token costs: all full colour / plain / GOTOX+FCM / NCM;
+--         SC 16: the SC 11 layers with v2 objects instead of bit 5 (OBJS 3: 12 parts in row 11)
 -- V400 2: V400 timing with 25 rows ($D05B 0, $D07B 24), the schedule DBLRR needs
 -- OBJS 0: 6 two-row objects, 2 glyphs wide (case D's object), (X 0/10/600 on rows 10-12/20-22/30-32, all three on 40-42)
 -- OBJS 1: 15 two-row objects, 1 glyph wide, at Y = 8*20+3, X = 42 k (30 parts in row 21)
@@ -23,7 +26,8 @@ use work.victypes.all;
 
 entity tb_viciv_lead is
   generic (SC : integer := 3; OBJS : integer := 0; V400 : integer := 1; FAST : integer := 1;
-           BG : integer := 80; D051 : integer := 16#80#; OUTF : string := "/dev/null");
+           BG : integer := 80; D051 : integer := 16#80#; FT : integer := 0;
+           OUTF : string := "/dev/null");
 end entity;
 
 architecture sim of tb_viciv_lead is
@@ -36,11 +40,12 @@ architecture sim of tb_viciv_lead is
   signal frame : integer := 0;
   signal caddr : unsigned(19 downto 0);
   signal cdata : unsigned(7 downto 0) := x"00";
+  signal cdata32 : unsigned(31 downto 0) := (others => '0');
   signal fa : std_logic_vector(19 downto 0) := (others => '0');
   signal fw, fr, ccs : std_logic := '0';
   signal fwd : std_logic_vector(7 downto 0) := (others => '0');
   signal r, g, b : unsigned(7 downto 0);
-  signal rl_en, v2_en, fast_en : std_logic := '0';
+  signal rl_en, v2_en, fast_en, ft_en : std_logic := '0';
   signal tab_addr : unsigned(19 downto 0) := x"4A000";
   signal ocount : unsigned(7 downto 0) := x"00";
   signal dsel : unsigned(4 downto 0) := (others => '0');
@@ -67,7 +72,7 @@ architecture sim of tb_viciv_lead is
   type objs_t is array (natural range <>) of integer;
   function wsel(o : integer) return natural is
   begin
-    if o = 0 then return 2; else return 1; end if;
+    if o = 0 or o = 3 then return 2; else return 1; end if;
   end function;
   constant W : natural := wsel(OBJS);               -- glyphs per object row
 begin
@@ -99,7 +104,12 @@ begin
 
   -- chip RAM port B: registered read
   process (pclk) begin
-    if rising_edge(pclk) then cdata <= to_unsigned(mem(to_integer(caddr)), 8); end if;
+    if rising_edge(pclk) then
+      cdata <= to_unsigned(mem(to_integer(caddr)), 8);
+      for b in 0 to 3 loop                       -- the aligned word (chipram_k325t dob32)
+        cdata32(8 * b + 7 downto 8 * b) <= to_unsigned(mem(to_integer(caddr(19 downto 2) & "00") + b), 8);
+      end loop;
+    end if;
   end process;
 
   dut : entity work.viciv
@@ -113,10 +123,10 @@ begin
               external_frame_x_zero => xzero, external_frame_y_zero => yzero,
               external_pixel_strobe_in => strobe, vga_in_frame => inframe,
               vgared => r, vgagreen => g, vgablue => b,
-              chipram_address => caddr, chipram_datain => cdata,
+              chipram_address => caddr, chipram_datain => cdata, chipram_datain32 => cdata32,
               fastio_addr => fa, fastio_read => fr, fastio_write => fw, fastio_wdata => fwd,
               fastio_rdata => rdata_dummy, colour_ram_fastio_rdata => crd, colour_ram_cs => ccs,
-              fast_rrb_en => fast_en, rrb_list_en => rl_en, rrb_v2_en => v2_en,
+              fast_rrb_en => fast_en, rrb_list_en => rl_en, rrb_v2_en => v2_en, fast_token_en => ft_en,
               obj_tab_addr => tab_addr, obj_count => ocount, obj_hold => '0',
               diag_sel => dsel, diag_clr => dclr, diag_val => dval,
               charrom_fastio_rdata => chrd, charrom_cs => '0',
@@ -149,9 +159,14 @@ begin
     variable no : natural;
     variable k, o, rr, mask : integer;
     variable tp : natural;
+    variable fl : natural;
   begin
     -- objects
-    if OBJS = 2 then
+    if OBJS = 3 then
+      -- six two-row objects at Y = 8*10 + 3: 12 parts in row 11 (rrb_list_test.py case H)
+      no := 6;
+      for i in 0 to 5 loop ox(i) := 40 + 100 * i; oy(i) := 83; end loop;
+    elsif OBJS = 2 then
       -- parallax65.bas birds: six one-row, one-glyph objects
       no := 6;
       for i in 0 to 5 loop ox(i) := 40 + 100 * i; oy(i) := 30 + 12 * i; end loop;
@@ -175,7 +190,12 @@ begin
     for gl in 0 to 3 loop
       for yy in 0 to 7 loop
         for xx in 0 to 7 loop
-          mem(FCM_G * 64 + 64 * gl + 8 * yy + xx) := 1 + (3 * gl + yy) mod 15;
+          if SC >= 10 then                       -- per pixel, some transparent (0)
+            if (xx + yy + gl) mod 5 = 0 then mem(FCM_G * 64 + 64 * gl + 8 * yy + xx) := 0;
+            else mem(FCM_G * 64 + 64 * gl + 8 * yy + xx) := 1 + (3 * gl + yy + 5 * xx) mod 15; end if;
+          else
+            mem(FCM_G * 64 + 64 * gl + 8 * yy + xx) := 1 + (3 * gl + yy) mod 15;
+          end if;
         end loop;
       end loop;
     end loop;
@@ -215,15 +235,37 @@ begin
       for r in 0 to 24 loop
         sp := SCR + STEP * r; cp := STEP * r;
         for ly in 0 to 2 loop
-          w16(sp, 3 + ly);
+          if ly = 0 then w16(sp, 0); else w16(sp, 3 + ly); end if;   -- layer 0 covers X 0..
           if ly = 0 then c16(cp, 16#50#, 255); elsif ly = 1 then c16(cp, 16#D0#, 255);
           else c16(cp, 16#90#, 255); end if;
           for i in 0 to 80 loop
-            if SC = 10 then w16(sp, FCM_G + (i + r + ly) mod 4);   -- full-colour layers
+            if SC = 12 then                     -- microbenchmarks: all full colour
+              w16(sp, FCM_G + i mod 4); c16(cp, 0, 1);
+            elsif SC = 13 then                  -- all plain
+              w16(sp, 160); c16(cp, 0, 1);
+            elsif SC = 14 then                  -- GOTOX + full-colour glyph pairs
+              if i mod 2 = 0 then w16(sp, 8 * i); c16(cp, 16#90#, 255);
+              else w16(sp, FCM_G + i mod 4); c16(cp, 0, 1); end if;
+            elsif SC = 15 then                  -- all NCM (16 pixels)
+              w16(sp, FCM_G + i mod 4); c16(cp, 8, 1);
+            elsif SC >= 10 then                 -- full-colour layers, attributes mixed in
+              if (i + ly) mod 9 = 8 then
+                w16(sp, 160);                   -- a plain glyph
+              elsif (i + r) mod 19 = 6 then
+                w16(sp, FCM_G + (i + r + ly) mod 4 + 16#4000#);   -- width trim 2
+              else
+                w16(sp, FCM_G + (i + r + ly) mod 4);
+              end if;
+              fl := 0;
+              if (i + r) mod 5 = 1 then fl := fl + 64; end if;       -- FLIPX
+              if (i + r) mod 7 = 2 then fl := fl + 128; end if;      -- FLIPY
+              if (i + ly) mod 13 = 4 then fl := fl + 32; end if;     -- alpha
+              if (i + r + ly) mod 17 = 3 then fl := fl + 8; end if;  -- NCM (16 pixels)
+              c16(cp, fl, 1 + (ly * 5 + r + i) mod 15);
             elsif ly = 0 then w16(sp, 160);                   -- solid
             elsif (i + r + ly) mod 3 = 0 then w16(sp, 1 + (i + r) mod 26);   -- letters
             else w16(sp, 32); end if;                          -- space: transparent
-            c16(cp, 0, 1 + (ly * 5 + r) mod 15);
+            if SC < 10 then c16(cp, 0, 1 + (ly * 5 + r) mod 15); end if;
           end loop;
         end loop;
       end loop;
@@ -303,8 +345,9 @@ begin
     reg(16#64#, 0); reg(16#65#, 0);         -- colour RAM offset 0
     reg(16#68#, 0); reg(16#69#, 16#40#); reg(16#6A#, 5);   -- charset $54000
     if FAST = 1 then fast_en <= '1'; end if;
-    if SC = 2 or SC = 5 or SC = 8 then rl_en <= '1'; end if;
-    if SC = 3 or SC = 7 or SC = 9 then v2_en <= '1'; end if;
+    if FT = 1 then ft_en <= '1'; end if;
+    if SC = 2 or SC = 5 or SC = 8 or (SC >= 11 and SC /= 16) then rl_en <= '1'; end if;
+    if SC = 3 or SC = 7 or SC = 9 or SC = 16 then v2_en <= '1'; end if;
     if SC = 9 then ocount <= x"00"; end if;
     reg(16#51#, D051);                      -- NORRDEL (bit 7), DBLRR (bit 6)
     setup_done <= '1';

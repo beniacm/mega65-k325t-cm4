@@ -179,8 +179,8 @@ What the FSM spends after F (fast RRB, XCTL bit 4):
 | badline: row fetch (`FetchScreenRamLine2`, one byte per cycle) | 1 + 2 x CHRCOUNT: **161** for 80 tokens |
 | list mode (bit 5 or 6): `ListWait` + start + `ListRun` exit | ~8 |
 | list mode: expansion (counter 10) | v2 scan ~7 + 1 per table object (13 for 6, 22 for 15 objects without a part in the row); per object part ~16-36 (1 part 36, 6 parts 128 -- the board measured 137 --, 15 parts 335, 30 parts 545) |
-| per token: normal glyph, or GOTOX whose high byte bits 4..0 are 0 | 8 (without fast RRB a normal glyph waits for the painter: ~11) |
-| per token: full-colour glyph (8 chip RAM reads) | 16 |
+| per token: normal glyph, or GOTOX whose high byte bits 4..0 are 0 | 8 (without fast RRB a normal glyph waits for the painter: ~11; fast token path, bit 7: 6) |
+| per token: full-colour glyph (8 chip RAM reads) | 16 (fast token path: 4) |
 | per token: GOTOX with X >= 256 or the Y offset sign (high byte bits 4..0 /= 0) while FCLRHI/FCLRLO make that glyph number full colour | 16 (it takes the full-colour fetch path) |
 | first pixels of a glyph written after its dispatch | 2-5 (2 pixels per cycle) |
 
@@ -276,6 +276,76 @@ where its last glyph was painted") is the line's own: without the lead the VIC-I
 end of the line painted before it (`raster_buffer_max_write_address_hold` -> `_prev` is one
 line behind with NORRDEL = 1); rows whose lines all end at the same X look the same either way.
 
+## Fast token path (XCTL bit 7)
+
+Full-colour (FCM) art in several 80-column layers does not fit a raster line with the token
+state machine as it is: every token goes through it one after the other.
+
+### Where the cycles go (bit 4 on, bit 7 off; from the code, measured in GHDL)
+
+Per token, after the previous token's dispatch:
+
+| state | cycles | what it does |
+|---|---|---|
+| FetchNextCharacter, FetchCharHighByte | 2 | the token's two screen bytes from the row buffer (LUT RAM, no latency) and colour byte 0 (block RAM, one cycle) |
+| FetchTextCell | 1 | glyph address (FCM: glyph x 64 + row +- Y offset; normal: charset + glyph x 8 + row), draw mask, `$FFFF` |
+| FetchTextCellColourAndSource | 1 | colour byte 1, attributes; puts the glyph address on the chip RAM port |
+| PaintMemWait, PaintMemWait2 | 2 | chip RAM latency (block RAM + one register) |
+| PaintFullColourFetch | 8 (FCM/NCM only) | one byte per cycle (the VIC-IV's chip RAM port is 8 bits wide) |
+| PaintMemWait3, PaintDispatch | 2 | end-of-row checks; wait for the painter, start it |
+
+| token | cycles | chip RAM | pixel write cycles (2 px/cycle) | painter (setup + pixels + idle) |
+|---|---|---|---|---|
+| plain glyph | **8** | 1 read | 4 | 1 + 4 + 2 = 7, hidden behind the 8 |
+| full colour (FCM) | **16** | 8 reads | 4 | 1 + 4 + 2 |
+| NCM (16 px) | **16** | 8 reads | 8 | 1 + 8 + 2 |
+| GOTOX | **8**, or **16** when its high byte bits 4..0 are not 0 (X >= 256 or the Y offset sign) while FCLRHI makes that "glyph number" full colour: it then fetches 8 useless bytes | 1 / 8 | 0 | - |
+
+So a plain glyph's 8 cycles are pure state machine: 4 states to read and decode, 2 to wait for
+the chip RAM, 2 to check and dispatch; its 4 pixel write cycles run in parallel with the next
+token's first states. Three FCM layers (3 x (GOTOX + 81 glyphs) = 246 tokens): **3928** cycles
+per line, **4421** on a badline (+ the 493-cycle row fetch), against 2592.
+
+### Design
+
+- (a) a 32-bit VIC-IV read port: `chipram_k325t.vhdl` keeps all 1 MB as four byte lanes (lane =
+  address bits 1..0; the pre-loaded 384 KB split by `src/tools/k325t_chipram_lanes.py`), port B
+  returns the aligned word next to the byte (`dob32` -> `gs4510` -> `machine` -> `viciv`
+  `chipram_datain32`). An FCM row = 2 reads instead of 8. No extra block RAM (the same bits).
+- (c) a decoder one token ahead: it does the four read/decode states for token k+1 (into the
+  `n_*` registers) while token k waits for the chip RAM and is dispatched; at k's dispatch the
+  `n_*` registers become the `glyph_*` registers and k+1 goes straight to PaintMemWait. The two
+  words of an FCM row are asked for in PaintMemWait / PaintMemWait2; TurboFetch32 assembles the
+  8 bytes (flips, NCM nybl order, reverse/XOR, underline, draw mask exactly as
+  PaintFullColourFetch) and does PaintMemWait3's checks. A token decoded behind a GOTOX that is
+  not dispatched yet waits (the GOTOX changes the draw mask and Y offset the decoder needs).
+- painter back to back: an FCM, NCM or plain mono glyph is dispatched in the painter's last
+  pixel cycle; FCM/NCM skip the painter's set-up state (done at dispatch). A GOTOX still waits
+  for the painter to be idle (it moves the write position).
+- (b) 4 pixels per cycle was not needed: with (a) + (c) the painter (4 cycles per 8 FCM pixels)
+  is the limit for FCM, and the token rate matches it.
+
+Gating: XCTL bit 7 together with bit 4, CHR16 text lines (not bitmap, not 8-bit characters, not
+glyphs from hyperram); with bit 7 off nothing changes (the old states run, the lanes return the
+same bytes). The pictures are pixel-identical with the old path (GHDL: FCM layers with FLIPX,
+FLIPY, alpha, NCM, width trim and plain glyphs mixed in, v2 objects, parallax rows,
+microbenchmarks; board: `rrb_list_test.py` case H); only the time changes.
+
+### Measured (GHDL, `sim/run_viciv_lead.sh`, rows of 3 x (GOTOX + 81 tokens), non-badline)
+
+| row | bit 7 off | bit 7 on | per token |
+|---|---|---|---|
+| all FCM | 3928 | **1006** | 16 -> 4 |
+| all plain | 1984 | 1490 | 8 -> 6 (PaintMono + PaintMonoDrive + 4 pixel cycles) |
+| GOTOX + FCM pairs | 3544 | 1611 | pair 28.7 -> 13 (GOTOX ~9: waits for an idle painter, the next token's decode waits for it) |
+| all NCM | 3934 | 1974 | 16 -> 8 (16 pixels) |
+| three FCM layers with attributes mixed in | 3928 | 1123 (badline 1622) | |
+
+Three 80-column FCM layers (with attributes) + 12 v2 object parts (six two-row, two-glyph
+objects) in one row, V200, GHDL: that row's badline paints in **2073** cycles (row fetch 493,
+expansion 245, first object part at 1871), no late pixels; + the sprite fetch (~100) leaves
+~420 of 2592 cycles.
+
 ## Limits
 
 - Row buffer: 1 KB = 512 tokens per character row after expansion (background + all objects).
@@ -291,7 +361,8 @@ line behind with NORRDEL = 1); rows whose lines all end at the same X look the s
   two-line lead). Counter 25 shows the longest painting.
 - Painting time per raster line is unchanged: objects still cost RRB time (fast RRB, XCTL bit 4,
   doubles it): GOTOX 8 or 16 cycles (16 with X >= 256 or a Y offset sign while the glyph number
-  counts as full colour), full-colour glyph 16, normal glyph 8 (11 without fast RRB).
+  counts as full colour), full-colour glyph 16, normal glyph 8 (11 without fast RRB). With the
+  fast token path (bit 7 + bit 4): FCM 4, NCM 8, plain 6, GOTOX ~9 ("Fast token path").
 - Raster effects: with list mode on, paint-time registers take effect one raster line later
   (write them one line earlier), see "First raster line budget".
 - BRAM: one more 18 Kb block for the colour row buffer (the lead needs none).
@@ -363,11 +434,14 @@ before 2592.
   X 0/10/600, and 30 parts in one row); no late pixels with the lead; late pixels without it;
   DBLRR on the V400 schedule with `parallax65.bas`-like rows (246 tokens): the two-line lead
   changes only the first line of each pair, no late pixels, v2 with an empty table changes nothing.
+  Fast token path (XCTL bit 7): pixel-identical with the old path on FCM layers with attributes,
+  parallax rows, v2 objects, 30 parts and the per-token microbenchmarks.
   The same checks pass in V200 (`-gV400=0`, run by hand).
 - Board: `scripts/rrb_list_test.py` (pixel-exact comparison of a list-mode screen with the same
   picture built with plain GOTOX tokens; v2 two-row objects, short rows, a sprite in the opened
   top border during the copy; G/G2: V400 objects at the left edge and 30 parts in a row, late
-  pixel counter; G3: the same with DBLRR on the V400 schedule), then the demos.
+  pixel counter; G3: the same with DBLRR on the V400 schedule; H: three full-colour layers with
+  the fast token path against the old path / plain parts), then the demos.
 - Regression: intro-disk demo run with the bit clear.
 
 ## Demos

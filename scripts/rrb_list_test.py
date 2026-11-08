@@ -26,13 +26,21 @@ must equal B with the bit on (list mode changes nothing in rows without a LIST t
      rows painted with XCTL bit 5 on (the list mode lead makes them complete); G2: 15 one-glyph
      two-row objects, 30 parts in one row.  The late-pixel counter (23) must stay 0 with the
      lead; without it the plain reference is late on its badlines (printed, expected > 0).
+  H) three full-colour layers per row with the fast token path (XCTL bit 7, with 4 and 5):
+     H1 3 x 81 glyphs on DBLRR's schedule (the old path completes there), bit 7 off == on, and
+     V200 one line per painting with bit 7 (counters); H2 V400 3 x 41 glyphs, bit 7 off == on; H3 V200 and V400 3 x 81 glyphs
+     + 12 v2 object parts in one row == the parts as plain tokens; counter 25 < 2590, 23 == 0.
   G3) the same as G with DBLRR ($D051 = $C0) on its schedule: V400 timing with 25 rows (paints
      every other line, each painting shown on two lines), the two-line list mode lead.
      Restores $D031/$D07B/$D05B/$D054/$D051 and XCTL.
 Stops the CPU (monitor t1) while it runs, so BASIC 65 cannot touch the VIC-IV; leaves the
 VIC-IV changed (reset afterwards).
 
-    scripts/rrb_list_test.py [--keep]     (--keep: leave picture A on screen)
+    scripts/rrb_list_test.py [--keep] [--bit7]
+      --keep: leave picture A on screen
+      --bit7: run every case with XCTL bits 4 + 7 (fast RRB + fast token path) kept on; the cases
+              keep the other XCTL bits they do not set (H switches bit 7 off itself where it
+              compares with the old path).  Expected: the same PASS.
 """
 import os
 import subprocess
@@ -182,11 +190,15 @@ def parts(r, objs, rows_s, rows_c):
 
 def main():
     mon("t1", 0.3)          # stop the CPU: BASIC 65's interrupt and editor write VIC registers
+    x_orig = peek(XCTL)[0]
     try:
+        if "--bit7" in sys.argv:            # every case with fast RRB + the fast token path
+            poke(XCTL, [x_orig | 0x90])
         run()
     finally:
         if "--keep" not in sys.argv:
             xctl(0)
+            poke(XCTL, [x_orig])
         mon("t0", 0.3)
 
 
@@ -351,10 +363,128 @@ def run():
 
     # G) V400 + fast RRB: objects at the left edge on the badlines (first raster line budget)
     ok_g = case_g(d_s, d_c)
+    # H) three full-colour layers per row with the fast token path (XCTL bit 7)
+    ok_h = case_h(d_s, d_c)
 
     # a handful of pixels differ between any two captures of the same picture (capture noise)
     print("RRB_LIST_TEST_%s" % ("PASS" if max(n1, n2, n3, n4, n5, n6, n7, n8) <= NOISE and ok_g
-                                else "FAIL"))
+                                and ok_h else "FAIL"))
+
+
+FCM_H = 0x1410                                            # H: full-colour layer glyphs ($50400)
+
+
+def case_h(d_s, d_c):
+    """H: rows of three full-colour layers (GOTOX 0 opaque, GOTOX 3 and 5 transparent; FLIPX /
+    FLIPY mixed in; glyph pixels 1..15, or 0 = transparent) with the fast token path (XCTL bit
+    7, with bits 4 and 5: fast RRB, the list mode lead):
+      H1 3 x 81 glyphs on DBLRR's schedule (V400 timing, 25 rows, $D051 = $C0: two lines per
+         painting, so the old path completes): bit 7 off == on; and V200 (one line per
+         painting) with bit 7: counters only;
+      H2 V400 (50 rows), 3 x 41 glyphs: bit 7 off == on (the old path completes in one line);
+      H3 V200 and V400, 3 x 81 glyphs + 6 two-row v2 objects at Y = 8*10 + 3 (12 parts in row
+         11), bits 6 + 7  ==  the parts as plain GOTOX tokens, bits 5 + 7;
+    and for every bit 7 picture counter 23 (late) == 0 and 25 (longest painting) < 2590."""
+    from PIL import ImageChops
+    regs = {a: peek(a)[0] for a in (0xFFD3031, 0xFFD307B, 0xFFD305B, 0xFFD3054, 0xFFD3051)}
+    x0 = peek(XCTL)[0]
+    for g in range(4):                                        # glyph g: pixel (x, y)
+        poke(FCM_H * 64 + 64 * g, [0 if (x + y + g) % 5 == 0 else 1 + (3 * g + y + 5 * x) % 15
+                                   for y in range(8) for x in range(8)])
+    objcol = 0x7E00
+    poke(COLRAM + objcol, d_c[0] + d_c[1])
+
+    def rows3(n_glyphs, nrows):
+        """three layers per row (screen, colour lists per row)"""
+        rs, rc = [], []
+        for r in range(nrows):
+            s_, c_ = [], []
+            for ly in range(3):
+                s_ += gotox((0, 3, 5)[ly])
+                c_ += [0x10 if ly == 0 else 0x90, 0xFF]
+                for i in range(n_glyphs):
+                    s_ += w(FCM_H + (i + r + ly) % 4)
+                    c_ += [(0x40 if (i + r) % 5 == 1 else 0) | (0x80 if (i + r) % 7 == 2 else 0),
+                           1 + (ly * 5 + r + i) % 15]
+            rs.append(s_)
+            rc.append(c_)
+        return rs, rc
+
+    def diff(a, b):
+        d = ImageChops.difference(a, b)
+        pts = [(i % a.size[0], i // a.size[0]) for i, p in enumerate(d.getdata()) if max(p) > 40]
+        return len(pts), pts[:6]
+
+    def shot(rs, rc, chars, bits, nrows, v400, d051=0x80):
+        poke(XCTL, [x0 & ~0xE0 | 0x10])                       # list mode / bit 7 off while set up
+        poke(0xFFD3051, [d051])
+        setup(rs, rc, chars, step=640, rows=nrows, colofs=0, v400=v400)
+        poke(XCTL, [x0 & ~0xE0 | 0x10 | bits])
+        return late_capture()
+
+    def counters_ok(name, c):
+        good = c[23] == 0 and c[25] < 2590
+        print("  %s: late %d (must be 0), longest painting %d cycles (must be < 2590)%s"
+              % (name, c[23], c[25], "" if good else "  <-- FAIL"))
+        return good
+
+    ok = True
+    try:
+        poke(0xFFD3054, [regs[0xFFD3054] | 4])                # FCLRHI: glyphs > $FF full colour
+        # H1: on DBLRR's schedule both paths complete (the old one needs ~4400 cycles per
+        # painting); V200 with one line per painting only with bit 7 (its picture shows each
+        # glyph row one raster line earlier than DBLRR's, so it is checked by the counters)
+        rs, rc = rows3(81, 25)
+        p_db0 = shot(rs, rc, 246, 0x20, 25, True, 0xC0)       # old path, DBLRR schedule
+        p_db1 = shot(rs, rc, 246, 0xA0, 25, True, 0xC0)       # fast token path, same
+        n, e = diff(p_db0[1], p_db1[1])
+        print("H1 3 x 81 full-colour glyphs on the DBLRR schedule, bit 7 off vs on: %d px differ "
+              "%s; old path longest painting %d, bit 7 %d (< 5180)  (%s %s)"
+              % (n, e, p_db0[2][25], p_db1[2][25], os.path.basename(p_db0[0]),
+                 os.path.basename(p_db1[0])))
+        ok = ok and n <= NOISE and p_db1[2][25] < 5180 and p_db1[2][23] == 0
+        p_on = shot(rs, rc, 246, 0xA0, 25, False)             # V200, one line per painting
+        ok = counters_ok("H1 V200 bit 7, one line per painting", p_on[2]) and ok
+        # H2
+        rs2, rc2 = rows3(41, 50)
+        p_off = shot(rs2, rc2, 126, 0x20, 50, True)
+        p_on2 = shot(rs2, rc2, 126, 0xA0, 50, True)
+        n, e = diff(p_off[1], p_on2[1])
+        print("H2 V400 3 x 41 full-colour glyphs, bit 7 off vs on: %d px differ %s; old path "
+              "longest painting %d" % (n, e, p_off[2][25]))
+        ok = counters_ok("H2 bit 7", p_on2[2]) and ok and n <= NOISE
+        # H3
+        objs = [(40 + 100 * k, 83, 2) for k in range(6)]
+        for v400, nrows in ((False, 25), (True, 50)):
+            name = "H3 V400" if v400 else "H3 V200"
+            rs, rc = rows3(81, nrows)
+            ps_rows, pc_rows = [], []
+            for r in range(nrows):
+                ps, pc = parts(r, objs, d_s, d_c)
+                # the line's visible end stays the last layer's (repaint its last glyph after
+                # the parts, as in D)
+                ps_rows.append(rs[r] + ps + gotox(5 + 8 * 80) + rs[r][-2:])
+                pc_rows.append(rc[r] + pc + [0x90, 0xFF] + rc[r][-2:])
+            n_tok = max(len(x) for x in ps_rows) // 2
+            for a_, b_ in zip(ps_rows, pc_rows):                # same CHRCOUNT: pad in front of
+                while len(a_) // 2 < n_tok:                     # the repaint with GOTOX tokens
+                    a_[-4:-4] = gotox(8 * 79)
+                    b_[-4:-4] = [0x10, 0xFF]
+            p_ref = shot(ps_rows, pc_rows, n_tok, 0xA0, nrows, v400)
+            poke(XCTL, [x0 & ~0xE0 | 0x10])
+            v2table(b"".join(bytes(v2obj(x, y=y, h=h, obj=OBJD, objcol=objcol, stride=6))
+                             for x, y, h in objs))
+            p_v2 = shot(rs, rc, 246, 0xC0, nrows, v400)
+            n, e = diff(p_v2[1], p_ref[1])
+            print("%s 3 x 81 glyphs + 12 v2 object parts vs plain parts (bit 7): %d px differ %s"
+                  % (name, n, e))
+            ok = counters_ok(name + " v2", p_v2[2]) and counters_ok(name + " ref", p_ref[2]) \
+                and ok and n <= NOISE
+    finally:
+        poke(XCTL, [x0])
+        for a, v in regs.items():
+            poke(a, [v])
+    return ok
 
 
 def late_capture():

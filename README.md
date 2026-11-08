@@ -551,12 +551,15 @@ write, `soft_rtc.vhdl` keeps the copy you read back):
 | 2 | **64 KB colour RAM** | 32 KB, `$FF88000-$FF8FFFF` mirrors `$FF80000-` | 64 KB, separate halves |
 | 3 | (24 extra sprites: branch `k325t-extra-sprites`, not in this build) | | |
 | 4 | **fast RRB painting** | VIC-IV paints 1 pixel per cycle | 2 pixels per cycle: about twice the RRB layers per line |
+| 5, 6 | **RRB list mode** v1 / v2 | off | object lists per row / global object table (below) |
+| 7 | **fast token path** (with bit 4) | 8 cycles per glyph token, 16 per full-colour glyph | tokens pipelined: 4 per full-colour glyph, 6 per plain glyph |
 
 **1 MB chip RAM.**  The CPU (`gs4510`: `chipram_size`, `chipram_1mb`) and the VIC-IV
 (`chipram_size`, a 20-bit fetch port) were already written for up to 1 MB; no board had the
 block RAM.  `chipram_k325t.vhdl` keeps the generated, pre-loaded 384 KB (`shadowram-k325t-lo.vhdl`,
-made from `shadowram-no-attic.vhdl` by the Makefile) and adds 640 KB as two plain blocks indexed by
-raw address bits.  The VIC-IV always sees all 1 MB (its pointers already take 28 bits), so e.g.
+made from `shadowram-no-attic.vhdl` by the Makefile, `src/tools/k325t_chipram_lanes.py`) and adds
+640 KB as two plain blocks indexed by raw address bits.  All three are four byte lanes, so the
+VIC-IV's port can also read an aligned 32-bit word per cycle (the fast token path, bit 7).  The VIC-IV always sees all 1 MB (its pointers already take 28 bits), so e.g.
 a full-raster full-colour screen (720x576, 414,720 bytes of unique tiles) now fits.  From BASIC:
 `POKE $FFD71F0,1`, then `PEEK`/`POKE`/`EDMA` up to `$FFFFF`.
 
@@ -584,6 +587,18 @@ px/cycle and 3 at 2 px/cycle.  With the bit clear the paint timing is the origin
 (the first 47 intro-disk demos compared with the previous build: same pictures; Roguecraft DX
 checked with the bit set in-game).
 
+Two pixels per cycle only help where the painter is the limit; every token still goes through
+the VIC-IV's token state machine one after the other: 8 cycles for a plain glyph (its 8 pixels
+need 4 write cycles), 16 for a full-colour glyph (8 single-byte chip RAM reads).  **Bit 7, the
+fast token path** (with bit 4; CHR16 text lines): a decoder reads and decodes the next token
+(screen and colour bytes, glyph address) while the current one is fetched and painted, a
+full-colour glyph row comes as two 32-bit chip RAM words, and the painter takes the next glyph
+in its last pixel cycle.  Per token: full colour 16 -> 4 cycles, NCM 16 -> 8 (16 pixels), plain
+8 -> 6, GOTOX ~9; three 80-column full-colour layers (3 x 81 glyphs) 3928 -> 1006 cycles per
+line (badline 1505 with the row fetch), so they fit a raster line with room for a dozen
+list-mode object parts.  Same pictures as without bit 7 (GHDL: `sim/run_viciv_lead.sh`; board:
+`scripts/rrb_list_test.py` case H); with the bit clear nothing changes.
+
 **RRB list mode** (bits 5 and 6, `docs/rrb_list_mode.md`; after upstream issue #747 "Make RRB
 even more amazing" and #597).  Raster-rewrite objects moved like sprites: with bit 5 a CHR16
 row may end with a LIST token (`$FFFC`) followed by 8-byte entries (X, Y offset, draw mask,
@@ -592,11 +607,12 @@ into the row buffer at the badline (`rrb_list_expander.vhdl`, with a colour row 
 bit 6 one table of up to 255 16-byte objects with X **and** Y (`$FFD71F8-FC`: address, count,
 HOLD) is snapshotted once per frame and scanned for every row, so a program writes only X/Y and
 objects can never tear.  Verified pixel-exact against plain GOTOX rows (`scripts/rrb_list_test.py`,
-cases A-F); hardware counters at `$FFD71E0-E3` (`scripts/rrb_diag.py`) count aborts, plain rows,
-port collisions and copy/expansion times.  Demos: `scripts/demos/rrblist65*.bas` (BASIC 65) and
-`rrblist_b65*.bas` (B65 BASIC).  Known limit (step 1 in the design note): objects at the left
-edge can lose the first raster line of a row in V400 because the expansion runs in the badline's
-time; the fix (expanding the next row one line early) is in progress.
+cases A-H); hardware counters at `$FFD71E0-E3` (`scripts/rrb_diag.py`) count aborts, plain rows,
+port collisions, copy/expansion times, late pixels and the painting time per line.  With bit 5 or
+6 the VIC-IV paints every raster line one line ahead (two with DBLRR) and shows it a line later,
+so objects are complete on the first line of every row too ("First raster line budget" in the
+design note).  Demos: `scripts/demos/rrblist65*.bas` (BASIC 65) and `rrblist_b65*.bas` (B65
+BASIC).
 
 Tests: `sim/tb_chipram_k325t.vhdl`, `sim/tb_colourram_k325t.vhdl`, `sim/tb_rrb_list_expander.vhdl`,
 `sim/tb_rrb_list_v2.vhdl` (GHDL, all in `sim/run_sim.sh`); on the board `scripts/chipram_test.py`,

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run_viciv_lead.sh -- the real VIC-IV (viciv.vhdl, report-stripped copy) in GHDL: the K325T
-# RRB list mode lead (docs/rrb_list_mode.md, "First raster line budget").  12 scenarios of
-# tb_viciv_lead.vhdl in parallel (~7 min), then checks:
+# RRB list mode lead (docs/rrb_list_mode.md, "First raster line budget").  30 scenarios of
+# tb_viciv_lead.vhdl in parallel (~12 min), then checks:
 #   s4 == s5   plain rows: XCTL bit 5 (lead) changes no pixel
 #   s2 == s3   reference GOTOX rows with the lead == v2 objects (6 objects, X 0/10/600, V400)
 #   g2 == g3   the same with 30 object parts in one row
@@ -9,6 +9,10 @@
 #   every painting with the lead ends before the next line start (counter 25 < 2590)
 #   DBLRR (V400 timing, parallax65.bas rows, two-line lead): no late pixels, q8 == q9, and
 #   q1 (lead off) differs from q8 only on the first line of each pair (the one racing the beam)
+#   fast token path (XCTL bit 7): pixel-identical with the old path (three full-colour layers
+#   with FLIPX/FLIPY/alpha/NCM/width trim/plain glyphs mixed in, parallax rows, v2 birds, the V400
+#   objects, 30 parts, microbenchmark rows), and the V200 one-line picture of the three layers
+#   == the old path's on DBLRR's schedule (which shows each painting one line later)
 # (V200: run the scenarios by hand with -gV400=0.)  Expects "TB_VICIV_LEAD_PASS".  Work dir: viciv_work (scratch, not committed).
 set -uo pipefail
 cd "$(dirname "$0")"
@@ -35,6 +39,13 @@ run g1 -gSC=1 -gOBJS=1 & run g2 -gSC=2 -gOBJS=1 & run g3 -gSC=3 -gOBJS=1 &
 # v2 with an empty table
 D="-gOBJS=2 -gV400=2 -gD051=192"
 run q1 -gSC=6 $D & run q8 -gSC=8 $D & run q3 -gSC=7 $D & run q9 -gSC=9 $D &
+# fast token path (XCTL bit 7, FT=1) against the old path: three full-colour layers with
+# attributes (DBLRR schedule: the old path completes; and V200 with the one-line lead), the
+# parallax rows, v2 birds, the V400 objects, 30 parts, and the per-token microbenchmarks
+run t0 -gSC=11 $D -gFT=0 & run t1 -gSC=11 $D -gFT=1 & run t2 -gSC=11 -gOBJS=2 -gV400=0 -gFT=1 &
+run t3 -gSC=8 -gOBJS=2 -gV400=0 -gFT=0 & run t4 -gSC=8 -gOBJS=2 -gV400=0 -gFT=1 &
+run t5 -gSC=7 $D -gFT=0 & run t6 -gSC=7 $D -gFT=1 & run t7 -gSC=3 -gFT=1 & run t9 -gSC=3 -gOBJS=1 -gFT=1 &
+for m in 12 13 14 15; do run m${m}a -gSC=$m $D -gFT=0 & run m${m}b -gSC=$m $D -gFT=1 & done
 wait
 python3 - $W <<'PY'
 import sys
@@ -44,26 +55,37 @@ def frame(n):
 def lines(n):   # per raster line: late, paint, obj, exp (the first read holds the setup frames)
     return [list(map(int, l.split()[1::2])) for l in open("%s/%s.log" % (w, n))][1:]
 ok = True
-for a, b in (("s4", "s5"), ("s2", "s3"), ("g2", "g3"), ("q8", "q9")):
+for a, b in (("s4", "s5"), ("s2", "s3"), ("g2", "g3"), ("q8", "q9"),
+             ("t0", "t1"), ("t3", "t4"), ("t5", "t6"), ("s3", "t7"), ("g3", "t9"),
+             ("m12a", "m12b"), ("m13a", "m13b"), ("m14a", "m14b"), ("m15a", "m15b")):
     fa, fb = frame(a), frame(b)
     n = sum(1 for y in fa if fa[y] != fb.get(y))
     print("%s vs %s: %d lines differ (frame %d lines)" % (a, b, n, len(fa)))
     ok = ok and n == 0 and len(fa) == 576
+# V200 (one line per painting) against DBLRR's schedule: the same glyph rows, but DBLRR shows
+# each painting on lines 2k, 2k+1 and V200 on 2k-1, 2k: t0 line y == t2 line y - (y mod 2)
+# (the first and last text lines are the same lines in both)
+f0, f2 = frame("t0"), frame("t2")
+n = sum(1 for y in f0 if f0[y] not in (f2.get(y - (y % 2)), f2.get(y)))   # (+ text start/end)
+print("t0 vs t2 (DBLRR old path / V200 fast path, phase-aligned): %d lines differ" % n)
+ok = ok and n == 0
 # DBLRR: without the lead the first line of each pair races the beam; the second lines must be
 # identical with and without the two-line lead
 f1, f8 = frame("q1"), frame("q8")
 par = {y % 2 for y in f8 if f1[y] != f8[y]}
 print("q1 vs q8 (DBLRR, lead off / on): lines differ only in one parity of the pair: %s" % par)
 ok = ok and len(par) <= 1
-for n in ("s1", "s2", "s3", "s4", "s5", "g1", "g2", "g3", "q1", "q8", "q3", "q9"):
+for n in ("s1", "s2", "s3", "s4", "s5", "g1", "g2", "g3", "q1", "q8", "q3", "q9", "t0", "t1", "t2",
+          "t3", "t4", "t5", "t6", "t7", "t9", "m12a", "m12b", "m13a", "m13b", "m14a", "m14b",
+          "m15a", "m15b"):
     L = lines(n)
     late = sum(1 for l in L if l[1] > 0)
     paint = max(l[2] for l in L)
     print("%s: %d lines with late pixels, longest painting %d cycles, latest first object %d, "
           "longest expansion %d" % (n, late, paint, max(l[3] for l in L), max(l[4] for l in L)))
-    if n in ("s2", "s3", "s5", "g2", "g3"):
+    if n in ("s2", "s3", "s5", "g2", "g3", "t2", "t4", "t7", "t9"):
         ok = ok and late == 0 and paint < 2590
-    if n in ("q8", "q3", "q9"):                 # DBLRR: two lines per painting
+    if n in ("q8", "q3", "q9", "t0", "t1", "t5", "t6"):   # DBLRR: two lines per painting
         ok = ok and late == 0 and paint < 5180
     if n in ("s1", "g1"):
         ok = ok and late > 0
