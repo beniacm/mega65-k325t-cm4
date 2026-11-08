@@ -2,7 +2,8 @@
 -- Fixed-latency chip RAM (MLAT 4) and colour RAM (CLAT 1) models, two entries referencing the
 -- same object (absolute X + FLIPX + draw mask; relative X + FLIPY + transparent), garbage after
 -- the object's $FFFF (must be discarded), then the end-of-lists word.  Run with -gLIMIT=24 for
--- the buffer-full case.
+-- the buffer-full case.  Each expansion is first aborted at several points (entry reads,
+-- GOTOX, object data in flight); the clean run after every abort must give the same buffer.
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -14,10 +15,11 @@ end entity;
 architecture sim of tb_rrb_list_expander is
 
   signal clk : std_logic := '0';
-  signal start, busy, done, mreq, bwe : std_logic := '0';
+  signal start, busy, done, mreq, bwe, abort, clr : std_logic := '0';
   signal ent_addr : unsigned(19 downto 0) := x"10000";
   signal out_start : unsigned(9 downto 0) := to_unsigned(10, 10);
-  signal out_len, baddr : unsigned(9 downto 0);
+  signal out_len : unsigned(10 downto 0);
+  signal baddr : unsigned(9 downto 0);
   signal maddr : unsigned(19 downto 0);
   signal caddr : unsigned(15 downto 0);
   signal mdata, cdata, bscreen, bcolour : unsigned(7 downto 0) := x"00";
@@ -65,7 +67,7 @@ begin
 
   dut : entity work.rrb_list_expander
     generic map (MLAT => MLAT, CLAT => 1, LIMIT => LIMIT)
-    port map (clk => clk, start => start, ent_addr => ent_addr, out_start => out_start,
+    port map (clk => clk, start => start, abort => abort, ent_addr => ent_addr, out_start => out_start,
               busy => busy, done => done, out_len => out_len,
               mreq => mreq, maddr => maddr, mdata => mdata, caddr => caddr, cdata => cdata,
               bwe => bwe, baddr => baddr, bscreen => bscreen, bcolour => bcolour);
@@ -77,7 +79,9 @@ begin
       mp(1) <= chip(maddr);
       for n in 2 to MLAT - 1 loop mp(n) <= mp(n - 1); end loop;   -- (no stage for MLAT 2)
       cdata <= col(caddr);
-      if bwe = '1' then
+      if clr = '1' then
+        bs <= (others => x"55"); bc <= (others => x"55"); maxw <= 0;
+      elsif bwe = '1' then
         bs(to_integer(baddr)) <= bscreen; bc(to_integer(baddr)) <= bcolour;
         if to_integer(baddr) > maxw then maxw <= to_integer(baddr); end if;
       end if;
@@ -97,8 +101,23 @@ begin
     variable errs : integer := 0;
   begin
     wait for 50 ns;
-    wait until rising_edge(clk); start <= '1';
-    wait until rising_edge(clk); start <= '0';
+    for d in 0 to 9 loop
+    -- aborted run (d = 9: none)
+    if d < 9 then
+      wait until rising_edge(clk); start <= '1';
+      wait until rising_edge(clk); start <= '0';
+      for t in 1 to 1 + 5 * d loop wait until rising_edge(clk); end loop;
+      -- restart right after the abort: reads still in flight must not reach the buffer
+      abort <= '1'; clr <= '1'; wait until rising_edge(clk); abort <= '0'; clr <= '0';
+      wait for 1 ns;
+      assert busy = '0' report "busy after abort" severity error;
+      start <= '1';
+      wait until rising_edge(clk); start <= '0';
+    else
+      clr <= '1'; wait until rising_edge(clk); clr <= '0';
+      wait until rising_edge(clk); start <= '1';
+      wait until rising_edge(clk); start <= '0';
+    end if;
     for t in 1 to 5000 loop
       wait until rising_edge(clk);
       exit when done = '1';
@@ -131,6 +150,7 @@ begin
         errs := errs + 1;
       end if;
     end if;
+    end loop;
     if errs = 0 then
       report "TB_RRB_LIST_EXPANDER_PASS (LIMIT " & integer'image(LIMIT) & ", out_len "
              & integer'image(to_integer(out_len)) & ")";

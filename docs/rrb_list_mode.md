@@ -68,6 +68,10 @@ Registers (cleared by reset):
 | `$FFD71FB` | number of objects (0..255) |
 | `$FFD71FC` | bit 0 HOLD: keep the last snapshot (no copy per frame) |
 
+The address and the count are several bytes in the CPU's clock domain; the VIC-IV latches them
+at the start of each copy. Write them before setting XCTL bit 6, or with HOLD set (then clear
+HOLD: the next frame copies with the new values).
+
 Object (16 bytes):
 
 | offset | meaning |
@@ -75,7 +79,7 @@ Object (16 bytes):
 | +0 | X 9..0 (as GOTOX); bit 10 REL: X = previous table object's X + signed offset |
 | +2 | Y 9..0, signed: pixel rows from the top of character row 0; bit 10 REL (as X) |
 | +4 | draw mask, ANDed with the computed one (`$FF` normally, `0` hides the object) |
-| +5 | height in character rows (0 = 1) |
+| +5 | bits 5..0: height in character rows, 0..63 (0 = 1); bits 7..6 ignored |
 | +6 | bits 3..0 screen address 19..16, 4 FLIPX, 5 FLIPY, 6 transparent, 7 behind |
 | +7 | reserved (collision group, step 3) |
 | +8 | screen address 15..0 of object row 0's tokens (an RRB token list ending with `$FFFF`) |
@@ -84,17 +88,33 @@ Object (16 bytes):
 | +14 | reserved |
 
 - **Snapshot per frame**: at the top of every frame (unless HOLD is set) the VIC-IV copies the
-  table into its own BRAM (4 KB, one RAMB36). All rows of a frame use the same copy: an object
-  can never be shown in two places or in halves. A program may rewrite the table at any time;
-  writing X and Y in one go (B65 `!`) or with HOLD set makes even the X/Y pair atomic.
-- **Per character row** the VIC-IV scans the snapshot (one object per cycle, from BRAM, no chip
+  table into its own table RAM (LUT RAM, 512 x 64 bits, no block RAM). The count is part of the
+  snapshot: every row of the frame scans the copied count, so an object beyond a new count never
+  appears, and an object can never be shown in two places or in halves.
+- **The copy only uses idle chip RAM cycles** of the VIC-IV (after the sprite fetches of a line,
+  and the list-mode wait states); it never disturbs the row, glyph or sprite fetches (also in an
+  opened top border). 255 objects (4080 bytes) take a few lines of the top border. The fetch of
+  the first text row waits for the copy if it is still running; if it is not done by the next
+  line, that row is painted without objects for that frame.
+- **HOLD** keeps the last snapshot, its count included (no copy at all while set). After reset
+  the snapshot is empty: HOLD set before the first copy shows nothing.
+- A program may rewrite the table at any time. The copy reads an object's bytes within a few
+  cycles, so an X/Y pair written with separate stores can still tear against it (a window of
+  roughly 16 cycles per object per frame, also with B65's 4-byte `!`); HOLD makes it atomic.
+- **Per character row** the VIC-IV scans the snapshot (one object per cycle, from the table RAM, no chip
   RAM time) and turns every object covering the row into one or two entries exactly as in v1:
   the top part of object row k = row - floor(Y/8) (Y offset -(Y mod 8), mask `$FF << (Y mod 8)`)
   and the bottom part of object row k-1 (offset +(8 - Y mod 8), the complementary mask).
   FLIPY reverses the object rows and swaps the offset's sign (the VIC-IV applies the offset to
   the flipped glyph row).
-- Rows need **no LIST token**: the objects are appended after the row's last token (CHRCOUNT).
-  A row with a LIST token gets them at the token, after its own v1 entries if bit 5 is on too.
+- Rows need **no LIST token**: the objects are appended after the row's last token (CHRCOUNT),
+  or, in a row ended early by `$FFFF`, at that `$FFFF` (the objects' first GOTOX overwrites it,
+  the expansion ends with its own `$FFFF`; the short row keeps its row advance). A row with a
+  LIST token gets them at the token, after its own v1 entries if bit 5 is on too. The first of
+  LIST / `$FFFF` in the row counts; nothing after an end of row does.
+- **Full rows**: if the append point is beyond 1018 (the 1 KB buffer minus a GOTOX), the row is
+  painted plainly, without objects; an expansion that reaches the buffer limit ends there with
+  `$FFFF` (no object part is started that cannot fit).
 - Objects later in the table are painted later (on top).
 - REL lets a group follow an anchor: write the anchor's X/Y only. A hidden anchor (mask 0) is
   fine.
@@ -141,10 +161,14 @@ finishes that idea in its own states instead of touching the skeleton.
 
 ## Tests
 
-- GHDL: the expansion FSM with a fake screen/colour RAM (token streams in, buffer contents out),
-  including REL, FLIPX/FLIPY, empty lists, `$FFFF` handling and buffer overflow.
+- GHDL (`sim/run_sim.sh`, MLAT 3 and 4): the expansion FSM with a fake screen/colour RAM
+  (token streams in, buffer contents out), including REL, FLIPX/FLIPY, empty lists, `$FFFF`
+  handling, buffer overflow and aborts; v2: copies with count 0/255 and count changes, user
+  masks, REL Y, FLIPY, scans at any start index, overflow, a copy with the port only sometimes
+  free (`sim/tb_rrb_list_v2.vhdl`).
 - Board: `scripts/rrb_list_test.py` (pixel-exact comparison of a list-mode screen with the same
-  picture built with plain GOTOX tokens), then the demos.
+  picture built with plain GOTOX tokens; v2 two-row objects, short rows, a sprite in the opened
+  top border during the copy), then the demos.
 - Regression: intro-disk demo run with the bit clear.
 
 ## Demos
@@ -171,18 +195,33 @@ finishes that idea in its own states instead of touching the skeleton.
 - Updating the two entries of an object from BASIC is not atomic: a frame can show the halves
   from different positions (tearing). List mode v2 (one Y per object, rows computed by the
   VIC-IV from a per-frame snapshot) removes this.
-- An expansion still running at the next raster line is cut off and the row painted plainly;
+- An expansion still running at the next raster line is cut off and the row painted plainly
+  (with or without `$D07C` bit 3; the expander never reads chip RAM in the next line's fetch);
   the colour RAM port is always released at the end of an expansion.
+- **A `$FFFF` row advances the next row by its own length** (VIC-IV short-row rule, not
+  LINESTEP); list mode keeps that for the rows whose `$FFFF` the v2 objects replace.
 - Tests must stop the CPU (monitor `t1`): BASIC 65 rewrites VIC-IV registers while it runs.
 
 ## Demos
 
 - `scripts/demos/rrblist65.bas` -- BASIC 65: 6 full-colour balls over an 80-column starfield,
   two list entries per ball, moved with WPOKE (type it in; m65d cannot type `^`, so powers of
-  two come from a table).
+  two come from a table). 200-line mode: a glyph pixel is 1 pixel wide and 2 lines tall, so
+  the 8x8 ball shows as an 8x16 ellipse; in V400 (below) it is round. The v1 demos stay in
+  the 200-line mode: in V400 their 12 entries per row (hidden ones are expanded and painted
+  too) exceed the first-raster-line budget and objects on the left lose most of their rows
+  (step 1 in the TODO).
 - `scripts/demos/rrblist_b65.bas` -- the same in B65 BASIC (type it in **lower case**: B65
   swaps the case of letters like a BBC Micro). Screen rows at `$80000`, ball glyphs at `$60000`
   (B65 uses `$40000-$5FFFF`; full-colour glyphs must stay below 512 KB).
 - `scripts/demos/rrblist65v2.bas`, `scripts/demos/rrblist_b65v2.bas` -- the same with list mode
   v2: plain 80-column rows, a 6-object table, the main loop writes X and Y per ball (B65: one
-  4-byte `!` write).
+  4-byte `!` write). These run in **V400** (`$D031` bit 3: 50 rows, 640x400 square pixels, round
+  balls). The VIC-IV derives row count, row height and borders from `$D031` only while HOTREG
+  (`$D05D` bit 7) is on (BASIC 65: yes, and the recompute keeps its charset); B65 BASIC runs
+  with HOTREG off and a recompute would move CHARPTR, so its demo sets `$D07B` = 49 rows and
+  `$D05B` = 0 (one line per glyph row) itself; the vertical borders are the same in V200 and
+  V400. Known until step 1: in V400 an object at the left edge that straddles two rows loses
+  the first raster line of the lower row (the badline's fetch + expansion delay the painting;
+  the beam passes the left part first). Measured with the CPU stopped: X 10 loses one 8-pixel
+  row, X 600 never; V200 hides it because every glyph row has two lines.

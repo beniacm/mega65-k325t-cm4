@@ -78,3 +78,17 @@ fi
 ghdl -a --std=08 -frelaxed --workdir=c64work $V/rk_bridge.vhdl tb_rk_flash.vhdl
 ghdl -e --std=08 -frelaxed --workdir=c64work tb_rk_flash
 ghdl -r --std=08 -frelaxed --workdir=c64work tb_rk_flash --stop-time=5ms 2>&1 | sed 's/.*(report note): //;s/.*(assertion failure): /FAIL: /'
+
+# K325T RRB list mode: rrb_list_expander, v1 (entries per row; buffer-full case at LIMIT 24) and
+# v2 (global object table: copy, scan, counts, aborts, overflow, mfree stall), MLAT 3 and 4
+ghdl -a --std=08 -frelaxed --workdir=k325work $V/rrb_list_expander.vhdl tb_rrb_list_expander.vhdl tb_rrb_list_v2.vhdl
+ghdl -e --std=08 -frelaxed --workdir=k325work tb_rrb_list_expander
+ghdl -e --std=08 -frelaxed --workdir=k325work tb_rrb_list_v2
+for g in "-gMLAT=3" "-gMLAT=4" "-gMLAT=4 -gLIMIT=24"; do
+  ghdl -r --std=08 -frelaxed --workdir=k325work tb_rrb_list_expander $g --ieee-asserts=disable 2>&1 \
+    | grep -v "simulation stopped" | sed 's/.*(report note): //;s/.*(report failure): /FAIL: /;s/.*(assertion failure): /FAIL: /'
+done
+for m in 3 4; do
+  ghdl -r --std=08 -frelaxed --workdir=k325work tb_rrb_list_v2 -gMLAT=$m --ieee-asserts=disable 2>&1 \
+    | grep -v "simulation stopped" | sed 's/.*(report note): //;s/.*(report failure): /FAIL: /;s/.*(assertion failure): /FAIL: /'
+done
