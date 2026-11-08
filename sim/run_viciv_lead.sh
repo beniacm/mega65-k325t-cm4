@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run_viciv_lead.sh -- the real VIC-IV (viciv.vhdl, report-stripped copy) in GHDL: the K325T
-# RRB list mode lead (docs/rrb_list_mode.md, "First raster line budget").  30 scenarios of
-# tb_viciv_lead.vhdl in parallel (~12 min), then checks:
+# RRB list mode lead (docs/rrb_list_mode.md, "First raster line budget").  38 scenarios of
+# tb_viciv_lead.vhdl in parallel (~14 min), then checks:
 #   s4 == s5   plain rows: XCTL bit 5 (lead) changes no pixel
 #   s2 == s3   reference GOTOX rows with the lead == v2 objects (6 objects, X 0/10/600, V400)
 #   g2 == g3   the same with 30 object parts in one row
@@ -13,6 +13,8 @@
 #   with FLIPX/FLIPY/alpha/NCM/width trim/plain glyphs mixed in, parallax rows, v2 birds, the V400
 #   objects, 30 parts, microbenchmark rows), and the V200 one-line picture of the three layers
 #   == the old path's on DBLRR's schedule (which shows each painting one line later)
+#   XCTL bit 3: sparse rows after dense rows == over an opaque base of spaces (also with the
+#   lead, bit 7, DBLRR); without it the stale pixels show
 # (V200: run the scenarios by hand with -gV400=0.)  Expects "TB_VICIV_LEAD_PASS".  Work dir: viciv_work (scratch, not committed).
 set -uo pipefail
 cd "$(dirname "$0")"
@@ -47,6 +49,12 @@ run t3 -gSC=8 -gOBJS=2 -gV400=0 -gFT=0 & run t4 -gSC=8 -gOBJS=2 -gV400=0 -gFT=1 
 run t5 -gSC=7 $D -gFT=0 & run t6 -gSC=7 $D -gFT=1 & run t7 -gSC=3 -gFT=1 & run t9 -gSC=3 -gOBJS=1 -gFT=1 &
 for m in 12 13 14 15; do run m${m}a -gSC=$m $D -gFT=0 & run m${m}b -gSC=$m $D -gFT=1 & done
 wait
+# XCTL bit 3 (unpainted pixels show as background): sparse rows after dense rows == the same
+# rows over an opaque base of spaces; also with the lead, the fast token path, DBLRR + lead
+run u0 -gSC=19 -gV400=0 & run u1 -gSC=18 -gV400=0 -gCU=1 & run u2 -gSC=18 -gV400=0 &
+run u3 -gSC=18 -gV400=0 -gCU=1 -gRL=1 & run u4 -gSC=19 -gV400=0 -gRL=1 &
+run u5 -gSC=18 -gV400=0 -gCU=1 -gFT=1 & run u6 -gSC=18 $D -gCU=1 -gRL=1 & run u7 -gSC=19 $D -gRL=1 &
+wait
 python3 - $W <<'PY'
 import sys
 w = sys.argv[1]
@@ -57,11 +65,16 @@ def lines(n):   # per raster line: late, paint, obj, exp (the first read holds t
 ok = True
 for a, b in (("s4", "s5"), ("s2", "s3"), ("g2", "g3"), ("q8", "q9"),
              ("t0", "t1"), ("t3", "t4"), ("t5", "t6"), ("s3", "t7"), ("g3", "t9"),
-             ("m12a", "m12b"), ("m13a", "m13b"), ("m14a", "m14b"), ("m15a", "m15b")):
+             ("m12a", "m12b"), ("m13a", "m13b"), ("m14a", "m14b"), ("m15a", "m15b"),
+             ("u0", "u1"), ("u4", "u3"), ("u0", "u5"), ("u7", "u6")):
     fa, fb = frame(a), frame(b)
     n = sum(1 for y in fa if fa[y] != fb.get(y))
     print("%s vs %s: %d lines differ (frame %d lines)" % (a, b, n, len(fa)))
     ok = ok and n == 0 and len(fa) == 576
+fu0, fu2 = frame("u0"), frame("u2")
+n = sum(1 for y in fu0 if fu0[y] != fu2.get(y))
+print("u0 vs u2 (sparse rows without XCTL bit 3: stale pixels): %d lines differ (expected > 0)" % n)
+ok = ok and n > 0
 # V200 (one line per painting) against DBLRR's schedule: the same glyph rows, but DBLRR shows
 # each painting on lines 2k, 2k+1 and V200 on 2k-1, 2k: t0 line y == t2 line y - (y mod 2)
 # (the first and last text lines are the same lines in both)

@@ -33,6 +33,8 @@ must equal B with the bit on (list mode changes nothing in rows without a LIST t
   J) 64 one-glyph v2 objects on one row of 48 tokens (bit 7): timing in V400 (counter 25 <
      2590 for the pile's badline, prints 26 and 10; sparse rows: no pixel compare), and pixels
      over an opaque base on DBLRR's schedule: v2 == plain parts
+  K) XCTL bit 3: sparse rows after dense rows show no stale pixels (== the same rows over an
+     opaque base of spaces), also with the lead and the fast token path
   I) list mode v2 collisions: objects placed to collide / not collide (groups, mask 0, group 0,
      negative Y, REL, width, height, touching edges); the table $FFD71A0-BF, the partners
      ($FFD71C1/C2), the count ($FFD71C3) and $FFD71C0 against a model; IRQ pending with the
@@ -379,10 +381,12 @@ def run():
     ok_i = case_i()
     # J) a pile of 64 objects on one row (expansion time)
     ok_j = case_j()
+    # K) XCTL bit 3: unpainted raster buffer pixels show as background
+    ok_k = case_k()
 
     # a handful of pixels differ between any two captures of the same picture (capture noise)
     print("RRB_LIST_TEST_%s" % ("PASS" if max(n1, n2, n3, n4, n5, n6, n7, n8) <= NOISE and ok_g
-                                and ok_h and ok_i and ok_j else "FAIL"))
+                                and ok_h and ok_i and ok_j and ok_k else "FAIL"))
 
 
 FCM_H = 0x1410                                            # H: full-colour layer glyphs ($50400)
@@ -685,6 +689,64 @@ def case_j():
         poke(XCTL, [x0])
         for a, v in regs.items():
             poke(a, [v])
+    return ok
+
+
+def case_k():
+    """K: XCTL bit 3 (unpainted pixels show as background).  Dense rows (80 solid glyphs) and
+    sparse rows (a few glyphs behind GOTOX tokens, the last at X 632) in turn, V200: with bit 3
+    the sparse rows must equal the same rows painted over an opaque base of 80 spaces (bit 3
+    off) -- also with XCTL bits 5 + 7 (the lead, the fast token path).  Without bit 3 the
+    sparse rows show the dense rows' stale pixels (printed, expected > 0)."""
+    from PIL import ImageChops
+    x0 = peek(XCTL)[0]
+    rows_s, rows_c, ref_s, ref_c = [], [], [], []
+    for r in range(ROWS):
+        if r % 2 == 0:
+            s_ = sum((w(160) for i in range(80)), [])
+            c_ = sum(([0, 1 + (i + r) % 15] for i in range(80)), [])
+            rows_s.append(s_); rows_c.append(c_); ref_s.append(s_); ref_c.append(c_)
+        else:
+            s_ = gotox(100) + sum((w(1 + i + r % 20) for i in range(3)), []) + gotox(400) \
+                + w(160) + w(160) + gotox(632) + w(160)
+            c_ = [0x10, 0xFF] + [0, 2, 0, 3, 0, 4] + [0x10, 0xFF] + [0, 5, 0, 6] + [0x10, 0xFF, 0, 7]
+            base_s = sum((w(32) for i in range(80)), [])
+            base_c = sum(([0, 1 + (i + r) % 15] for i in range(80)), [])
+            rows_s.append(s_); rows_c.append(c_)
+            ref_s.append(base_s + s_); ref_c.append(base_c + c_)
+    n_tok = max(len(x) for x in ref_s) // 2
+    for rs, rc in ((rows_s, rows_c), (ref_s, ref_c)):
+        for a_, b_ in zip(rs, rc):
+            while len(a_) // 2 < n_tok:                        # GOTOX past the end: paints nothing
+                a_ += gotox(640)
+                b_ += [0x10, 0xFF]
+
+    def diff(a, b):
+        d = ImageChops.difference(a, b)
+        pts = [(i % a.size[0], i // a.size[0]) for i, p in enumerate(d.getdata()) if max(p) > 40]
+        return len(pts), pts[:6]
+
+    ok = True
+    try:
+        for name, bits in (("K", 0x00), ("K lead + bit 7", 0xB0)):
+            poke(XCTL, [x0 & ~0xF8 | 0x10])
+            setup(ref_s, ref_c, n_tok)
+            poke(XCTL, [x0 & ~0xF8 | 0x10 | bits])
+            p_ref, img_ref = capture()
+            poke(XCTL, [x0 & ~0xF8 | 0x10])
+            setup(rows_s, rows_c, n_tok)
+            poke(XCTL, [x0 & ~0xF8 | 0x18 | bits])               # + bit 3
+            p_on, img_on = capture()
+            poke(XCTL, [x0 & ~0xF8 | 0x10 | bits])               # without bit 3: stale pixels
+            p_off, img_off = capture()
+            n, e = diff(img_on, img_ref)
+            n0, e0 = diff(img_off, img_ref)
+            print("%s sparse rows with bit 3 vs over a base of spaces: %d px differ %s; without "
+                  "bit 3 %d px (stale, expected > 0)  (%s %s %s)" % (name, n, e, n0,
+                  os.path.basename(p_ref), os.path.basename(p_on), os.path.basename(p_off)))
+            ok = ok and n <= NOISE
+    finally:
+        poke(XCTL, [x0])
     return ok
 
 

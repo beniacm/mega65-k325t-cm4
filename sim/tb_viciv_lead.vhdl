@@ -16,7 +16,9 @@
 --         (GOTOX + 81 tokens) for per-token costs: all full colour / plain / GOTOX+FCM / NCM;
 --         SC 16: the SC 11 layers with v2 objects instead of bit 5 (OBJS 3: 12 parts in row 11)
 --         SC 17: 48 tokens = 6 x 4 x (GOTOX, FCM glyph), LINESTEP 96, v2 (OBJS 4: 64 one-glyph
---         objects in row 10)
+--         objects in row 10).  SC 18: dense and sparse rows in turn (XCTL bit 3, CU 1: unpainted
+--         pixels show as background); SC 19: the sparse rows over an opaque base of spaces.
+--         RL 1: XCTL bit 5 (the list mode lead)
 -- V400 2: V400 timing with 25 rows ($D05B 0, $D07B 24), the schedule DBLRR needs
 -- OBJS 0: 6 two-row objects, 2 glyphs wide (case D's object), (X 0/10/600 on rows 10-12/20-22/30-32, all three on 40-42)
 -- OBJS 1: 15 two-row objects, 1 glyph wide, at Y = 8*20+3, X = 42 k (30 parts in row 21)
@@ -28,7 +30,8 @@ use work.victypes.all;
 
 entity tb_viciv_lead is
   generic (SC : integer := 3; OBJS : integer := 0; V400 : integer := 1; FAST : integer := 1;
-           BG : integer := 80; D051 : integer := 16#80#; FT : integer := 0;
+           BG : integer := 80; D051 : integer := 16#80#; FT : integer := 0; CU : integer := 0;
+           RL : integer := 0;
            OUTF : string := "/dev/null");
 end entity;
 
@@ -47,7 +50,7 @@ architecture sim of tb_viciv_lead is
   signal fw, fr, ccs : std_logic := '0';
   signal fwd : std_logic_vector(7 downto 0) := (others => '0');
   signal r, g, b : unsigned(7 downto 0);
-  signal rl_en, v2_en, fast_en, ft_en : std_logic := '0';
+  signal rl_en, v2_en, fast_en, ft_en, cu_en : std_logic := '0';
   signal tab_addr : unsigned(19 downto 0) := x"4A000";
   signal ocount : unsigned(7 downto 0) := x"00";
   signal dsel : unsigned(4 downto 0) := (others => '0');
@@ -64,7 +67,7 @@ architecture sim of tb_viciv_lead is
   constant SCR : natural := 16#40000#;
   function stepsel(sc : integer) return natural is
   begin
-    if sc = 17 then return 96; elsif sc >= 6 then return 492; else return 512; end if;
+    if sc = 18 or sc = 19 then return 256; elsif sc = 17 then return 96; elsif sc >= 6 then return 492; else return 512; end if;
   end function;
   constant STEP : natural := stepsel(SC);           -- 492: parallax65.bas rows
   constant OBJD : natural := 16#48100#;
@@ -129,6 +132,7 @@ begin
               fastio_addr => fa, fastio_read => fr, fastio_write => fw, fastio_wdata => fwd,
               fastio_rdata => rdata_dummy, colour_ram_fastio_rdata => crd, colour_ram_cs => ccs,
               fast_rrb_en => fast_en, rrb_list_en => rl_en, rrb_v2_en => v2_en, fast_token_en => ft_en,
+              clear_unpainted_en => cu_en,
               obj_tab_addr => tab_addr, obj_count => ocount, obj_hold => '0',
               diag_sel => dsel, diag_clr => dclr, diag_val => dval,
               charrom_fastio_rdata => chrd, charrom_cs => '0',
@@ -234,7 +238,33 @@ begin
 
     -- rows: screen at SCR + STEP r, colour at STEP r
     ntok := BG;
-    if SC = 17 then
+    if SC = 18 or SC = 19 then
+      -- XCTL bit 3: dense rows (80 solid glyphs) and sparse rows (a few glyphs behind GOTOX
+      -- tokens) in turn; SC 19 = the sparse rows over an opaque base of 80 spaces (reference)
+      ntok := 92;
+      for r in 0 to ROWS - 1 loop
+        sp := SCR + STEP * r; cp := STEP * r;
+        nt := 0;
+        if r mod 2 = 0 or SC = 19 then
+          for i in 0 to 79 loop
+            if r mod 2 = 0 then w16(sp, 160); else w16(sp, 32); end if;
+            c16(cp, 0, 1 + (i + r) mod 15); nt := nt + 1;
+          end loop;
+        end if;
+        if r mod 2 = 1 then
+          w16(sp, 100); c16(cp, 16#10#, 255);
+          for i in 0 to 2 loop w16(sp, 1 + i + r mod 20); c16(cp, 0, 2 + i); end loop;
+          w16(sp, 400); c16(cp, 16#10#, 255);
+          for i in 0 to 1 loop w16(sp, 160); c16(cp, 0, 5 + i); end loop;
+          w16(sp, 632); c16(cp, 16#10#, 255);
+          w16(sp, 160); c16(cp, 0, 7);
+          nt := nt + 9;
+        end if;
+        while nt < ntok loop                      -- pad: GOTOX to the row's end (paints nothing)
+          w16(sp, 640); c16(cp, 16#10#, 255); nt := nt + 1;
+        end loop;
+      end loop;
+    elsif SC = 17 then
       -- step 4: 48 tokens = 6 groups of 4 x (GOTOX, one full-colour glyph), LINESTEP 96
       ntok := 48;
       for r in 0 to ROWS - 1 loop
@@ -364,6 +394,8 @@ begin
     reg(16#68#, 0); reg(16#69#, 16#40#); reg(16#6A#, 5);   -- charset $54000
     if FAST = 1 then fast_en <= '1'; end if;
     if FT = 1 then ft_en <= '1'; end if;
+    if CU = 1 then cu_en <= '1'; end if;
+    if RL = 1 then rl_en <= '1'; end if;
     if SC = 2 or SC = 5 or SC = 8 or (SC >= 11 and SC /= 16 and SC /= 17) then rl_en <= '1'; end if;
     if SC = 3 or SC = 7 or SC = 9 or SC = 16 or SC = 17 then v2_en <= '1'; end if;
     if SC = 9 then ocount <= x"00"; end if;

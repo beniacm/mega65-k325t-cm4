@@ -393,6 +393,34 @@ objects) in one row, V200, GHDL: that row's badline paints in **2073** cycles (r
 expansion 245, first object part at 1871), no late pixels; + the sprite fetch (~100) leaves
 ~420 of 2592 cycles.
 
+## Unpainted pixels (XCTL bit 3)
+
+The VIC-IV never clears its raster line buffer: a pixel that no token of a line paints keeps
+whatever an earlier line painted into that buffer half, and the line is shown up to its last
+painted pixel. Sparse rows (a few glyphs behind GOTOX tokens, objects appended) therefore show
+streaks of other rows -- unless an opaque base layer is painted first (~330 cycles per line for
+80 glyphs, 640 with bit 7 off).
+
+With **XCTL bit 3** a pixel the line's painting did not write shows as a background pixel
+(screen colour `$D021`, alpha `$FF`, not foreground, primary palette: exactly what a painted
+background pixel of the screen colour shows), and every line runs to the full text width (no
+"ends at the last painted pixel" cut). Bit 3 off: upstream behaviour.
+
+- One valid bit per buffer pixel (2 halves x 1024 positions, per even/odd bank), in flip-flops:
+  4 cycles after each line start the new write half's bits are cleared in one cycle (after the
+  display has passed the end of the text area -- with the lead the write half is the one just
+  shown --, before the painting's first write ~10 cycles after the line start); every raster
+  buffer write sets its bit one cycle later; the display reads the bit with the pixel. No block
+  RAM (the raster buffer banks stay 18 bits wide; a 19th generation bit would cost 2 RAMB36 and
+  would still repeat every two paintings of a half), ~2048 flip-flops and their decode/mux.
+- Lead (bits 5/6), DBLRR, the fast token path: the clear follows the write half chosen at the
+  line start, so all of them work unchanged (GHDL: identical to the base-of-spaces reference
+  with the lead, bit 7, and DBLRR + lead). A line whose start is lost (overtime) shows
+  background instead of stale content.
+- The painter never reads the buffer: transparent glyph pixels simply do not write, so they
+  stay unpainted (background) unless something below painted them in the same line.
+- Tests: GHDL (`run_viciv_lead.sh`, u0-u7), board `rrb_list_test.py` case K.
+
 ## Limits
 
 - Row buffer: 1 KB = 512 tokens per character row after expansion (background + all objects).
@@ -413,8 +441,8 @@ expansion 245, first object part at 1871), no late pixels; + the sprite fetch (~
 - **Stale pixels**: the raster line buffer is never cleared. A pixel no token of the line
   paints shows what an earlier line painted into that buffer half, and the line ends at its
   last painted pixel. Sparse rows (glyphs behind GOTOX tokens with gaps) therefore need an
-  opaque base layer first (e.g. GOTOX 0 + 80 glyphs, ~330 cycles with bit 7, ~640 without);
-  tests comparing two different rows must make them opaque
+  opaque base layer first (e.g. GOTOX 0 + 80 glyphs, ~330 cycles with bit 7, ~640 without), or
+  XCTL bit 3 ("Unpainted pixels"); tests comparing two different rows must make them opaque
   (cases E, J) because the gaps' history differs between the two.
 - **Many objects on one row** (a pile on the floor). The badline of such a row does, one
   after the other: the row fetch (1 + 2 x CHRCOUNT), the expansion of all its object parts

@@ -549,7 +549,7 @@ write, `soft_rtc.vhdl` keeps the copy you read back):
 | 0 | **1 MB chip RAM** | CPU/DMA see 384 KB; writes to `$60000-$FFFFF` are dropped | CPU/DMA see `$00000-$FFFFF` |
 | 1 | **raster DMA list** | off | DMA list at `$FFD71F4-7` runs every frame |
 | 2 | **64 KB colour RAM** | 32 KB, `$FF88000-$FF8FFFF` mirrors `$FF80000-` | 64 KB, separate halves |
-| 3 | (24 extra sprites: branch `k325t-extra-sprites`, not in this build) | | |
+| 3 | **unpainted pixels as background** | raster buffer never cleared: unpainted pixels keep an earlier line's, a line ends at its last painted pixel | unpainted pixels show the screen colour, lines run to the full text width (`docs/rrb_list_mode.md`) |
 | 4 | **fast RRB painting** | VIC-IV paints 1 pixel per cycle | 2 pixels per cycle: about twice the RRB layers per line |
 | 5, 6 | **RRB list mode** v1 / v2 | off | object lists per row / global object table (below) |
 | 7 | **fast token path** (with bit 4) | 8 cycles per glyph token, 16 per full-colour glyph | tokens pipelined: 4 per full-colour glyph, 6 per plain glyph |
