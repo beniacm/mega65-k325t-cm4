@@ -30,6 +30,10 @@ must equal B with the bit on (list mode changes nothing in rows without a LIST t
      H1 3 x 81 glyphs on DBLRR's schedule (the old path completes there), bit 7 off == on, and
      V200 one line per painting with bit 7 (counters); H2 V400 3 x 41 glyphs, bit 7 off == on; H3 V200 and V400 3 x 81 glyphs
      + 12 v2 object parts in one row == the parts as plain tokens; counter 25 < 2590, 23 == 0.
+  I) list mode v2 collisions: objects placed to collide / not collide (groups, mask 0, group 0,
+     negative Y, REL, width, height, touching edges); the table $FFD71A0-BF, the partners
+     ($FFD71C1/C2), the count ($FFD71C3) and $FFD71C0 against a model; IRQ pending with the
+     enable set (the IRQ itself is tested from BASIC)
   G3) the same as G with DBLRR ($D051 = $C0) on its schedule: V400 timing with 25 rows (paints
      every other line, each painting shown on two lines), the two-line list mode lead.
      Restores $D031/$D07B/$D05B/$D054/$D051 and XCTL.
@@ -161,10 +165,13 @@ def xctl(bit5, bit6=0):
     poke(XCTL, [x | bit5 << 5 | bit6 << 6])
 
 
-def v2obj(x, rel=0, y=0, h=ROWS, flipx=0, mask=0xFF, obj=OBJ, objcol=OBJCOL, stride=0):
-    """16-byte list mode v2 object (docs/rrb_list_mode.md)"""
-    return w(x | rel << 10) + w(y) + [mask, h, (obj >> 16 & 0xF) | flipx << 4, 0] \
-        + w(obj & 0xFFFF) + w(objcol) + w(stride) + w(0)
+def v2obj(x, rel=0, y=0, h=ROWS, flipx=0, mask=0xFF, obj=OBJ, objcol=OBJCOL, stride=0, grp=0,
+          width=0, yrel=0):
+    """16-byte list mode v2 object (docs/rrb_list_mode.md); grp: collision group mask (+7),
+    width: collision box width in pixels (+14, 0 = 8)"""
+    return w(x | rel << 10) + w((y & 0x3FF) | yrel << 10) + [mask, h, (obj >> 16 & 0xF) | flipx << 4,
+                                                           grp] \
+        + w(obj & 0xFFFF) + w(objcol) + w(stride) + [width, 0]
 
 
 def v2table(tab):
@@ -365,10 +372,12 @@ def run():
     ok_g = case_g(d_s, d_c)
     # H) three full-colour layers per row with the fast token path (XCTL bit 7)
     ok_h = case_h(d_s, d_c)
+    # I) list mode v2 collisions ($FFD71A0-C3)
+    ok_i = case_i()
 
     # a handful of pixels differ between any two captures of the same picture (capture noise)
     print("RRB_LIST_TEST_%s" % ("PASS" if max(n1, n2, n3, n4, n5, n6, n7, n8) <= NOISE and ok_g
-                                and ok_h else "FAIL"))
+                                and ok_h and ok_i else "FAIL"))
 
 
 FCM_H = 0x1410                                            # H: full-colour layer glyphs ($50400)
@@ -484,6 +493,94 @@ def case_h(d_s, d_c):
         poke(XCTL, [x0])
         for a, v in regs.items():
             poke(a, [v])
+    return ok
+
+
+COL = 0xFFD71A0                                           # I: collision table, $C0-$C3 at +$20
+
+
+def col_model(objs):
+    """expected collision result for objects (x, xrel, y, yrel, mask, h, grp, width): REL X/Y
+    from the previous object, Y signed 10 bit, box X..X+W-1 x Y..Y+8H-1; collide if both draw
+    masks and group masks are non-zero, the groups share a bit and the boxes overlap; the first
+    partner is the lowest-numbered one"""
+    boxes, ax, ay = [], 0, 0
+    for x, xrel, y, yrel, mask, h, grp, width in objs:
+        ax = (ax + x) % 1024 if xrel else x % 1024
+        ay = (ay + y) % 1024 if yrel else y % 1024
+        y0 = ay - 1024 if ay >= 512 else ay
+        hh = (h % 64) or 1
+        boxes.append((ax, ax + (width or 8) - 1, y0, y0 + 8 * hh - 1, grp, mask != 0 and grp != 0))
+    part = [255] * 256
+    for i, a in enumerate(boxes):
+        for j in range(i + 1, len(boxes)):
+            b = boxes[j]
+            if a[5] and b[5] and a[4] & b[4] and a[0] <= b[1] and b[0] <= a[1] \
+                    and a[2] <= b[3] and b[2] <= a[3]:
+                part[i] = min(part[i], j)
+                part[j] = min(part[j], i)
+    bits = [p != 255 for p in part]
+    return bits, part, sum(bits)
+
+
+def case_i():
+    """I: list mode v2 collisions.  Objects placed to collide / not collide (groups, mask 0,
+    group 0, negative Y, REL, width, height, touching edges); after two frames the table at
+    $FFD71A0-BF, the partners ($FFD71C1/C2), the count ($FFD71C3) and the status ($FFD71C0: bit 0
+    a collision, bit 7 IRQ pending with bit 1 enabled) must match the model; then a table where
+    nothing collides; the IRQ enable is cleared again at the end (the CPU is stopped)."""
+    import time
+    x0 = peek(XCTL)[0]
+    cases = (
+        ("I colliding", [(10, 0, 10, 0, 255, 1, 1, 0), (14, 0, 14, 0, 255, 1, 1, 0),
+                         (14, 0, 14, 0, 255, 1, 2, 0), (16, 0, 16, 0, 255, 1, 3, 0),
+                         (12, 0, 12, 0, 0, 1, 1, 0), (2, 1, 0, 1, 255, 1, 1, 0),
+                         (300, 0, -5, 0, 255, 1, 4, 0), (300, 0, 2, 0, 255, 1, 4, 0),
+                         (300, 0, 3, 0, 255, 1, 0, 0), (500, 0, 100, 0, 255, 1, 8, 1),
+                         (501, 0, 100, 0, 255, 1, 8, 0), (499, 0, 107, 0, 255, 1, 8, 2),
+                         (700, 0, 200, 0, 255, 4, 16, 255), (950, 0, 231, 0, 255, 1, 16, 0),
+                         (955, 0, 231, 0, 255, 1, 16, 0), (1020, 0, 500, 0, 255, 63, 32, 8),
+                         (1, 1, 503, 0, 255, 1, 32, 0)]),
+        ("I apart", [(40 * k, 0, 8 * k, 0, 255, 1, 255, 8) for k in range(20)]))
+    ok = True
+    try:
+        poke(COL + 0x20, [0x01])                              # IRQ off, clear bits 0 and 7
+        for name, objs in cases:
+            xctl(0)
+            v2table(b"".join(bytes(v2obj(x, rel=xr, y=y, yrel=yr, mask=m, h=h, grp=g, width=wd))
+                             for x, xr, y, yr, m, h, g, wd in objs))
+            xctl(0, 1)
+            time.sleep(0.2)                                   # a few frames: a pass each
+            poke(COL + 0x20, [0x01])                          # clear, then one more pass
+            time.sleep(0.1)
+            got = list(peek(COL, 16)) + list(peek(COL + 16, 16))
+            st = peek(COL + 0x20, 4)
+            bits, part, count = col_model(objs)
+            exp = [sum(1 << b for b in range(8) if bits[8 * n + b]) for n in range(32)]
+            parts = []
+            for k in range(len(objs) + 2):
+                poke(COL + 0x21, [k])
+                parts.append(peek(COL + 0x22)[0])
+            good = got == exp and st[3] == count and parts == part[:len(objs) + 2] \
+                and (st[0] & 1) == (1 if count else 0) and (st[0] & 0x80) == (0x80 if count else 0)
+            print("%s: %d objects collided (expected %d), status $%02X, table %s, partners %s%s"
+                  % (name, st[3], count, st[0], "ok" if got == exp else "differs %s" % got[:4],
+                     parts[:len(objs)], "" if good else "  <-- FAIL (expected %s)" % part[:len(objs)]))
+            ok = ok and good
+        # IRQ enable: bit 1 reads back, bit 7 pending once a colliding frame came
+        xctl(0)
+        v2table(b"".join(bytes(v2obj(x, rel=xr, y=y, yrel=yr, mask=m, h=h, grp=g, width=wd))
+                         for x, xr, y, yr, m, h, g, wd in cases[0][1]))
+        xctl(0, 1)
+        poke(COL + 0x20, [0x03])                              # enable, clear
+        time.sleep(0.1)
+        st = peek(COL + 0x20)[0]
+        print("I IRQ enabled: status $%02X (expected $83: pending, enabled, a collision)" % st)
+        ok = ok and st == 0x83
+    finally:
+        poke(COL + 0x20, [0x01])                              # IRQ off, cleared
+        xctl(0)
+        poke(XCTL, [x0])
     return ok
 
 

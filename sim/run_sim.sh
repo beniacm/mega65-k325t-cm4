@@ -80,7 +80,8 @@ ghdl -e --std=08 -frelaxed --workdir=c64work tb_rk_flash
 ghdl -r --std=08 -frelaxed --workdir=c64work tb_rk_flash --stop-time=5ms 2>&1 | sed 's/.*(report note): //;s/.*(assertion failure): /FAIL: /'
 
 # K325T RRB list mode: rrb_list_expander, v1 (entries per row; buffer-full case at LIMIT 24) and
-# v2 (global object table: copy, scan, counts, aborts, overflow, mfree stall), MLAT 3 and 4
+# v2 (global object table: copy, scan, counts, aborts, overflow, mfree stall), MLAT 3 and 4;
+# v2 collisions (tb_rrb_collide)
 ghdl -a --std=08 -frelaxed --workdir=k325work $V/rrb_list_expander.vhdl tb_rrb_list_expander.vhdl tb_rrb_list_v2.vhdl
 ghdl -e --std=08 -frelaxed --workdir=k325work tb_rrb_list_expander
 ghdl -e --std=08 -frelaxed --workdir=k325work tb_rrb_list_v2
@@ -92,3 +93,18 @@ for m in 3 4; do
   ghdl -r --std=08 -frelaxed --workdir=k325work tb_rrb_list_v2 -gMLAT=$m --ieee-asserts=disable 2>&1 \
     | grep -v "simulation stopped" | sed 's/.*(report note): //;s/.*(report failure): /FAIL: /;s/.*(assertion failure): /FAIL: /'
 done
+# list mode v2 collisions: the per-frame pass over the snapshot against a model (designed and
+# random boxes, groups, REL, negative Y, 255 objects, double buffering, held snapshot)
+ghdl -a --std=08 -frelaxed --workdir=k325work tb_rrb_collide.vhdl
+ghdl -e --std=08 -frelaxed --workdir=k325work tb_rrb_collide
+for m in 3 4; do
+  ghdl -r --std=08 -frelaxed --workdir=k325work tb_rrb_collide -gMLAT=$m --ieee-asserts=disable 2>&1 \
+    | grep -v "simulation stopped" | grep "PASS\|FAIL\|failure\|error" | sed 's/.*(report note): //;s/.*(report failure): /FAIL: /;s/.*(assertion failure): /FAIL: /'
+done
+
+# soft_rtc: calendar, and the list mode v2 collision registers ($FFD71A0-C3: copy on the
+# VIC-IV's toggle, partner / $FF, status latch, IRQ line, acknowledge, reset)
+mkdir -p rtcwork
+ghdl -a --std=08 -frelaxed --workdir=rtcwork $V/soft_rtc.vhdl tb_soft_rtc.vhdl
+ghdl -e --std=08 -frelaxed --workdir=rtcwork tb_soft_rtc
+ghdl -r --std=08 -frelaxed --workdir=rtcwork tb_soft_rtc 2>&1 | grep "PASS\|FAIL\|failure" | sed 's/.*(report note): //;s/.*(assertion failure): /FAIL: /'

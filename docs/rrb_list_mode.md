@@ -82,11 +82,11 @@ Object (16 bytes):
 | +4 | draw mask, ANDed with the computed one (`$FF` normally, `0` hides the object) |
 | +5 | bits 5..0: height in character rows, 0..63 (0 = 1); bits 7..6 ignored |
 | +6 | bits 3..0 screen address 19..16, 4 FLIPX, 5 FLIPY, 6 transparent, 7 behind |
-| +7 | reserved (collision group, step 3) |
+| +7 | collision group mask: one bit per group (0 = never collides; "Collisions") |
 | +8 | screen address 15..0 of object row 0's tokens (an RRB token list ending with `$FFFF`) |
 | +10 | colour RAM offset of object row 0's tokens |
 | +12 | row stride: bytes from one object row's tokens to the next (screen and colour) |
-| +14 | reserved |
+| +14 | collision box width in pixels (0 = 8) |
 
 - **Snapshot per frame**: at the top of every frame (unless HOLD is set) the VIC-IV copies the
   table into its own table RAM (LUT RAM, 512 x 64 bits, no block RAM). The count is part of the
@@ -123,6 +123,53 @@ Object (16 bytes):
   object part drawn, in the badline's line time (shared with the row fetch and painting the
   row's first raster line: see "First raster line budget"); vertical sub-row positioning needs
   full-colour/NCM glyphs, as in v1.
+
+## Collisions
+
+Once per frame the VIC-IV compares every pair of objects of the frame's snapshot (list mode v2,
+XCTL bit 6) and reports which objects overlap -- like the VIC-II's sprite collision register, for
+up to 255 objects.
+
+- **Box** of an object: X .. X + W - 1 (W = +14, 0 = 8 pixels), Y .. Y + 8 H - 1 (H = +5 bits
+  5..0, 0 = 1 row; Y signed, -512..511); X and Y after REL, exactly as the rows are drawn. The box
+  does not depend on the glyphs (an object 3 glyphs wide sets W = 24).
+- Two objects collide if both have a **draw mask** (+4) /= 0 and a **group mask** (+7) /= 0, the
+  group masks share a bit ((A and B) /= 0) and the boxes overlap (touching edges count: X 0..7
+  and X 7..14 overlap at 7).
+- The **pass** runs after the frame's table copy (with HOLD set: on the held snapshot, every
+  frame): all pairs i < j, one pair per pixel cycle, n (n - 1) / 2 + ~7 n cycles: 255 objects
+  34164 cycles = 13.2 raster lines, 60 objects ~2200. The copy and the pass start at the top of
+  the frame (vertical blank), so the result of frame N's positions is complete long before
+  frame N's first text row (PAL: the copy of 255 objects ~4100 cycles + the pass ~34200 = ~15
+  lines; the text starts ~100 lines later). It uses its own box RAM, so it never delays a row.
+  The next copy waits for a pass still running (it cannot happen in a normal frame).
+- **Results**, double buffered: the pass writes the working set; at its end it becomes the
+  readable one in one step (a pass's results are never mixed with another's), and the CPU
+  side copies it: a bit per object (collided this pass), the **first partner** per object (the
+  lowest-numbered object it collides with), the number of collided objects.
+
+| address | meaning |
+|---|---|
+| `$FFD71A0-$FFD71BF` | read: collided objects of the last pass, byte n bit b = object 8n + b |
+| `$FFD71C0` | read: bit 0 = a pass found a collision (latched until cleared), bit 1 = IRQ enable, bit 7 = IRQ pending (set together with bit 0); write: bit 1 = IRQ enable, bit 0 = 1 clears bits 0 and 7 |
+| `$FFD71C1` | write: object number; read: it back |
+| `$FFD71C2` | read: first partner of that object ($FF: none) |
+| `$FFD71C3` | read: number of collided objects in the last pass (0..255) |
+
+- **IRQ**: with bit 1 set, the IRQ line is active while bit 7 is set, i.e. from the end of a
+  pass with a collision until the program writes bit 0 = 1. It is one more input of the
+  iomapper's IRQ (like the CIAs, Ethernet, UART), so the CPU takes it like any peripheral IRQ;
+  the handler checks `$FFD71C0` bit 7 and acknowledges by writing `$03` (keep enabled) or `$01`.
+- The table and the count change only when a pass ends (once per frame, ~line 15). Reading the
+  32 bytes across that moment can mix two passes (read them right after the IRQ, or poll bit 0,
+  read, then clear). `$FFD71C2` reads the partner from the VIC-IV's readable buffer, which
+  switches a few CPU cycles before the CPU-side copy of the table.
+- From BASIC (polling): `IF PEEK($FFD71C0) AND 1 THEN` read `$FFD71A0+N/8` bit `N AND 7`, or
+  `POKE $FFD71C1,N : P = PEEK($FFD71C2)`; then `POKE $FFD71C0,1`.
+
+Hardware: `rrb_list_expander.vhdl` (box RAM written during the copy; the pass; double buffers),
+`viciv.vhdl` (a tick per frame), `soft_rtc.vhdl` (registers, CPU-side copy on a toggle, IRQ),
+`iomapper.vhdl` (IRQ input), `machine.vhdl` (wiring).
 
 ## How the VIC-IV does it
 
@@ -422,6 +469,13 @@ before 2592.
 
 ## Tests
 
+- GHDL collisions (`sim/tb_rrb_collide.vhdl` in `run_sim.sh`, MLAT 3 and 4): the pass against a
+  model -- designed boxes (overlap, touching edges, groups, mask 0, group 0, negative Y, REL,
+  widths, heights), six random tables of 60 objects, 255 overlapping objects (and the pass's
+  cycle budget), double buffering (the old result stays readable during a pass), a pass on the
+  held snapshot, a copy requested during a pass (waits), 0 and 1 objects.
+  `sim/tb_soft_rtc.vhdl`: the CPU side (copy on the toggle, `$FFD71A0-C3`, partner `$FF`,
+  latched bit 0, IRQ line, acknowledge, reset).
 - GHDL (`sim/run_sim.sh`, MLAT 3 and 4): the expansion FSM with a fake screen/colour RAM
   (token streams in, buffer contents out), including REL, FLIPX/FLIPY, empty lists, `$FFFF`
   handling, buffer overflow and aborts; v2: copies with count 0/255 and count changes, user
@@ -441,7 +495,8 @@ before 2592.
   picture built with plain GOTOX tokens; v2 two-row objects, short rows, a sprite in the opened
   top border during the copy; G/G2: V400 objects at the left edge and 30 parts in a row, late
   pixel counter; G3: the same with DBLRR on the V400 schedule; H: three full-colour layers with
-  the fast token path against the old path / plain parts), then the demos.
+  the fast token path against the old path / plain parts; I: collisions against a model, the
+  registers and the IRQ pending bit), then the demos.
 - Regression: intro-disk demo run with the bit clear.
 
 ## Demos
