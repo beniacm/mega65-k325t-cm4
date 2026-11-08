@@ -340,6 +340,7 @@ rockchip/deploy/        # setup_rockchip.sh check|install + the board's /boot/co
 scripts/c64_run.sh      # C64 core: load, mount k325t.d64, LOAD+RUN a program, capture
 scripts/mkd64.py        # BASIC V2 text / PRG files -> D64;  scripts/crt_banksum.py: expected CRT bank sums
 scripts/b65_run.sh      # B65 BASIC: build/load/start it; `demo FILE.bas` also types a program
+scripts/bas65_run.sh    # BASIC 65 program from a text file: tok65 (b65-basic repo) -> PRG -> m65run, seconds
 scripts/rrb_list_test.py, scripts/rrb_diag.py   # RRB list mode: pixel-exact board test, hardware counters
 scripts/demos/          # BASIC 65 / B65 demos (type them in; see docs/rrb_list_mode.md)
 # m65d ignores any status without the bridge magic: while the FPGA is reprogrammed, MISO floats
