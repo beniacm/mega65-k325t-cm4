@@ -174,6 +174,7 @@ class Daemon:
         self.core = None
         self.next_core_check = 0.0
         self.rtc_due = 0
+        self.rtc_repeat = False
         self.last_down = None
         self.sent = None
         self.lat = []           # (device kind, event -> SPI write seconds), last 4000
@@ -314,9 +315,13 @@ class Daemon:
             pass
         return None
 
-    def rtc_write(self):
-        t = self.rtc_due
-        self.rtc_due = int(t) + 3600                  # and again every hour
+    def rtc_write(self, immediate=False):
+        # immediate: right now, unaligned (a core just appeared: BASIC prints its banner from the
+        # RTC about 4 s after the reconfiguration, so the first write must not wait for a second
+        # boundary; the aligned repeat 2 s later restores the sub-second accuracy)
+        t = time.time() if immediate else self.rtc_due
+        if not immediate:
+            self.rtc_due = int(t) + 3600              # and again every hour
         if self.core != 1:
             return
         if not ntp_synced():
@@ -331,6 +336,9 @@ class Daemon:
         try:
             self.monitor("sffd7110 " + " ".join("%02x" % v for v in regs), wait=False)
             print("m65d: RTC set to %s" % time.strftime("%Y-%m-%d %H:%M:%S", lt), flush=True)
+            if self.rtc_repeat:                       # a core start: set it again shortly, in
+                self.rtc_repeat = False               # case the first write met the boot
+                self.rtc_schedule(5.0)
         except OSError as e:
             print("m65d: RTC set failed: %s" % e, flush=True)
 
@@ -612,17 +620,22 @@ class Daemon:
         while self.inp.actions:
             self.system_action(self.inp.actions.pop(0))
         if now >= self.next_core_check:        # which core runs: cursor key encoding
-            self.next_core_check = now + 2.0
+            self.next_core_check = now + 0.25
             c = self.br.core_id()
             down = self.bridge_down()
             if c == 1 and down is not None and self.last_down is not None and down > self.last_down:
-                self.rtc_schedule(2.0)                # the FPGA was away (reconfigured): set it again
+                self.rtc_write(immediate=True)        # the FPGA was away (reconfigured): set it again
+                self.rtc_schedule(2.0)
+                self.rtc_repeat = True
             if down is not None:
                 self.last_down = down
             if c is not None and c != self.core:
                 self.core = c
                 if c == 1:
-                    self.rtc_schedule(2.0)            # MEGA65 (re)configured: its RTC is unset
+                    self.rtc_write(immediate=True)    # MEGA65 (re)configured: its RTC is unset;
+                    self.rtc_schedule(2.0)            # write now, aligned again in 2 s and 5 s
+                    self.rtc_repeat = True            # later (BASIC's banner reads the RTC once,
+                                                      # ~4 s after the reconfiguration)
                 self.inp.matrix_cursor = c != 2
                 self.input_dirty = True
                 print("m65d: core %s, cursor up/left %s" % (

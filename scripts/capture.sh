@@ -91,8 +91,10 @@ echo
 
 echo "Capturing $FRAMES frames -> $OUT"
 # Warm-up frames: cheap dongles need a few frames to lock to a new timing.
+# Ask for 720x576 YUYV explicitly: after a USB re-enumeration the MS2130 defaults to 1920x1080
+# and the tests compare pixels at the 576p geometry.
 if ! timeout 30 ffmpeg -hide_banner -loglevel warning -y \
-      -f v4l2 -i "$DEV" -frames:v "$FRAMES" -update 1 "$RAW" 2>&1; then
+      -f v4l2 -input_format yuyv422 -video_size 720x576 -i "$DEV" -frames:v "$FRAMES" -update 1 "$RAW" 2>&1; then
   echo "ffmpeg failed" >&2
   exit 1
 fi
