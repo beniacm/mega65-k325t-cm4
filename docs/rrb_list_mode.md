@@ -159,6 +159,51 @@ finishes that idea in its own states instead of touching the skeleton.
   doubles it).
 - BRAM: one more 18 Kb block for the colour row buffer.
 
+## Diagnostic counters
+
+Hardware counters in the VIC-IV (pixel clock, 81 MHz) for the list mode path, read through the
+K325T page; `scripts/rrb_diag.py` (print / `clear` / `watch SECONDS`) reads them via the serial
+monitor. Not gated by XCTL; reset does not clear them.
+
+| address | meaning |
+|---|---|
+| `$FFD71E0` | write: select counter 0..31; read: the selected index |
+| `$FFD71E1` / `$FFD71E2` | read: low / high byte of the selected counter |
+| `$FFD71E3` | write (any value): clear all counters and maxima; reads 0 |
+
+The value crosses from the pixel clock to the CPU clock through two registers on each side:
+allow a few CPU cycles after a select, and read until two reads agree (a 16-bit read can tear
+while the counter moves). The clear is a toggle (synchronised and edge-detected in the
+VIC-IV), so it works for any CPU write timing. Counters are 16 bit and stick at `$FFFF`
+(except 9, which wraps); unused indices read 0.
+
+| # | counts |
+|---|---|
+| 0 | frames: table copy starts (`exp_copy_start`) |
+| 1 | copies finished (`exp_copying` falls) |
+| 2 / 3 | expansions started (`exp_start`) / finished (`exp_done`) |
+| 4 | expander aborts (`exp_abort`, both the line-start and the overtime abort) |
+| 5 | line start while in ListWait waiting for the copy: the kept first text row painted plainly |
+| 6 | v2 rows painted plainly by the full-row guard (append point beyond LIMIT - 2) |
+| 7 | port collisions: expander read in a cycle where the VIC-IV reads too (must stay 0) |
+| 8 | expansions ended by the buffer limit (expander `ovf`: EntWait, ObjDrain, Scan, HitEmit) |
+| 9 | object parts / v1 entries emitted (Gotox0), wraps |
+| 10 | max expansion duration, pixel cycles from start to done (aborted ones not counted) |
+| 11 | max copy duration, pixel cycles from copy start to `exp_copying` falling |
+| 12 | copy stall cycles (bytes left to issue, port not free) |
+| 13 | expansions of rows ended by `$FFFF` (`row_short`) |
+| 14 | line starts during an expansion without `exp_done` in that cycle (abort cause; 4 counts all) |
+| 15 | v2 expansions started with `start_scan` (rows without a LIST token) |
+| 16 | max pixel cycles from copy start to the first copy read |
+| 17 | line starts in ListWait (no copy running) in the edge where the ListWait arm decides: its assignment (ListRun or FetchFirstCharacter) wins over the line start's |
+| 18 | line starts in ListRun in the `exp_done` edge (ListRun's FetchFirstCharacter wins) |
+| 19 | expansions started while copying (must stay 0) |
+| 20 / 21 | `ycounter` at the last copy end / the last abort (values, not counts) |
+| 22 | line starts in ListWait while copying, in the border-line branch (its FetchFirstCharacter wins over the line start; also in 5) |
+
+Expected with HOLD off: 0 == 1 (one per frame); 2 == 3 + 4; 7 == 0 and 19 == 0 always; 10 and
+11 compare with one raster line (2592 pixel cycles).
+
 ## Tests
 
 - GHDL (`sim/run_sim.sh`, MLAT 3 and 4): the expansion FSM with a fake screen/colour RAM

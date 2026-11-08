@@ -122,6 +122,9 @@ def setup(scr, col, chars, step=STEP, linestep=None):
     linestep = step if linestep is None else linestep
     poke(0xFFD305D, [peek(0xFFD305D)[0] & 0x7F])              # HOTREG off: BASIC's VIC-II writes
                                                               # would recompute LINESTEP etc.
+    poke(0xFFD3031, [peek(0xFFD3031)[0] & ~8])                # V200, 25 rows of 8 lines x 2: the
+    poke(0xFFD307B, [ROWS - 1])                               # V400 demos leave the VIC-IV in V400
+    poke(0xFFD305B, [1])                                      # (HOTREG is off: set the three)
     poke(0xFFD3054, [peek(0xFFD3054)[0] | 1])                 # CHR16
     poke(0xFFD3058, [linestep & 0xFF, linestep >> 8])         # LINESTEP
     poke(0xFFD305E, [chars & 0xFF])
