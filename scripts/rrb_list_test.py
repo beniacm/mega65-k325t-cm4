@@ -21,6 +21,12 @@ must equal B with the bit on (list mode changes nothing in rows without a LIST t
   F) a VIC-II sprite (0: X 100, Y 10, solid 24x21) above the first text row, top border opened
      (TBDRPOS 0), captured with XCTL bit 6 off and on (255 objects, copied every frame at the
      top of the frame): the sprite's rows must be identical
+  G) V400 (50 rows, one line per glyph row), fast RRB, 80 background glyphs: v2 two-row objects
+     (case D's) at X 0, 10, 600 at Y = 8k + 3 (alone, and three in one row) against plain GOTOX
+     rows painted with XCTL bit 5 on (the list mode lead makes them complete); G2: 15 one-glyph
+     two-row objects, 30 parts in one row.  The late-pixel counter (23) must stay 0 with the
+     lead; without it the plain reference is late on its badlines (printed, expected > 0).
+     Restores $D031/$D07B/$D05B/$D054 and XCTL.
 Stops the CPU (monitor t1) while it runs, so BASIC 65 cannot touch the VIC-IV; leaves the
 VIC-IV changed (reset afterwards).
 
@@ -100,38 +106,44 @@ def entry(word0, mask=0xFF, flipx=0, flipy=0, transp=0, behind=0):
     return w(word0) + w(w1) + w(OBJ & 0xFFFF) + w(OBJCOL)
 
 
-def background():
+def background(n=BG):
     s, c = [], []
-    for i in range(BG):
+    for i in range(n):
         s += w(160)                       # reverse space = solid block
         c += [0x00, 6 if i % 2 else 14]   # blue / light blue stripes
     return s, c
 
 
-def setup(scr, col, chars, step=STEP, linestep=None):
-    """scr/col: one row (every row its own copy) or a list of ROWS rows; rows step bytes apart"""
-    rows_s = scr if isinstance(scr[0], list) else [scr] * ROWS
-    rows_c = col if isinstance(col[0], list) else [col] * ROWS
+def setup(scr, col, chars, step=STEP, linestep=None, rows=ROWS, colofs=COLOFS, v400=False):
+    """scr/col: one row (every row its own copy) or a list of rows rows; rows step bytes apart.
+    v400: 2 x 25 rows of one line per glyph row ($D031 bit 3, $D07B, $D05B 0), else V200"""
+    rows_s = scr if isinstance(scr[0], list) else [scr] * rows
+    rows_c = col if isinstance(col[0], list) else [col] * rows
     s, c = [], []
     for rs, rc in zip(rows_s, rows_c):
         assert len(rs) <= step and len(rc) <= step and (step - len(rs)) % 2 == 0
         s += rs + [0x20, 0] * ((step - len(rs)) // 2)
         c += rc + [0] * (step - len(rc))
     load(SCR, s)
-    load(COLRAM + COLOFS, c)
+    load(COLRAM + colofs, c)
     linestep = step if linestep is None else linestep
     poke(0xFFD305D, [peek(0xFFD305D)[0] & 0x7F])              # HOTREG off: BASIC's VIC-II writes
                                                               # would recompute LINESTEP etc.
-    poke(0xFFD3031, [peek(0xFFD3031)[0] & ~8])                # V200, 25 rows of 8 lines x 2: the
-    poke(0xFFD307B, [ROWS - 1])                               # V400 demos leave the VIC-IV in V400
-    poke(0xFFD305B, [1])                                      # (HOTREG is off: set the three)
+    if v400:                                                  # as the B65 V400 demo does it
+        poke(0xFFD3031, [peek(0xFFD3031)[0] | 8])
+        poke(0xFFD307B, [rows - 1])
+        poke(0xFFD305B, [0])
+    else:
+        poke(0xFFD3031, [peek(0xFFD3031)[0] & ~8])            # V200, 25 rows of 8 lines x 2: the
+        poke(0xFFD307B, [rows - 1])                           # V400 demos leave the VIC-IV in V400
+        poke(0xFFD305B, [1])                                  # (HOTREG is off: set the three)
     poke(0xFFD3054, [peek(0xFFD3054)[0] | 1])                 # CHR16
     poke(0xFFD3058, [linestep & 0xFF, linestep >> 8])         # LINESTEP
     poke(0xFFD305E, [chars & 0xFF])
     d063 = peek(0xFFD3063)[0]
     poke(0xFFD3060, [SCR & 0xFF, SCR >> 8 & 0xFF, SCR >> 16 & 0xFF,
                      (d063 & 0xC0) | ((chars >> 8) & 3) << 4 | (SCR >> 24 & 0x0F)])
-    poke(0xFFD3064, [COLOFS & 0xFF, COLOFS >> 8])
+    poke(0xFFD3064, [colofs & 0xFF, colofs >> 8])
 
 
 def xctl(bit5, bit6=0):
@@ -335,8 +347,97 @@ def run():
         print("F sprite not visible (no difference with / without it): %s %s"
               % (os.path.basename(p_fns), os.path.basename(p_foff)))
 
+    # G) V400 + fast RRB: objects at the left edge on the badlines (first raster line budget)
+    ok_g = case_g(d_s, d_c)
+
     # a handful of pixels differ between any two captures of the same picture (capture noise)
-    print("RRB_LIST_TEST_%s" % ("PASS" if max(n1, n2, n3, n4, n5, n6, n7, n8) <= NOISE else "FAIL"))
+    print("RRB_LIST_TEST_%s" % ("PASS" if max(n1, n2, n3, n4, n5, n6, n7, n8) <= NOISE and ok_g
+                                else "FAIL"))
+
+
+def late_capture():
+    """capture with the list mode counters cleared before; returns the late-pixel count (23),
+    the longest painting (25: line start -> end of the row's tokens, pixel cycles; a painting
+    cut off by the next line start counts ~2592) and the latest first object (26)"""
+    from rrb_diag import read_counter, CLR
+    poke(CLR, [0])
+    p, img = capture()
+    return p, img, {n: read_counter(n) for n in (23, 25, 26)}
+
+
+def case_g(d_s, d_c):
+    """G / G2: V400 (50 rows of one line per glyph row), 80 background glyphs, fast RRB, v2
+    two-row objects at Y = 8k + 3 (G: case D's object, X 0, 10 and 600, alone and three in one
+    row; G2: 15 one-glyph objects, 30 parts in one row).  The reference is the same picture with
+    plain GOTOX rows (80 background glyphs, the parts, a repaint of the last background glyph);
+    painted with XCTL bit 5 on (no LIST token: only the list mode lead) it is complete on every
+    line, so the whole screen is compared.  The late-pixel counter must stay 0 for the
+    reference with the lead and for v2; the reference with bits 5/6 off is incomplete on its
+    badlines (objects painted after 80 glyphs and the row fetch): informational."""
+    from PIL import ImageChops
+    regs = {a: peek(a)[0] for a in (0xFFD3031, 0xFFD307B, 0xFFD305B, 0xFFD3054)}
+    x0 = peek(XCTL)[0]
+    bs, bc = background(80)
+    obj_e, objcol_g = 0x48200, 0x7E00                         # G2 object; colour of G's objects
+    poke(obj_e, w(FCM_G) + w(0xFFFF) + w(FCM_G + 2) + w(0xFFFF))      # one glyph per object row
+    poke(COLRAM + objcol_g, d_c[0] + d_c[1])                  # G: case D's object (stride 6)
+    poke(COLRAM + objcol_g + 0x10, [0, 1, 0, 0, 0, 1, 0, 0])  # G2 (stride 4)
+    e_s, e_c = [w(FCM_G) + w(0xFFFF), w(FCM_G + 2) + w(0xFFFF)], [[0, 1, 0, 0]] * 2
+    cases = (("G", [(0, 83, 2), (10, 163, 2), (600, 243, 2), (0, 323, 2), (10, 323, 2),
+                    (600, 323, 2)], d_s, d_c, OBJD, objcol_g, 6),
+             ("G2", [(42 * k, 163, 2) for k in range(15)], e_s, e_c, obj_e, objcol_g + 0x10, 4))
+    ok = True
+    try:
+        poke(0xFFD3054, [regs[0xFFD3054] | 4])                # FCLRHI: glyphs > $FF full colour
+        for name, objs, os_, oc_, oaddr, ocol, stride in cases:
+            rows_s, rows_c = [], []
+            for r in range(50):
+                ps, pc = parts(r, objs, os_, oc_)
+                rows_s.append(bs + ps)
+                rows_c.append(bc + pc)
+            n_tok = max(len(x) for x in rows_s) // 2
+            for rs, rc in zip(rows_s, rows_c):                # same CHRCOUNT for every row (D)
+                while len(rs) // 2 < n_tok:
+                    rs += gotox(8 * 79)
+                    rc += [0x10, 0xFF]
+                rs += gotox(8 * 79) + bs[-2:]                 # the line's visible end: 640
+                rc += [0x10, 0xFF] + bc[-2:]
+            # 50 rows x 512 bytes: screen $40000-$463FF, colour RAM $0000-$63FF
+            shots = {}
+            for shot, bit5, bit6 in (("off", 0, 0), ("ref", 1, 0), ("v2", 0, 1)):
+                poke(XCTL, [x0 & ~0x60 | 0x10])               # fast RRB, list mode off
+                if bit6:
+                    v2table(b"".join(bytes(v2obj(x, y=y, h=h, obj=oaddr, objcol=ocol,
+                                                 stride=stride)) for x, y, h in objs))
+                    setup(bs, bc, 80, step=512, rows=50, colofs=0, v400=True)
+                else:
+                    setup(rows_s, rows_c, n_tok + 2, step=512, rows=50, colofs=0, v400=True)
+                poke(XCTL, [x0 & ~0x60 | 0x10 | bit5 << 5 | bit6 << 6])
+                shots[shot] = late_capture()
+            poke(XCTL, [x0 & ~0x60 | 0x10])
+
+            def diff(a, b):
+                d = ImageChops.difference(a, b)
+                pts = [(i % a.size[0], i // a.size[0]) for i, p in enumerate(d.getdata())
+                       if max(p) > 40]
+                return len(pts), pts[:6]
+            n, e = diff(shots["v2"][1], shots["ref"][1])
+            n0, e0 = diff(shots["off"][1], shots["ref"][1])
+            cr, cv, co = shots["ref"][2], shots["v2"][2], shots["off"][2]
+            print("%s v2 vs ref (lead): %d px differ %s; late pixels ref %d, v2 %d (must be 0); "
+                  "longest painting ref %d, v2 %d cycles (must be < 2590: none cut off); first "
+                  "object of a v2 line at most %d cycles after its line start"
+                  % (name, n, e, cr[23], cv[23], cr[25], cv[25], cv[26]))
+            print("%s ref without the lead vs with: %d px differ %s, late pixels %d (expected > 0:"
+                  " the plain badlines are late)  (%s)" % (name, n0, e0, co[23],
+                  " ".join(os.path.basename(p) for p, _, _ in shots.values())))
+            ok = ok and n <= NOISE and cr[23] == 0 and cv[23] == 0 and cr[25] < 2590 \
+                and cv[25] < 2590
+    finally:
+        poke(XCTL, [x0])
+        for a, v in regs.items():
+            poke(a, [v])
+    return ok
 
 
 if __name__ == "__main__":

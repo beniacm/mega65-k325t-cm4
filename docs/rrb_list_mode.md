@@ -1,6 +1,7 @@
 # RRB list mode (K325T extension, after upstream issue #747)
 
-Status: implemented and verified on the board (2026-11-08); demos in `scripts/demos/`. Follows the text of
+Status: implemented and verified on the board (2026-11-08); demos in `scripts/demos/`. The list
+mode lead ("First raster line budget", step 1) is verified in simulation only, board test pending. Follows the text of
 [MEGA65/mega65-core#747](https://github.com/MEGA65/mega65-core/issues/747) ("Make RRB even more
 amazing") and its comments (relative GOTOX), plus #597 (flip per object). Our own encoding: if
 upstream implements #747 differently later, we switch to theirs.
@@ -118,9 +119,9 @@ Object (16 bytes):
 - Objects later in the table are painted later (on top).
 - REL lets a group follow an anchor: write the anchor's X/Y only. A hidden anchor (mask 0) is
   fine.
-- Limits: the scan costs about one cycle per object per character row plus ~20 cycles per
+- Limits: the scan costs about one cycle per object per character row plus ~16-20 cycles per
   object part drawn, in the badline's line time (shared with the row fetch and painting the
-  row's first raster line: see step 1 in the TODO); vertical sub-row positioning needs
+  row's first raster line: see "First raster line budget"); vertical sub-row positioning needs
   full-colour/NCM glyphs, as in v1.
 
 ## How the VIC-IV does it
@@ -148,16 +149,127 @@ Upstream's unfinished GOTO/GOSUB/RETURN skeleton in `FetchScreenRamLine2`
 (`next_token_is_goto`, `$FFFE`/`$FFFD`/`$FFFF`) is the same kind of redirection; list mode
 finishes that idea in its own states instead of touching the skeleton.
 
+## First raster line budget
+
+Step 1 of the TODO: objects must be complete on the first raster line of every character row.
+Measured before (bitstream 9719b5145, V400, 80 columns, fast RRB, 6 v2 objects): an object at
+X 10 that straddles two rows lost the badline of the lower row; at X 600 never; V200 hid it
+(two lines per glyph row); the v1 demo (12 entries per row) lost most rows on the left.
+
+### Timeline (from the code; numbers from `sim/run_viciv_lead.sh`, the real `viciv.vhdl` in GHDL)
+
+PAL 720x576 50 Hz: a raster line is 864 pixels x 3 = **2592 pixel cycles** (81 MHz). H640 with
+CHRXSCL 120: one raster buffer pixel per output pixel (one every 3 cycles). F = the line start
+(`is_fetch_start`, `xcounter` = `display_fetch_start` = 719; `xcounter` counts pixels from the
+frame generator's `x_zero`, which holds it at 0 for 3 pixels). Cycles count from F.
+
+| when | cycle | why |
+|---|---|---|
+| F: raster buffer half toggles, FSM to `FetchScreenRamLine` (badline) or `FetchFirstCharacter` | 0 | line-start block |
+| `xcounter` wraps (start of the next raster line) | ~426 | 864 - 719 - 3 pixels |
+| display reads buffer pixel X of what F painted (`$D051` NORRDEL = 1, the default: write half = read half from x = 0) | **675 + 3X** | (145 + TEXTXPOS 80 + X) x 3 |
+| next F: the FSM restarts, an unfinished painting is cut off | 2592 | one line |
+| **with the list mode lead** (below): display reads pixel X of what F painted | **3267 + 3X** | one line later |
+
+What the FSM spends after F (fast RRB, XCTL bit 4):
+
+| step | cycles |
+|---|---|
+| to the first token's dispatch | 9 |
+| badline: row fetch (`FetchScreenRamLine2`, one byte per cycle) | 1 + 2 x CHRCOUNT: **161** for 80 tokens |
+| list mode (bit 5 or 6): `ListWait` + start + `ListRun` exit | ~8 |
+| list mode: expansion (counter 10) | v2 scan ~7 + 1 per table object (13 for 6, 22 for 15 objects without a part in the row); per object part ~16-36 (1 part 36, 6 parts 128 -- the board measured 137 --, 15 parts 335, 30 parts 545) |
+| per token: normal glyph, or GOTOX whose high byte bits 4..0 are 0 | 8 (without fast RRB a normal glyph waits for the painter: ~11) |
+| per token: full-colour glyph (8 chip RAM reads) | 16 |
+| per token: GOTOX with X >= 256 or the Y offset sign (high byte bits 4..0 /= 0) while FCLRHI/FCLRLO make that glyph number full colour | 16 (it takes the full-colour fetch path) |
+| first pixels of a glyph written after its dispatch | 2-5 (2 pixels per cycle) |
+
+Measured painting ends (counter 25): 80 normal tokens 656 (non-badline) / 817 (badline); a v2
+row of 80 tokens with no object part in it 838 on its badline.
+
+Margin of a left-edge object part (X 0..10, read at 675..705) = read time - write time. Its
+GOTOX is dispatched after the row's 80 background tokens (objects are the last tokens):
+
+| line | first object part dispatched (counter 26) | margin at X 0 / X 10, without the lead | with the lead |
+|---|---|---|---|
+| non-badline, first part | 656 | ~0 / +30 (sim: one write cycle late at X 0) | +2592 |
+| non-badline, second part (after a 2-glyph part: 40-48 cycles) | ~700 | ~-45 / -15: late | ~+2550 |
+| plain GOTOX badline (fetch first) | 817 | ~-160 | ~+2430 |
+| v2 badline, 1 part in the row | 861 | ~-205 | ~+2390 |
+| v2 badline, 6 parts (expansion 128) | 953 | ~-300 | ~+2290 |
+| v2 badline, 30 parts (15 two-row objects, expansion 545) | 1370; the painting ends at **2330** | ~-715 (the last part ~-1650) | +1900; the painting ends 262 cycles before the next F |
+
+So without the lead even plain RRB is marginal at the left edge (objects painted after a full
+80-column row have ~0 cycles), and every badline is late by its fetch (+161), plus the
+expansion in list mode. 30 parts at the left edge are late on every line, list mode or not.
+
+### Design: the list mode lead
+
+Candidates, judged against the timeline:
+
+- (A) prefetch + expand the next row during the current row's last raster line into a second
+  row buffer, swap at the badline: the badline becomes a non-badline -- whose margin is ~0 for
+  the first object after an 80-token row and negative from the second part on. Not a full line
+  more, and 30 parts stay late on every line; plus a second screen and colour row buffer, the
+  per-row state twice, `$FFFF` row advances, forced badlines, pointer changes one line early.
+- (B) paint the row's own tokens while the expander appends the objects: saves at most the
+  expansion (128 cycles for 6 parts); the objects are still painted last: still ~-170.
+- (C) more lead: the VIC-IV already has it -- `$D051` NORRDEL = 0 double buffers the raster
+  buffer (the painting started at F is shown one line later), but the picture moves down one
+  line. (C) for list rows only is impossible: the half pairing holds for the whole frame.
+- **Chosen: (C) for the whole frame while XCTL bit 5 or 6 is on**, with the row schedule moved
+  one line ahead so that the picture stays where it is. Every pixel gets +2592 cycles (one full
+  line more than a plain non-badline has); the only budget left is the RRB time of a line: the
+  badline's fetch + expansion + painting must end before the next F (2592 cycles), the same rule
+  as for every RRB row. Robust for many parts (30 parts on one row: 2330 cycles).
+
+Implementation (`viciv.vhdl`, `rl_shift`), active when bit 5 or 6 is on, NORRDEL = 1 and DBLRR
+(`$D051` bit 6) = 0, latched at the top of each frame (with NORRDEL = 0 a program already has
+the delay; DBLRR paints every other line only: both keep their own timing):
+
+1. the fetch side's vertical position is `displayy + 1` (`pixels_since_last_char`,
+   `before_y_chargen_start`, `justbefore_y_chargen_start`): the whole row schedule -- chargen_y,
+   bumps, `first_card_of_row`, badlines, the forced badlines above the text area, the row 0
+   fetch, the stop after the last row, V200 double lines -- runs exactly one line earlier;
+2. the raster buffer write half is chosen as with NORRDEL = 0: the painting that starts at F of
+   line N is shown in line N + 2 (instead of N + 1), i.e. in the same line as before;
+3. the display side's text-area mask (`chargen_active` forced off above and below the text)
+   is the fetch side's mask of the line before (captured at F, taken over at x = 0), which is
+   the original mask of the line shown.
+
+Nothing changes with bits 5 and 6 off (`rl_shift` = 0: every changed expression reduces to the
+original). In the simulation the plain 80-column screen is pixel-identical with the lead on
+and off (V400), and v2 equals the plain GOTOX reference painted with the lead.
+
+**For programs, with list mode on:** everything the VIC-IV uses *while painting* takes effect
+one raster line later in the picture than without list mode, relative to the raster counter:
+screen/colour/charset pointers (`$D060`, `$D064`, `$D068`), CHRCOUNT/LINESTEP, `$D054`, the
+painted background colours `$D021-$D024`, and screen/colour/glyph data changed while the beam
+runs. A program that changes them per raster line (raster IRQ, the K325T raster DMA list) must
+do it one line earlier. Display-time things are unchanged: border colour, sprites, the raster
+counter and raster IRQs, X position/scroll. Also, a line's visible end ("a raster line ends
+where its last glyph was painted") is the line's own: without the lead the VIC-IV applies the
+end of the line painted before it (`raster_buffer_max_write_address_hold` -> `_prev` is one
+line behind with NORRDEL = 1); rows whose lines all end at the same X look the same either way.
+
 ## Limits
 
 - Row buffer: 1 KB = 512 tokens per character row after expansion (background + all objects).
 - Badline time: expansion reads 2 bytes per token (+8 per entry) from chip RAM at the pixel
-  clock; 512 tokens about 13 us of a 64 us line. The badline fetch must finish before the row's
-  first raster line; if it does not, the rest of the lists is dropped for that row (like running
-  out of RRB time).
+  clock; 512 tokens about 13 us of a 64 us line. An expansion still running at the next line
+  start is cut off and the row painted plainly.
+- Line time (see "First raster line budget"): with list mode on, every pixel a line's painting
+  writes before the next line start is shown, also on the first line of a row (the lead). The
+  badline's row fetch (1 + 2 x CHRCOUNT cycles) + expansion + painting must end within one
+  line, 2592 pixel cycles: 80 tokens + 30 object parts (one-glyph full-colour objects) need
+  2330. The 8 sprites are fetched after the painting (~100 cycles): a line that paints longer
+  loses them (as any RRB line). Counter 25 shows the longest painting.
 - Painting time per raster line is unchanged: objects still cost RRB time (fast RRB, XCTL bit 4,
-  doubles it).
-- BRAM: one more 18 Kb block for the colour row buffer.
+  doubles it): GOTOX 8 or 16 cycles (16 with X >= 256 or a Y offset sign while the glyph number
+  counts as full colour), full-colour glyph 16, normal glyph 8 (11 without fast RRB).
+- Raster effects: with list mode on, paint-time registers take effect one raster line later
+  (write them one line earlier), see "First raster line budget".
+- BRAM: one more 18 Kb block for the colour row buffer (the lead needs none).
 
 ## Diagnostic counters
 
@@ -200,9 +312,17 @@ VIC-IV), so it works for any CPU write timing. Counters are 16 bit and stick at 
 | 19 | expansions started while copying (must stay 0) |
 | 20 / 21 | `ycounter` at the last copy end / the last abort (values, not counts) |
 | 22 | line starts in ListWait while copying, in the border-line branch (its FetchFirstCharacter wins over the line start; also in 5) |
+| 23 | late pixels: raster buffer write cycles (1 or 2 pixels) into the half the display reads, at or left of the pixel it reads, inside the text area, before the line start (must stay 0; with the list mode lead 0 by construction) |
+| 24 | `ycounter` at the last late pixel (value) |
+| 25 | max pixel cycles from a line start to the end of its painting (`EndOfChargen`; a painting cut off by the next line start counts the cycles it had, ~2592): the RRB time used |
+| 26 | max pixel cycles from a line start to the dispatch of the first GOTOX of a list row's expanded part (its first object part) |
 
 Expected with HOLD off: 0 == 1 (one per frame); 2 == 3 + 4; 7 == 0 and 19 == 0 always; 10 and
-11 compare with one raster line (2592 pixel cycles).
+11 compare with one raster line (2592 pixel cycles). 23 == 0 with list mode on (the lead); with
+bits 5/6 off it counts real late pixels (e.g. plain RRB objects at the left edge on badlines).
+25 < ~2590 means no line was cut off. Without the lead an object part at X is in time only
+if it is written before 675 + 3 X cycles (26 says when the first one starts); with the lead
+before 2592.
 
 ## Tests
 
@@ -211,9 +331,16 @@ Expected with HOLD off: 0 == 1 (one per frame); 2 == 3 + 4; 7 == 0 and 19 == 0 a
   handling, buffer overflow and aborts; v2: copies with count 0/255 and count changes, user
   masks, REL Y, FLIPY, scans at any start index, overflow, a copy with the port only sometimes
   free (`sim/tb_rrb_list_v2.vhdl`).
+- GHDL, the whole VIC-IV (`sim/run_viciv_lead.sh`, ~6 min, not part of `run_sim.sh`): the real
+  `viciv.vhdl` (report-stripped copy) with a PAL frame, a chip RAM model and fastio register /
+  colour RAM writes, V400, fast RRB; frame dumps and the counters per line. Checks: plain rows
+  identical with the lead on and off; plain GOTOX reference with the lead == v2 (6 objects at
+  X 0/10/600, and 30 parts in one row); no late pixels with the lead; late pixels without it.
+  The same checks pass in V200 (`-gV400=0`, run by hand).
 - Board: `scripts/rrb_list_test.py` (pixel-exact comparison of a list-mode screen with the same
   picture built with plain GOTOX tokens; v2 two-row objects, short rows, a sprite in the opened
-  top border during the copy), then the demos.
+  top border during the copy; G/G2: V400 objects at the left edge and 30 parts in a row, late
+  pixel counter), then the demos.
 - Regression: intro-disk demo run with the bit clear.
 
 ## Demos
@@ -252,10 +379,13 @@ Expected with HOLD off: 0 == 1 (one per frame); 2 == 3 + 4; 7 == 0 and 19 == 0 a
 - `scripts/demos/rrblist65.bas` -- BASIC 65: 6 full-colour balls over an 80-column starfield,
   two list entries per ball, moved with WPOKE (type it in; m65d cannot type `^`, so powers of
   two come from a table). 200-line mode: a glyph pixel is 1 pixel wide and 2 lines tall, so
-  the 8x8 ball shows as an 8x16 ellipse; in V400 (below) it is round. The v1 demos stay in
-  the 200-line mode: in V400 their 12 entries per row (hidden ones are expanded and painted
-  too) exceed the first-raster-line budget and objects on the left lose most of their rows
-  (step 1 in the TODO).
+  the 8x8 ball shows as an 8x16 ellipse; in V400 (below) it is round. The v1 demos are written
+  for the 200-line mode. Before the list mode lead, V400 lost most rows of their objects on
+  the left (12 entries per row, hidden ones expanded and painted too, after an 80-token row:
+  late on every badline and from the second part on also on the other lines). With the lead
+  the budget is the line time only: 12 two-glyph parts after 80 tokens are ~160 + ~300 + 640 +
+  12 x 48 = ~1700 of 2592 cycles on a badline, so they can move to V400 (rows, entries and
+  `$D031`/`$D07B`/`$D05B` as in the v2 demos); not done yet.
 - `scripts/demos/rrblist_b65.bas` -- the same in B65 BASIC (type it in **lower case**: B65
   swaps the case of letters like a BBC Micro). Screen rows at `$80000`, ball glyphs at `$60000`
   (B65 uses `$40000-$5FFFF`; full-colour glyphs must stay below 512 KB).
@@ -266,7 +396,8 @@ Expected with HOLD off: 0 == 1 (one per frame); 2 == 3 + 4; 7 == 0 and 19 == 0 a
   (`$D05D` bit 7) is on (BASIC 65: yes, and the recompute keeps its charset); B65 BASIC runs
   with HOTREG off and a recompute would move CHARPTR, so its demo sets `$D07B` = 49 rows and
   `$D05B` = 0 (one line per glyph row) itself; the vertical borders are the same in V200 and
-  V400. Known until step 1: in V400 an object at the left edge that straddles two rows loses
-  the first raster line of the lower row (the badline's fetch + expansion delay the painting;
-  the beam passes the left part first). Measured with the CPU stopped: X 10 loses one 8-pixel
-  row, X 600 never; V200 hides it because every glyph row has two lines.
+  V400. Until the list mode lead ("First raster line budget") an object at the left edge that
+  straddles two rows lost the first raster line of the lower row (the badline's fetch +
+  expansion delay the painting; the beam passes the left part first). Measured with the CPU
+  stopped (bitstream 9719b5145): X 10 lost one 8-pixel row, X 600 never; V200 hid it because
+  every glyph row has two lines. With the lead no line is lost.

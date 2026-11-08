@@ -14,7 +14,9 @@ Through the serial monitor (m65d, port 4510), so each counter takes ~1.5 s to re
 
 Expected: frames == copies done (one each per frame, HOLD off), exp started == exp done +
 aborts, collisions == 0, started-while-copying == 0; the maxima are pixel cycles (81 MHz), to
-compare with one raster line = 2592 cycles.
+compare with one raster line = 2592 cycles.  Late pixels (23) == 0: with XCTL bit 5/6 on (the
+list mode lead) by construction, so there check that 25 (the longest painting, incl. the
+badline's fetch + expansion) stays below 2590: no line cut off by the next line start.
 """
 import os
 import sys
@@ -49,6 +51,10 @@ COUNTERS = {
     20: ("ycounter at the last copy end", "value"),
     21: ("ycounter at the last abort", "value"),
     22: ("line start in ListWait, copying, border branch", "count"),
+    23: ("late pixels: written behind the display (must be 0)", "count"),
+    24: ("ycounter at the last late pixel", "value"),
+    25: ("max line start -> end of painting (cycles)", "max"),
+    26: ("max line start -> first object part (cycles)", "max"),
 }
 
 
