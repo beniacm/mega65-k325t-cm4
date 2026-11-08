@@ -1,3 +1,4 @@
+5 rem per frame: 19 statements (44 with the k325t birds), 4.1 ms in xemu without the vsync wait: 50 fps
 10 rem parallax demo for basic 65: three rrb layers per row (vic-iv)
 20 rem twin of examples/parallax.bas (b65 basic): same picture, same motion.
 30 rem 80 columns, 25 rows (v200). layer 3 (stars, mountains) is painted

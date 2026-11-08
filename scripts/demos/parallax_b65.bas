@@ -1,3 +1,4 @@
+5 REM Per frame: 25 statements (39 with the K325T birds), 4.5 ms in Xemu without the vsync wait: 50 fps
 10 REM Parallax demo for B65 BASIC: three RRB layers per row (VIC-IV)
 20 REM 80 columns, 25 rows (V200). Layer 3 (stars, mountains) is painted
 30 REM first, then GOTOX + layer 2 (hills, transparent), then GOTOX + layer 1
