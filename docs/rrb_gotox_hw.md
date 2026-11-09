@@ -77,3 +77,33 @@ set 2 were opaque, its masked rows 0..7-S would paint the background over set 1'
 opaque set 1 would do the same to the base layer in rows 8-S..7. Mono glyphs do not move at all
 (they ignore the offset). S = 0 needs set 1 only (offset 0, mask `$FF`). Each set is one GOTOX
 plus its glyphs, so a scrolled line costs one extra GOTOX and a second copy of the line's tokens.
+
+## Addendum: when a row ends early, and how the following rows move
+
+1. **`$FFFF` ends the row at any token position**, not only the first. The test is the screen
+   word alone (low byte `$FF` and high byte `$FF`); the colour bytes do not matter, so a GOTOX
+   whose word is `$FFFF` (X 1023 with bits 15..10 all set) ends the row too. Other `$FFxx` words
+   do not (`$FFFE`/`$FFFD` are tokens only of the badline-program feature, normally off). That
+   token and everything after it are not painted, and the row becomes a *short row*: the next
+   character row starts at this row's start **plus the bytes up to and including the `$FFFF`**
+   instead of plus LINESTEP, for screen and colour RAM alike. A `$FFFF` k bytes before the row's
+   LINESTEP therefore moves every following row k bytes back: a staircase of k/2 tokens per row,
+   with the tokens after the `$FFFF` missing. (Only with XCTL bit 5 or 6: a `$FFFF` in the slot
+   after the last token, CHRCOUNT + 1, is ignored.) The advance is taken from the last raster
+   line of the character row.
+2. **CHRCOUNT** (`$D05E` + `$D063` bits 5..4) is the number of tokens fetched and processed per
+   row (2 bytes each in CHR16); after that many tokens the row ends. **LINESTEP** (`$D058/9`)
+   only sets where the next row starts; it does not limit the fetch (CHRCOUNT x 2 > LINESTEP
+   makes rows overlap). No other token ends a row: no GOTOX X value, no glyph number. The only
+   other limit is time: a painting still running at the next line start goes on (late pixels on
+   the right) unless `$D07C` bit 3 is set, which aborts it.
+3. **Parking a group off-screen.** X has 10 bits, and the raster buffer has 1024 positions.
+   Pixels at X >= the shown width are simply not displayed, but pixels past 1023 **wrap to X 0**
+   and paint the left edge (default; `$D07C` bit 3 = NORRBWRAP stops the wrap but also aborts late
+   paintings). Without XCTL bit 3 a line is shown up to the **last pixel written** in it, so a
+   group that wraps as the last group of the line also cuts the visible line off at its wrapped
+   end. Park so that X + the group's width <= 1023 (H320 at X 528: at most 495 pixels, e.g. 30
+   NCM tiles), or set XCTL bit 3 (lines always run to the full width).
+4. **Nothing carries over.** At the start of every raster line's row: X 0, Y offset 0, mask
+   `$FF`, opaque, not behind, normal palette, and the short-row flag cleared. A row that ends
+   early leaves only its shorter advance to the next character row.
