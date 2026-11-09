@@ -7,11 +7,17 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 entity tb_rk_sd is
+  -- TSPI: SPI half period (20 ns = 25 MHz, 12.5 ns = 40 MHz); DIN: pad -> input flip-flop delay of
+  -- SCK/MOSI/CS; DOUT: clock -> MISO pad (+ any trace/master set-up) delay seen by the master
+  -- (in ps: GHDL takes no time generics on its command line)
+  generic ( TSPI_PS : integer := 20000; DIN_PS : integer := 0; DOUT_PS : integer := 0 );
 end entity;
 
 architecture sim of tb_rk_sd is
   constant TCLK : time := 24.69 ns;          -- 40.5 MHz
-  constant TSPI : time := 20 ns;             -- 25 MHz SPI half period
+  constant TSPI : time := TSPI_PS * 1 ps;
+  constant DIN : time := DIN_PS * 1 ps;
+  constant DOUT : time := DOUT_PS * 1 ps;
   constant TFAST : time := TCLK / 4;         -- 162 MHz bridge clock
 
   signal clk : std_logic := '0';
@@ -41,6 +47,7 @@ architecture sim of tb_rk_sd is
   signal sck : std_logic := '0';
   signal scs : std_logic := '1';
   signal smosi, smiso : std_logic := '0';
+  signal sck_d, scs_d, smosi_d, smiso_d : std_logic;
 
   signal mon_rx, mon_tx : std_logic := '1';
   signal col : std_logic_vector(7 downto 0);
@@ -89,7 +96,7 @@ begin
 
   br : entity work.rk_bridge
     generic map (BIT_CLKS => 80)
-    port map (clk => clkf, cpuclk => clk, spi_sck => sck, spi_cs_n => scs, spi_mosi => smosi, spi_miso => smiso,
+    port map (clk => clkf, cpuclk => clk, spi_sck => sck_d, spi_cs_n => scs_d, spi_mosi => smosi_d, spi_miso => smiso,
               sd_rd_req => rd_req, sd_wr_req => wr_req, sd_lba => lba, sd_seq => seq,
               sd_inited => inited, sd_cmd_cnt => ccnt, sd_last_cmd => lcmd,
               sd_rd_ready => rd_ready, sd_rd_error => rd_error, sd_wr_ack => wr_ack, rbuf_addr => rba, rbuf_data => rbd,
@@ -97,6 +104,9 @@ begin
               mon_rx => mon_rx, mon_tx => mon_tx,
               matrix_col_idx => col_idx, matrix_col => col, joya => joya, joyb => joyb,
               ctrl => ctrl, pots => pots, spi_active => open);
+
+  sck_d <= transport sck after DIN; scs_d <= transport scs after DIN;
+  smosi_d <= transport smosi after DIN; smiso_d <= transport smiso after DOUT;
 
   -- Model Rockchip: SPI master + sector server + UART checks
   rk : process
@@ -112,7 +122,7 @@ begin
         smosi <= tx(i);
         wait for TSPI;
         sck <= '1';
-        v(i) := smiso;
+        v(i) := smiso_d;
         wait for TSPI;
         sck <= '0';
       end loop;
@@ -178,6 +188,7 @@ begin
       if i = 0 then xfer(x"80", b); elsif i = 8 then xfer(x"01", b); else xfer(x"00", b); end if;
     end loop;
     wait for TSPI; scs <= '1'; wait for 4*TSPI;
+    wait for 200 ns;                    -- (the cpuclk side sees the bytes 3 cpuclk cycles later)
     assert joya = "10001" and joyb = "00010" report "INPUT joy FAIL" severity failure;
     assert pots = x"FFFFFFFF" report "pots not \$FF after a 13-byte INPUT" severity failure;
     -- 17-byte INPUT: + pot1 x/y, pot2 x/y
@@ -186,6 +197,7 @@ begin
     for i in 0 to 8 loop xfer(x"00", b); end loop;
     xfer(x"12", b); xfer(x"34", b); xfer(x"56", b); xfer(x"78", b);
     wait for TSPI; scs <= '1'; wait for 4*TSPI;
+    wait for 200 ns;
     assert pots = x"12345678" report "INPUT pots FAIL" severity failure;
     report "INPUT pots ok";
 
