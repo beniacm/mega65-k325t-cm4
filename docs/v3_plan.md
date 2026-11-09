@@ -342,4 +342,7 @@ recipe; XCTL bit 3 clears rows that paint nothing, also after text and in 4 px (
 K2). (2) MEGADOTS: its decruncher writes `$D000-$DFFF` with I/O visible because `$01` is `$85` at
 READY under ROM 920413 -- the same on a stock machine (Xemu 920413: `PEEK(1)` = 133, the same
 derailed `$2001` image); a ROM incompatibility, not K325T. The CRAM2K path (`$D030` bit 0,
-`$DC00-$DFFF` = colour bytes 1024-2047) is upstream code, unchanged by the K325T commits.
+`$DC00-$DFFF` = colour bytes 1024-2047) is upstream code, unchanged by the K325T commits. (3) SKI from INTRO1.D81 (8914 bytes, decrunches to $2001-$DFFF like MEGADOTS) fails
+the same way after DLOAD + RUN on stock Xemu 920413 (DLOAD exact, `PEEK(1)` = 133 after it, the
+stub never gets to its own code; the VIC-IV knock before RUN changes nothing). The SKI.prg that ran
+under m65run is a different, smaller build (5799 bytes, image below $D000), not the D81's file.
