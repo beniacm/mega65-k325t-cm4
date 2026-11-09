@@ -96,9 +96,28 @@ def sheet(rows, out, title):
     img.save(out)
 
 
+RESUME = False
+FRESH = True          # core switch instead of a reset: a mounted D81 survives a CPU reset and
+                      # BASIC 65 autoboots its AUTOBOOT.C65 (the intro disks have one), which
+                      # swallowed every typed command from the second program on (2026-11-08)
+
+
+def fresh_boot():
+    if FRESH:
+        ctl("core", "c64")                          # HYPPO restarts with the default D81
+        time.sleep(8)
+        ctl("core", "mega65")
+        time.sleep(22)
+    else:
+        ctl("reset")
+        time.sleep(9)                               # HYPPO + menu system
+
+
 def run_one(disk, name, load, outdir, t1, t2):
-    ctl("reset")
-    time.sleep(9)                                   # HYPPO + menu system
+    base = os.path.join(outdir, "%s_%s" % (disk.split(".")[0], "".join(c if c.isalnum() else "_" for c in name)))
+    if RESUME and os.path.exists(base + "_b.png"):          # --resume: keep what an earlier run captured
+        return base + "_a.png", base + "_b.png"
+    fresh_boot()
     typ("/", 3)                                     # leave the menu: BASIC 65
     typ('MOUNT "%s"\\n' % disk, 3)
     if load == 0x0801:
@@ -132,7 +151,12 @@ def main():
     ap.add_argument("--t2", type=float, default=25)
     ap.add_argument("--run", default=time.strftime("run_%Y%m%d_%H%M"))
     ap.add_argument("--images", default=IMAGES)
+    ap.add_argument("--reset-only", action="store_true", help="plain reset between programs (faster; only without AUTOBOOT disks)")
+    ap.add_argument("--resume", action="store_true", help="skip programs already captured in this run folder")
     a = ap.parse_args()
+    global FRESH, RESUME
+    FRESH = not a.reset_only
+    RESUME = a.resume
     outdir = os.path.join(ROOT, "captures/demos", a.run)
     os.makedirs(outdir, exist_ok=True)
     res = open(os.path.join(outdir, "results.csv"), "a", newline="")
