@@ -38,7 +38,8 @@
 --     glyphs a row (screen at $4A000) until frame 1 line 300, then the $FFFF rows; PRE 3: solid
 --     red glyphs behind each $FFFF (they get painted: the short-row rule); K2: PRE 4 = rows that
 --     paint nothing (39 x GOTOX 640, $FFFF last), after text rows (screen $4A000, colour $2000)
---     until frame 1 line 300; PRE 5 = the same rows without the text (reference)
+--     until frame 1 line 300; PRE 5 = the same rows without the text (reference); PRE 6 = the
+--     fixed recipe (0fa6721): every row one transparent GOTOX (X 0), CHRCOUNT 1, no $FFFF
 --   SC 17 + OBJS 10: B65 examples/bounce.bas -- the 48-token star rows (6 x 4 x (GOTOX, FCM
 --     glyph)), 64 balls spread over the screen
 library ieee;
@@ -342,12 +343,16 @@ begin
     elsif SC = 22 then
       -- OBJ65R3: every row is $FFFF at its start (no tokens); PRE 2's text rows at $48000
       ntok := 40;
+      if PRE = 6 then ntok := 1; end if;          -- (the fixed recipe: one token a row)
       for r in 0 to ROWS - 1 loop
         sp := SCR + STEP * r; cp := STEP * r;
+        if PRE = 6 then                            -- one transparent GOTOX (X 0), no $FFFF
+          w16(sp, 0); c16(cp, 16#90#, 255);
+        end if;
         if PRE = 4 or PRE = 5 then                 -- (probe: 39 x GOTOX 640, $FFFF last)
           for i in 0 to 38 loop w16(sp, 640); end loop;
         end if;
-        w16(sp, 16#FFFF#);
+        if PRE /= 6 then w16(sp, 16#FFFF#); end if;
         if PRE = 3 then                            -- (probe: solid glyphs behind the $FFFF)
           for i in 1 to 39 loop w16(sp, 160); end loop;
         end if;
