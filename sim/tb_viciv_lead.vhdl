@@ -27,9 +27,18 @@
 -- OBJS 4/5/6/7: 64/128/255/231 one-glyph, one-row objects at Y 80, X = 631 k / n (row 10)
 -- OBJS 8: 1023 one-glyph, one-row objects at X = 157 k mod 625, Y = 61 k mod 392 (v3 table)
 -- OBJS 1: 15 two-row objects, 1 glyph wide, at Y = 8*20+3, X = 42 k (30 parts in row 21)
+-- Demo mirrors (V400, one line per painting, XCTL bits 3/4/6/7; QP 0/1):
+--   SC 21 + OBJS 9: B65 examples/swarm2.bas -- rows of 20 plain tokens (spaces, a score in
+--     row 0), 1001 objects: the player at (320, 200) + 1000 bullets as the demo leaves them in
+--     its steady state (8 a frame from two spawners circling the centre: 6 straight at 3.5 px a
+--     frame, 2 curving at 2.5 px turning 1.5 degrees a frame; 110 frames of life, the rest
+--     hidden at (700, 600)); positions in the 10-bit space (off-screen X still expands)
+--   SC 17 + OBJS 10: B65 examples/bounce.bas -- the 48-token star rows (6 x 4 x (GOTOX, FCM
+--     glyph)), 64 balls spread over the screen
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use ieee.math_real.all;
 use std.textio.all;
 use work.victypes.all;
 
@@ -73,7 +82,8 @@ architecture sim of tb_viciv_lead is
   constant SCR : natural := 16#40000#;
   function stepsel(sc : integer; v4 : integer) return natural is
   begin
-    if sc = 20 then
+    if sc = 21 then return 40;                                 -- swarm2.bas rows: 20 tokens
+    elsif sc = 20 then
       if v4 = 2 then return 1020; else return 640; end if;    -- 25 x 1020 / 50 x 640 bytes
     elsif sc = 18 or sc = 19 then return 256; elsif sc = 17 then return 96; elsif sc >= 6 then return 492; else return 512; end if;
   end function;
@@ -175,9 +185,48 @@ begin
     variable k, o, rr, mask : integer;
     variable tp : natural;
     variable fl : natural;
+
+    variable fr0, ag, ix, cs, ai, bi : integer;
+    variable px, py, th : real;
   begin
     -- objects
-    if OBJS = 8 then
+    if OBJS = 9 then
+      -- swarm2.bas at frame 2000: object 0 the player, 1 + 8 a + s the bullet fired a frames ago
+      no := 1001;
+      ox(0) := 320; oy(0) := 200;
+      for a in 0 to 124 loop
+        fr0 := 2000 - a;                                -- the frame it was fired in
+        cs := (fr0 / 2) mod 64;
+        for sv in 0 to 7 loop
+          ix := 1 + 8 * a + sv;
+          if a >= 110 then
+            ox(ix) := 700; oy(ix) := 600;               -- its life is over: hidden
+          elsif sv < 6 then                             -- straight, A advances by 11
+            ai := (11 * (6 * fr0 + sv + 1)) mod 64;
+            px := 320.0 + 40.0 * floor(3.5 * cos(real(cs) * MATH_PI / 32.0) + 0.5)
+                  + real(a) * floor(3.5 * cos(real(ai) * MATH_PI / 32.0) + 0.5);
+            py := 200.0 + 25.0 * floor(3.5 * sin(real(cs) * MATH_PI / 32.0) + 0.5)
+                  + real(a) * floor(3.5 * sin(real(ai) * MATH_PI / 32.0) + 0.5);
+            ox(ix) := integer(floor(px)) mod 1024; oy(ix) := integer(floor(py)) mod 1024;
+          else                                          -- curving (OBJMOVE 2.5, B * 5.625, 1.5)
+            bi := (7 * (2 * fr0 + sv - 5)) mod 64;
+            px := 640.0 - (320.0 + 40.0 * floor(3.5 * cos(real(cs) * MATH_PI / 32.0) + 0.5));
+            py := 400.0 - (200.0 + 25.0 * floor(3.5 * sin(real(cs) * MATH_PI / 32.0) + 0.5));
+            th := real(bi) * 5.625;
+            for t in 0 to a - 1 loop
+              px := px + 2.5 * cos(th * MATH_PI / 180.0);
+              py := py + 2.5 * sin(th * MATH_PI / 180.0);
+              th := th + 1.5;
+            end loop;
+            ox(ix) := integer(floor(px)) mod 1024; oy(ix) := integer(floor(py)) mod 1024;
+          end if;
+        end loop;
+      end loop;
+    elsif OBJS = 10 then
+      -- bounce.bas: 64 balls spread over the screen
+      no := 64;
+      for i in 0 to no - 1 loop ox(i) := (i * 151 + 37) mod 632; oy(i) := (i * 97 + 11) mod 392; end loop;
+    elsif OBJS = 8 then
       -- v3: 1023 one-glyph, one-row objects spread over rows 0..49 (about 40 parts per row)
       no := 1023;
       for i in 0 to no - 1 loop ox(i) := (i * 157) mod 625; oy(i) := (i * 61) mod 392; end loop;
@@ -277,6 +326,16 @@ begin
         end if;
         while nt < ntok loop                      -- pad: GOTOX to the row's end (paints nothing)
           w16(sp, 640); c16(cp, 16#10#, 255); nt := nt + 1;
+        end loop;
+      end loop;
+    elsif SC = 21 then
+      -- swarm2.bas: 20 plain tokens a row (spaces; row 0: a score), LINESTEP 40, XCTL bit 3
+      ntok := 20;
+      for r in 0 to ROWS - 1 loop
+        sp := SCR + STEP * r; cp := STEP * r;
+        for i in 0 to 19 loop
+          if r = 0 and i < 12 then w16(sp, 1 + (i * 7) mod 26); else w16(sp, 32); end if;
+          c16(cp, 0, 1);
         end loop;
       end loop;
     elsif SC = 17 or SC = 20 then
@@ -431,7 +490,7 @@ begin
     if CU = 1 then cu_en <= '1'; end if;
     if RL = 1 then rl_en <= '1'; end if;
     if SC = 2 or SC = 5 or SC = 8 or (SC >= 11 and SC /= 16 and SC /= 17) then rl_en <= '1'; end if;
-    if SC = 3 or SC = 7 or SC = 9 or SC = 16 or SC = 17 then v2_en <= '1'; end if;
+    if SC = 3 or SC = 7 or SC = 9 or SC = 16 or SC = 17 or SC = 21 then v2_en <= '1'; end if;
     if SC = 9 then ocount <= (others => '0'); end if;
     reg(16#51#, D051);                      -- NORRDEL (bit 7), DBLRR (bit 6)
     setup_done <= '1';

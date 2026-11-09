@@ -45,7 +45,7 @@ of the previous draft, for pairs we can count on one hand.
 |---|---|---|---|
 | 5 (running) | overlapped expansion, 2 KB row buffer, `+15` collides-with mask, feature register `$FFD71FD` | 0 | swarm (255), cases L, I2 |
 | 6 | **v3 table**: 32-byte entries, no v2 mode (bytes 0..15 = the v2 fields incl. +15; 16..31 = the software motion block, never read by the hardware), count 10 bits, snapshot 1024 x 128 bits, **per-row buckets** built during the snapshot (row scan and collision pass visit only the objects on the row), collision budget register + "truncated" flag, results for 1023 in page `$FFD7200-$FFD72FF` (`$FFD71A0` window stays for 0..255), circle test with a radius byte | 4 (snapshot) + 1 (buckets) | swarm 1022 bullets, cases M |
-| 7 | **4 pixels per cycle**: raster buffer halves as 512 x 72 with per-pixel write enables, two-cycle FCM dispatch, expander dual-issue; register bit, off = today | 0-2 | parallax 6 layers, 255 objects on one line without DBLRR, all cases pixel-exact on/off |
+| 7 (GHDL done, board: batch 3) | **4 pixels per cycle**: raster buffer halves as 512 x 72 with per-pixel write enables, two-cycle FCM dispatch, expander dual-issue; register bit, off = today -- as built: XCTL2 bit 0, level 4, see "Step 7 implementation notes" | 0 | parallax 6 layers, 255 objects on one line without DBLRR, all cases pixel-exact on/off (rrb_list_test.py case N) |
 
 BRAM total ~7 of the 23 free tiles. Steps 6 and 7 are independent; 6 first (the demos need it).
 
@@ -200,3 +200,89 @@ copies this table.
   pass 52,694 cycles (20 lines); 255 objects straddling two rows 35,753; expansion unchanged at 17
   cycles per part. Feature level mirror at `$FFD728C`.
 
+
+### Step 7 implementation notes (GHDL complete, board run pending: batch 3, core 0b3eadd7b)
+
+Delivered as **XCTL2 `$FFD71F1` bit 0** (with XCTL bits 4 + 7), level 4 (`$FFD71FD` /
+`$FFD728C` = 4). Off = step 6: with the bit off the 100 step-6 reference outputs of
+`sim/run_viciv_lead.sh` are byte-identical after every piece, and every 4 px scenario is
+pixel-identical to its 2 px pair (71 scenarios, TB_VICIV_LEAD_PASS, no late pixels, port
+collisions 0). The plan's "512 x 72 halves" became four 512 x 18 banks by X mod 4 (the same
+block RAM); "two-cycle FCM dispatch" became three cycles (piece 4 deferred, below); "expander
+dual-issue" became the fast object parts of piece 1.
+
+| piece | core | what |
+|---|---|---|
+| parts 1-2 | f4de7ce66 | raster buffer in `rrb_list_frontend.vhdl` as four banks; the painter writes 4 px per cycle (FCM, NCM, plain mono, multicolour); XCTL2 register |
+| 1 | 2c9d97186 | expander fast object parts: one-row hits straight to HitEmit, the object fetch set up in HitEmit and issued during the GOTOX, the next table word read ahead, a part ends on the returning `$FFFF`, the aligned 32-bit word shows the `$FFFF` behind a glyph token two cycles early; a GOTOX's PaintMemWait/2 port cycles go to the expander (counter 7 has the same definition) |
+| 2 | fe6e2c6c4 | GOTOX dispatched when the painter is idle; the decoder keeps its own copy of the GOTOX's Y offset, sign and draw mask instead of waiting for the dispatch |
+| 3 | c75d8bb1c | 3-cycle decoder (colour byte 1's address in D0, D3's decode in D2) and merged fetch loop (PaintDispatch/TurboWait issue the glyph read, PaintMemWait skipped); FCM/plain glyphs dispatched at painter Idle |
+| level 4 | df055696b | `K325T_LEVEL` 4 |
+
+Measured (GHDL; rows of 3 x (GOTOX + 81 tokens), non-badline cycles; piles on row 10, painting
+end (expansion end); 2592 cycles per line, 5184 with DBLRR):
+
+| case | 2 px (bit 7) | parts 1-2 | + pieces 1-2 | + piece 3 |
+|---|---|---|---|---|
+| all FCM | 1006 | 1002 | 993 | **745** |
+| all plain | 1490 | 1006 | 995 | 989 |
+| all NCM | 1974 | 1006 | 995 | 989 |
+| GOTOX + FCM pairs | 1611 | 1371 | 993 | **745** |
+| three FCM layers with attributes | 1123 | 1004 | 994 | **785** |
+| expansion per part, unit test (MLAT 3) | 17 | 17 | 7 (9 unaligned) | 7 |
+| expansion per part in the VIC-IV | 17.0 | 17.0 | 8.0 | 8.8 |
+| 64 objects (no DBLRR = DBLRR) | 1371 (1258) | 1278 | 816 (515) | **639** (489) |
+| 128 objects | 2459 (2346) | - | 1328 (1027) | **1134** (1023) |
+| 231 objects, DBLRR | 4210 (4097) | 4117 | 2152 (1851) | **2061** (1950) |
+| 255 objects, DBLRR | 4618 (4505) | - | 2344 (2043) | - |
+| 255 objects in ONE line, no DBLRR (the gate) | does not fit | does not fit | 2344 (2043) | **2277** (2166) |
+| 1023 objects spread over 50 rows | 1189 (939) | 976 | 825 (334) | **741** (434) |
+
+The demos (GHDL mirrors, V400, bits 3/4/6/7; tb_viciv_lead SC 21 + OBJS 9, SC 17 + OBJS 10;
+XCTL2 off vs on, pictures identical, no late pixels either way):
+
+| demo | longest painting off -> on | median line off -> on | longest expansion off -> on |
+|---|---|---|---|
+| swarm2.bas (1000 bullets as in its steady state: 707 in the drawn rows, busiest row 82 parts) | 1524 -> **784** | 368 -> 220 | 1467 -> 729 |
+| bounce.bas (64 balls over the 48-token star rows) | 474 -> **292** | 371 -> 175 | 92 -> 39 |
+
+Both demos already fit a line without XCTL2; the bit halves their raster time (headroom: a
+swarm row could carry about three times the bullets).
+
+Falls back to the 2 px timing (same speed as with the bit off): lines not on the fast token path
+(bitmap, 8-bit characters, hyperram glyphs, bits 4/7 off); raster buffer X above 1018 without
+wrap-around; the last 1..3 pixels of a glyph whose width is not a multiple of 4; object token
+data not 4-byte aligned (9 instead of 7 cycles per part); v1 list entries get only the `$FFFF`
+end detection (no table scan to read ahead).
+
+**Piece 4 deferred** (colour RAM split into two 32K x 8 byte lanes + a 2-cycle decoder: FCM 3 ->
+2 cycles per token), when text-row throughput matters: the gate (255 in one line) is met with
+margin, plain/NCM rows are limited by the painter (4 cycles per glyph) and piles by the
+expander, so the split mainly serves FCM text layers, at the highest risk of the pieces (the
+CPU port, the 64 KB hi/lo split and the bit-2 mirror in `tb_colourram_k325t`).
+
+**Bridge (in the same bitstream).** 33558fd22: MISO one clock162 cycle earlier. At 40 MHz the
+master samples one SCK period (25 ns) after the edge; the bridge needed 2-3 cycles from the input
+flip-flop to `miso_r` plus the pads (slow corner 1.78 + 3.52 + 0.87 ns), leaving ~0.5 ns -- the
+suspected cause of the batch-2 link hang (identical in the step-6 bridge). The bit for the next
+edge is now prepared between edges and taken from the first input stage; the FSM still runs on
+the synchronized stages and assigns the same bit a cycle later (an unresolved first stage costs
+at most that cycle). tb_rk_sd at 40 MHz (DIN 1.78 ns): first failure at DOUT 5.0 -> 11.4 ns.
+0b3eadd7b: the first piece-3 build then failed timing (WNS -0.663 ns, all 10 paths into `miso_r`:
+UART FIFO / ethernet TX block RAM outputs, `rxf_pp`, `bidx` through the byte mux, now behind the
+early mux); every byte is now sent from the registered `nxt_pre` (UART_GET with its "a byte is
+there" flag registered alongside), sources 1-2 cycles older, a byte boundary >= 32 cycles away.
+Build of 0b3eadd7b: WNS +0.089 ns (linux_fb), WHS +0.033 ns, BRAM 425.5/445, 70,310 LUTs,
+.bit 7,576,298 bytes. `rockchip/spi_magic.py`: read-only STATUS check for the next hang.
+
+Expander, where the ~8-9 cycles per part go (in the VIC-IV, after piece 3): the unit test's 7 =
+Scan hit 1 + HitEmit 1 + Gotox0/Gotox1 2 (the GOTOX's two buffer writes; the glyph's two reads
+go out here) + the read latency 3 (the glyph's high byte back -> the part ends); the other 1-2
+are port stalls -- a read can only go out where the VIC-IV's next state does not read (4 of the
+6 decisions per GOTOX + FCM pair after piece 3; the denser fetch loop of piece 3 cost 0.8 per
+part). Options short of the colour RAM split: (a) issue the glyph's low read in HitEmit (6 per
+part; the four buffer writes then run back to back), (b) also HitEmit's work in the Scan hit
+cycle for one-part objects (5; a longer path in the 81 MHz scan), (c) a small object token cache
+(the last few one-token objects' screen + colour bytes, cleared per row): bullet hells use a
+handful of designs, so most parts need no chip RAM read at all -- no port stalls and no read
+latency, about 4-5 cycles per part (the write port's four writes + the scan). Not built.
