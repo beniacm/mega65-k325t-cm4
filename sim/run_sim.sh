@@ -89,7 +89,8 @@ for g in "-gMLAT=3" "-gMLAT=4" "-gMLAT=4 -gLIMIT=24"; do
   ghdl -r --std=08 -frelaxed --workdir=k325work tb_rrb_list_expander $g --ieee-asserts=disable 2>&1 \
     | grep -v "simulation stopped" | sed 's/.*(report note): //;s/.*(report failure): /FAIL: /;s/.*(assertion failure): /FAIL: /'
 done
-for g in "-gMLAT=3" "-gMLAT=4" "-gMLAT=3 -gBUFW=11 -gLIMIT=2044" "-gMLAT=4 -gBUFW=11 -gLIMIT=2044"; do
+for g in "-gMLAT=3" "-gMLAT=4" "-gMLAT=3 -gBUFW=11 -gLIMIT=2044" "-gMLAT=4 -gBUFW=11 -gLIMIT=2044" \
+         "-gMLAT=3 -gBUFW=11 -gLIMIT=2044 -gFASTX=1" "-gMLAT=4 -gFASTX=1"; do
   ghdl -r --std=08 -frelaxed --workdir=k325work tb_rrb_list_v2 $g --ieee-asserts=disable 2>&1 \
     | grep -v "simulation stopped" | sed 's/.*(report note): //;s/.*(report failure): /FAIL: /;s/.*(assertion failure): /FAIL: /'
 done   # (BUFW 11 / LIMIT 2044: the VIC-IV's 2 KB row buffer)

@@ -474,7 +474,8 @@ per line, **4421** on a badline (+ the 493-cycle row fetch), against 2592.
   pixel cycle; FCM/NCM skip the painter's set-up state (done at dispatch). A GOTOX still waits
   for the painter to be idle (it moves the write position).
 - (b) 4 pixels per cycle was not needed: with (a) + (c) the painter (4 cycles per 8 FCM pixels)
-  is the limit for FCM, and the token rate matches it.
+  is the limit for FCM, and the token rate matches it. (Step 7 added it anyway, for plain/NCM glyphs, GOTOX
+  pairs and object piles: XCTL2 bit 0, "4 px painting" below.)
 
 Gating: XCTL bit 7 together with bit 4, CHR16 text lines (not bitmap, not 8-bit characters, not
 glyphs from hyperram); with bit 7 off nothing changes (the old states run, the lanes return the
@@ -496,6 +497,73 @@ Three 80-column FCM layers (with attributes) + 12 v2 object parts (six two-row, 
 objects) in one row, V200, GHDL: that row's badline paints in **2073** cycles (row fetch 493,
 expansion 245, first object part at 1871), no late pixels; + the sprite fetch (~100) leaves
 ~420 of 2592 cycles.
+
+## 4 px painting (XCTL2 bit 0, step 7)
+
+**XCTL2 `$FFD71F1`** (read/write, cleared by reset; bits 7..1 read 0 and are reserved). Bit 0
+works only together with XCTL bits 4 and 7 (fast RRB painting + fast token path); with bit 0
+off, or without bits 4 and 7, every picture and every cycle is as before (GHDL: the 71
+`run_viciv_lead.sh` scenarios with the bit off are byte-identical to step 6's outputs).
+
+What it changes (all of it gated by the bit):
+
+- **raster buffer**: four banks by X mod 4 in `rrb_list_frontend.vhdl` (4 x 512 x 18, the same
+  block RAM as the old pair); the painter can write 4 consecutive pixels per cycle.
+- **painter**: FCM (8 px = 2 cycles), NCM (16 px = 4), plain mono (8 px = 2) and multicolour
+  (two double-wide pixels) in 4-pixel steps; the last 1..3 pixels of a glyph whose width is not
+  a multiple of 4 take a 2-pixel step.
+- **GOTOX**: dispatched as soon as the painter is idle (its last write is out); the decoder keeps
+  its own copy of the GOTOX's Y offset, sign and draw mask, so the token behind it is decoded
+  without waiting for the dispatch.
+- **expander** (list mode v2/v3, object parts from the table scan): a one-row hit goes straight
+  to emitting (no multiply); the object's first token reads go out during its GOTOX; the next
+  table word is read ahead while a part is fetched; a part ends when its `$FFFF` comes back,
+  and when the token data is 4-byte aligned the 32-bit word shows the `$FFFF` behind the glyph
+  token two cycles earlier. The GOTOX's PaintMemWait/PaintMemWait2 port cycles go to the
+  expander (counter 7 below).
+
+Falls back to the 2-pixel timing (**same speed as with the bit off**):
+
+| case | cycles |
+|---|---|
+| lines not on the fast token path (bitmap, 8-bit characters, hyperram glyphs, bit 7 or 4 off) | as before: the bit has no effect |
+| pixels at a raster buffer X above 1018 without RRB wrap-around | 2 px per cycle for those steps |
+| the last 1..3 pixels of a glyph trimmed to a width that is not a multiple of 4 | one 2 px step |
+| object token data not 4-byte aligned | 9 cycles per part instead of 7 (unit test, MLAT 3) |
+| v1 list entries (XCTL bit 5): no table scan | the read-ahead and the early GOTOX reads are scan-only; the `$FFFF` end detection applies |
+
+### Measured (GHDL)
+
+`sim/run_viciv_lead.sh` (71 scenarios, TB_VICIV_LEAD_PASS: every 4 px picture identical to its
+2 px pair, no late pixels, port collisions 0) and `sim/tb_rrb_list_v2.vhdl` (timing cases).
+Text rows = 3 x (GOTOX + 81 tokens), non-badline painting cycles; piles = one-glyph objects all
+on row 10, painting end (expansion end) in cycles from the line start; DBLRR has 5184 per
+painting, otherwise 2592.
+
+| case | bit off (2 px, bit 7) | 4 px, painter only (parts 1-2) | + piece 1 (expander) + piece 2 (GOTOX) |
+|---|---|---|---|
+| all FCM | 1006 | 1002 | **993** |
+| all plain | 1490 | 1006 | **995** |
+| all NCM | 1974 | 1006 | **995** |
+| GOTOX + FCM pairs | 1611 | 1371 | **993** |
+| three FCM layers with attributes | 1123 | 1004 | **994** |
+| expansion per object part (unit test, MLAT 3) | 17 | 17 | **7** (9 if the token data is not 4-byte aligned; MLAT 4: 8) |
+| expansion per part in the VIC-IV (64 -> 255 objects) | 17.0 | 17.0 | **8.0** |
+| 64 objects, no DBLRR | 1371 (1258) | 1278 | **816** (515) |
+| 64 objects, DBLRR | - | - | **816** (515) |
+| 128 objects, no DBLRR | 2459 (2346) | - | **1328** (1027) |
+| 128 objects, DBLRR | 2459 (2346) | - | **1328** (1027) |
+| 231 objects, DBLRR | 4210 (4097) | 4117 | **2152** (1851) |
+| 255 objects, DBLRR | 4618 (4505) | - | **2344** (2043) |
+| 255 objects in one line, no DBLRR | does not fit | does not fit | **2344** (2043) of 2592 |
+| 1023 objects spread over 50 rows | 1189 (939) | 976 | **825** (334) |
+
+DBLRR changes no cycle count here (it only gives two lines per painting). On the way, piece 1
+without its last two parts (the 32-bit `$FFFF` look-ahead and the GOTOX's port cycles) gave 9
+cycles per part in the unit test and 64/128/231 piles of 1080/1784/2917; with piece 2 887/1655/
+2891 and 255 on DBLRR 3179.  The remaining limits: the token pipeline (4 cycles per glyph, the
+decoder) for text rows, and for piles the decoder + the expander's chip RAM port (two tokens per
+part, ~8 cycles).
 
 ## Unpainted pixels (XCTL bit 3)
 
@@ -629,7 +697,7 @@ VIC-IV), so it works for any CPU write timing. Counters are 16 bit and stick at 
 | 4 | expander aborts (`exp_abort`, both the line-start and the overtime abort) |
 | 5 | line start while in ListWait waiting for the copy: the kept first text row painted plainly |
 | 6 | v2 rows painted plainly by the full-row guard (append point beyond LIMIT - 2) |
-| 7 | port collisions: expander read in a cycle where the VIC-IV reads too (must stay 0) |
+| 7 | port collisions: expander read in a cycle where the VIC-IV reads too (must stay 0). With 4 px painting (XCTL2 bit 0) a GOTOX's PaintMemWait/PaintMemWait2 on the fast token path are not VIC-IV reads: its glyph data is never used, and the expander's address always wins the port in those cycles (`exp_mreq` overrides `next_ramaddress`) |
 | 8 | expansions ended by the buffer limit (expander `ovf`: EntWait, ObjDrain, Scan, HitEmit) |
 | 9 | object parts / v1 entries emitted (Gotox0), wraps |
 | 10 | max expansion duration, pixel cycles from start to done (aborted ones not counted) |

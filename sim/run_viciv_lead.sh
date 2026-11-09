@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # run_viciv_lead.sh -- the real VIC-IV (viciv.vhdl, report-stripped copy) in GHDL: the K325T
-# RRB list mode lead (docs/rrb_list_mode.md, "First raster line budget").  69 scenarios of
+# RRB list mode lead (docs/rrb_list_mode.md, "First raster line budget").  71 scenarios of
 # tb_viciv_lead.vhdl in parallel (~14 min), then checks:
 #   s4 == s5   plain rows: XCTL bit 5 (lead) changes no pixel
 #   s2 == s3   reference GOTOX rows with the lead == v2 objects (6 objects, X 0/10/600, V400)
@@ -88,6 +88,9 @@ run t6q -gSC=7 $D $Q & run t7q -gSC=3 $Q & run t9q -gSC=3 -gOBJS=1 $Q &
 for m in 12 13 14 15; do run m${m}q -gSC=$m $D $Q & done
 run u5q -gSC=18 -gV400=0 -gCU=1 $Q & run p64q -gSC=17 -gOBJS=4 -gCU=1 $Q &
 run p231q -gSC=17 $D -gOBJS=7 -gCU=1 $Q & run x2q -gSC=3 -gOBJS=8 $Q &
+# (+ the expander's fast object parts): 128 objects in one line == 2 px; 255 objects in ONE line
+# (V400, no DBLRR: the step-7 gate) -- timing
+run p128q -gSC=17 -gOBJS=5 -gCU=1 $Q & run p255q -gSC=17 -gOBJS=6 -gCU=1 $Q &
 wait
 python3 - $W <<'PY'
 import sys
@@ -105,7 +108,7 @@ for a, b in (("s4", "s5"), ("s2", "s3"), ("g2", "g3"), ("q8", "q9"),
              ("p231", "r231h"), ("x1", "x2"),
              ("t1", "t1q"), ("t2", "t2q"), ("t4", "t4q"), ("t6", "t6q"), ("t7", "t7q"), ("t9", "t9q"),
              ("m12b", "m12q"), ("m13b", "m13q"), ("m14b", "m14q"), ("m15b", "m15q"), ("u5", "u5q"),
-             ("p64", "p64q"), ("p231", "p231q"), ("x2", "x2q")):
+             ("p64", "p64q"), ("p231", "p231q"), ("x2", "x2q"), ("p128", "p128q")):
     fa, fb = frame(a), frame(b)
     n = sum(1 for y in fa if fa[y] != fb.get(y))
     print("%s vs %s: %d lines differ (frame %d lines)" % (a, b, n, len(fa)))
@@ -131,7 +134,7 @@ for n in ("s1", "s2", "s3", "s4", "s5", "g1", "g2", "g3", "q1", "q8", "q3", "q9"
           "t3", "t4", "t5", "t6", "t7", "t9", "m12a", "m12b", "m13a", "m13b", "m14a", "m14b",
           "m15a", "m15b", "p64", "r64", "p128", "p128d", "r128d", "p231", "r231", "p64d", "r64d",
           "p255", "r231h", "x1", "x2", "t1q", "t2q", "t4q", "t6q", "t7q", "t9q", "m12q", "m13q",
-          "m14q", "m15q", "u5q", "p64q", "p231q", "x2q"):
+          "m14q", "m15q", "u5q", "p64q", "p231q", "x2q", "p128q", "p255q"):
     L = lines(n)
     late = sum(1 for l in L if l[1] > 0)
     paint = max(l[2] for l in L)
@@ -141,7 +144,7 @@ for n in ("s1", "s2", "s3", "s4", "s5", "g1", "g2", "g3", "q1", "q8", "q3", "q9"
                                                         max(l[4] for l in L), col))
     ok = ok and col == 0                         # expander read while the VIC-IV reads: never
     if n in ("s2", "s3", "s5", "g2", "g3", "t2", "t4", "t7", "t9", "p64", "r64", "p128", "x1", "x2",
-             "t2q", "t4q", "t7q", "t9q", "p64q", "x2q"):
+             "t2q", "t4q", "t7q", "t9q", "p64q", "x2q", "p128q", "p255q"):
         ok = ok and late == 0 and paint < 2590
     if n in ("q8", "q3", "q9", "t0", "t1", "t5", "t6", "p128d", "r128d", "p231", "r231", "p64d", "r64d",
              "t1q", "t6q", "p231q",

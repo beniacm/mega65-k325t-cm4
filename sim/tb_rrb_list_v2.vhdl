@@ -28,7 +28,8 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 entity tb_rrb_list_v2 is
-  generic ( MLAT : integer := 3; BUFW : integer := 10; LIMIT : integer := 1020 );
+  generic ( MLAT : integer := 3; BUFW : integer := 10; LIMIT : integer := 1020;
+            FASTX : integer := 0 );                -- 1: the expander's step-7 fast parts
 end entity;
 
 architecture sim of tb_rrb_list_v2 is
@@ -48,6 +49,7 @@ architecture sim of tb_rrb_list_v2 is
   signal row : unsigned(7 downto 0) := x"00";
   signal cnt : unsigned(9 downto 0) := (others => '0');
   signal bk_full : std_logic;
+  signal fastx_s : std_logic := '0';
   signal part_s : std_logic := '0';
 
   type r_t is array (natural range <>) of integer;
@@ -64,6 +66,8 @@ architecture sim of tb_rrb_list_v2 is
   constant O0 : r_t := (16#01#, 16#01#, 16#FF#, 16#FF#, 16#AA#, 16#AA#, 16#AA#, 16#AA#);
   constant O1 : r_t := (16#02#, 16#02#, 16#FF#, 16#FF#, 16#AA#, 16#AA#, 16#AA#, 16#AA#);
   constant O2 : r_t := (16#03#, 16#03#, 16#04#, 16#04#, 16#05#, 16#05#, 16#FF#, 16#FF#, 16#AA#, 16#AA#);
+  -- (timing case 6: a one-glyph object at $20032, a token address of 2 mod 4)
+  constant O3 : r_t := (16#AA#, 16#AA#, 16#01#, 16#01#, 16#FF#, 16#FF#, 16#AA#, 16#AA#);
   constant C0 : r_t := (16#00#, 16#05#, 16#00#, 16#00#, 16#BB#, 16#BB#);
   constant C1 : r_t := (16#00#, 16#06#, 16#00#, 16#00#, 16#BB#, 16#BB#);
   constant C2 : r_t := (16#00#, 16#07#, 16#00#, 16#07#, 16#00#, 16#07#, 16#BB#, 16#BB#);
@@ -83,6 +87,7 @@ architecture sim of tb_rrb_list_v2 is
     if a(19 downto 4) = x"2000" and i mod 16 < O0'length then return to_unsigned(O0(i mod 16), 8); end if;
     if a(19 downto 4) = x"2001" and i mod 16 < O1'length then return to_unsigned(O1(i mod 16), 8); end if;
     if a(19 downto 4) = x"2002" and i mod 16 < O2'length then return to_unsigned(O2(i mod 16), 8); end if;
+    if a(19 downto 4) = x"2003" and i mod 16 < O3'length then return to_unsigned(O3(i mod 16), 8); end if;
     return x"EE";
   end function;
   function col(a : unsigned(15 downto 0)) return unsigned is
@@ -101,20 +106,24 @@ architecture sim of tb_rrb_list_v2 is
   signal wr : wr_t := (others => false);                    -- written since the last clear
   type pipe_t is array (1 to MLAT) of unsigned(7 downto 0);
   signal mp : pipe_t := (others => x"00");
+  type pipe32_t is array (1 to MLAT) of unsigned(31 downto 0);
+  signal mp32 : pipe32_t := (others => x"00000000");
+  signal mdata32 : unsigned(31 downto 0);
   signal clr : std_logic := '0';
   signal port_errs : integer := 0;
 begin
   clk <= not clk after 5 ns;
+  fastx_s <= '1' when FASTX = 1 else '0';
 
   dut : entity work.rrb_list_expander
     generic map (MLAT => MLAT, CLAT => 1, LIMIT => LIMIT, BUFW => BUFW)
     port map (clk => clk, start => start, abort => abort, ent_addr => ent_addr,
               out_start => out_start, busy => busy, done => done, out_len => out_len,
-              mreq => mreq, maddr => maddr, mdata => mdata, caddr => caddr, cdata => cdata,
+              mreq => mreq, maddr => maddr, mdata => mdata, mdata32 => mdata32, caddr => caddr, cdata => cdata,
               bwe => bwe, baddr => baddr, bscreen => bscreen, bcolour => bcolour,
               scan_en => scan_en, start_scan => start_scan, row => row, obj_count => cnt,
               copy_start => copy_start, tab_addr => x"30000", mfree => mfree, copying => copying,
-              part => part_s, bk_full => bk_full);
+              part => part_s, bk_full => bk_full, fastx => fastx_s);
 
   -- memories, buffer and port checks
   process (clk)
@@ -125,6 +134,10 @@ begin
     if rising_edge(clk) then
       mp(1) <= chip(maddr);
       for n in 2 to MLAT - 1 loop mp(n) <= mp(n - 1); end loop;
+      -- the aligned word of the byte (byte n of the word at address 4w + n)
+      mp32(1) <= chip(maddr(19 downto 2) & "11") & chip(maddr(19 downto 2) & "10")
+                 & chip(maddr(19 downto 2) & "01") & chip(maddr(19 downto 2) & "00");
+      for n in 2 to MLAT - 1 loop mp32(n) <= mp32(n - 1); end loop;
       cdata <= col(caddr);
       if clr = '1' then
         bs <= (others => x"55"); bc <= (others => x"55"); wr <= (others => false);
@@ -156,6 +169,7 @@ begin
     end if;
   end process;
   mdata <= mp(MLAT - 1);
+  mdata32 <= mp32(MLAT - 1);
 
   process
     variable errs : integer := 0;
@@ -480,7 +494,7 @@ begin
 
     -- timing (no check): object parts appended after a 48-token row (out_start 96), one-glyph
     -- objects; cycles from start to done, to the first part, and per part
-    for tcase in 0 to 5 loop
+    for tcase in 0 to 6 loop
       tabm <= (others => x"00");
       wait for 0 ns;
       if tcase = 0 then        -- 64 objects inside row 5
@@ -498,9 +512,12 @@ begin
       elsif tcase = 4 then     -- 128 objects inside row 5
         for k in 0 to 127 loop put(k, 5 * k, 40, 16#FF#, 1, 16#02#, 0, 16#4000#, 0); end loop;
         copy(128, false);
-      else                     -- 255 objects inside row 5 again (all of them fit 2 KB)
+      elsif tcase = 5 then     -- 255 objects inside row 5 again (all of them fit 2 KB)
         for k in 0 to 254 loop put(k, 2 * k, 40, 16#FF#, 1, 16#02#, 0, 16#4000#, 0); end loop;
         copy(255, false);
+      else                     -- 64 objects inside row 5, token data not 4-byte aligned
+        for k in 0 to 63 loop put(k, 10 * k, 40, 16#FF#, 1, 16#02#, 16#32#, 16#4000#, 0); end loop;
+        copy(64, false);
       end if;
       clr <= '1'; tick; clr <= '0';
       row <= to_unsigned(5, 8); start_scan <= '1'; scan_en <= '1'; out_start <= to_unsigned(96, BUFW);
@@ -519,7 +536,7 @@ begin
       report "TIMING case " & integer'image(tcase) & ": " & integer'image(nparts) & " parts, "
         & integer'image(tcnt) & " cycles start -> done, first part at " & integer'image(tfirst)
         & ", per part " & integer'image((tlast - tfirst) / maximum(nparts - 1, 1))
-        & " (MLAT " & integer'image(MLAT) & ")";
+        & " (MLAT " & integer'image(MLAT) & ", FASTX " & integer'image(FASTX) & ")";
       tick;
     end loop;
 
@@ -528,7 +545,7 @@ begin
       errs := errs + port_errs;
     end if;
     if errs = 0 then
-      report "TB_RRB_LIST_V2_PASS (MLAT " & integer'image(MLAT) & ")";
+      report "TB_RRB_LIST_V2_PASS (MLAT " & integer'image(MLAT) & ", FASTX " & integer'image(FASTX) & ")";
     else
       report "TB_RRB_LIST_V2_FAIL " & integer'image(errs) & " errors" severity failure;
     end if;

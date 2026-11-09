@@ -554,6 +554,12 @@ write, `soft_rtc.vhdl` keeps the copy you read back):
 | 5, 6 | **RRB list mode** v1 / v2 | off | object lists per row / global object table (below) |
 | 7 | **fast token path** (with bit 4) | 8 cycles per glyph token, 16 per full-colour glyph | tokens pipelined: 4 per full-colour glyph, 6 per plain glyph |
 
+**XCTL2 `$FFD71F1`** (read/write, cleared by reset; bits 7..1 read 0 and are reserved):
+
+| bit | extension | after reset | when set (only together with XCTL bits 4 and 7) |
+|---|---|---|---|
+| 0 | **4 px painting** | as XCTL alone | the painter writes 4 pixels per cycle on fast-token-path lines (plain and NCM glyphs 4 cycles instead of 6 / 8), a GOTOX goes as soon as the painter is idle, and the list mode expander builds an object part in about 8 cycles instead of 17: 255 objects on one row fit one raster line without DBLRR (`docs/rrb_list_mode.md`, "4 px painting") |
+
 **1 MB chip RAM.**  The CPU (`gs4510`: `chipram_size`, `chipram_1mb`) and the VIC-IV
 (`chipram_size`, a 20-bit fetch port) were already written for up to 1 MB; no board had the
 block RAM.  `chipram_k325t.vhdl` keeps the generated, pre-loaded 384 KB (`shadowram-k325t-lo.vhdl`,
