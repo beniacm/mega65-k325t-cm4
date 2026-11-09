@@ -286,3 +286,60 @@ cycle for one-part objects (5; a longer path in the 81 MHz scan), (c) a small ob
 (the last few one-token objects' screen + colour bytes, cleared per row): bullet hells use a
 handful of designs, so most parts need no chip RAM read at all -- no port stalls and no read
 latency, about 4-5 cycles per part (the write port's four writes + the scan). Not built.
+
+## Batch 4 (GHDL, not built)
+
+**(a) the glyph's low read in HitEmit** (fast mode, MLAT >= 3): the object's first read goes out
+when the part is emitted instead of in Gotox0, so it is back right after Gotox1's buffer write
+and the part's four writes run back to back. tb_rrb_list_v2 (MLAT 3): 7 -> **6** cycles per part
+(unaligned token data 9 -> 8; MLAT 4: 8 -> 7). In the VIC-IV (4 px subset, every picture == its
+2 px pair, no late pixels, port collisions 0): 255 objects in one line 2277 (2166) -> **1784**
+(1540), i.e. 6.0 cycles per part; 231 on DBLRR 2061 -> 1640; 128 1134 -> 1022; swarm2 mirror
+784 -> 627 (bounce unchanged at 292). After (a) the expander (6 per part) and the decoder (2
+tokens x 3 cycles) are equal limits for piles.
+
+**(c) per-row object token cache -- design note (not built; see the conclusion)**
+
+- *What*: up to CACHE_N entries (generic; 0 = off = today), each: the part's token address
+  (20 bits) and colour address (16 bits) as the tag, the first token's two screen bytes and two
+  colour bytes as read (before the per-part FLIPX/FLIPY XOR), valid. Only one-token designs are
+  cached: the ones whose aligned 32-bit word shows the `$FFFF` behind the glyph (the piece-1
+  look-ahead); longer lists, a GOTOX inside the object, unaligned data, a part cut by the buffer
+  limit are never filled and take the normal path. 4 entries = ~280 flip-flops + four 36-bit
+  comparators (swarm2: 2 bullet designs + the player; bounce: 6 ball colours -> 8 entries, ~560
+  FFs). Every row of a multi-row object is its own key (address + row x stride), naturally.
+- *Lookup and hit*: in HitEmit (pa/pb address registered there); a hit skips the reads: Gotox0,
+  Gotox1, then two writes of the cached glyph bytes, opos + 4, back to the scan. No chip RAM and
+  no colour RAM port cycle at all. *Fill*: on the return path of a miss that ends through the
+  look-ahead (`nxt_ff`), round robin.
+- *Fields that differ between objects sharing a design*: X, Y offset, draw mask, behind /
+  transparent bits and REL never come from the token data -- the GOTOX is synthesized from the
+  table entry (REL resolved in the snapshot), as today. FLIPX/FLIPY are applied to the cached raw
+  colour byte 0 at write time exactly as the return path does (not for a GOTOX token, c(4) = 1).
+  NCM / alpha / colour come from the cached bytes, as they would from memory.
+- *Row-clear rule*: all entries invalid at each row's ScanStart (and on abort; v1 entries never
+  use it). The snapshot does **not** make a mid-row change of a design impossible: it copies the
+  object *table* once per frame, but the token lists and their colour bytes are read live, part
+  by part, today. So a CPU/DMA write to a design's bytes during a row's expansion is possible
+  now, and today the parts expanded after the write show the new bytes; with the cache the rest
+  of that row would still show the old ones, from the next row on the new ones. The difference
+  is bounded by one row's expansion (under one raster line), and where the boundary falls is
+  timing-dependent today anyway (scan order), so no program can rely on it; B65 writes token
+  lists only at OBJECT time (the IRQ integrator writes the table, inside HOLD). Clearing per
+  frame instead would stretch the staleness to a frame (visible to animation by poking token
+  lists), hence per row.
+- *Cycles*: a hit = Scan hit 1 + HitEmit 1 + the four buffer writes 4 = **6** per part; 4 (the
+  write-port floor) needs the next part's Scan/HitEmit overlapped with the glyph writes (deferred
+  writes + a separate written-frontier output for the decoder's read guard).
+- **Conclusion**: after (a) a miss already takes 6 cycles in the VIC-IV, and the decoder needs 6
+  per part (piece 3), so (c) would not shorten the painting of piles; it would only take the
+  expander's reads off the chip RAM port. It becomes worth building together with a faster
+  decoder (piece 4: 2 cycles per token, 4 per part), then with the overlapped 4-cycle hit path.
+
+**Checked, no RTL change** (2026-11-09): (1) OBJ65R3's garbage strip was the VIC-IV short-row
+rule (a row that is only `$FFFF` at its start advances the next row by 2 bytes), fixed in the
+recipe; XCTL bit 3 clears rows that paint nothing, also after text and in 4 px (GHDL; board case
+K2). (2) MEGADOTS: its decruncher writes `$D000-$DFFF` with I/O visible because `$01` is `$85` at
+READY under ROM 920413 -- the same on a stock machine (Xemu 920413: `PEEK(1)` = 133, the same
+derailed `$2001` image); a ROM incompatibility, not K325T. The CRAM2K path (`$D030` bit 0,
+`$DC00-$DFFF` = colour bytes 1024-2047) is upstream code, unchanged by the K325T commits.

@@ -33,6 +33,12 @@
 --     its steady state (8 a frame from two spawners circling the centre: 6 straight at 3.5 px a
 --     frame, 2 curving at 2.5 px turning 1.5 degrees a frame; 110 frames of life, the rest
 --     hidden at (700, 600)); positions in the 10-bit space (off-screen X still expands)
+--   SC 22 + OBJS 11: the BASIC 65 recipe OBJ65R3 -- rows of nothing but $FFFF at their start
+--     (LINESTEP 80, CHRCOUNT 40: VIC-IV short rows of 2 bytes), 32 objects; PRE 2: 40 plain text
+--     glyphs a row (screen at $4A000) until frame 1 line 300, then the $FFFF rows; PRE 3: solid
+--     red glyphs behind each $FFFF (they get painted: the short-row rule); K2: PRE 4 = rows that
+--     paint nothing (39 x GOTOX 640, $FFFF last), after text rows (screen $4A000, colour $2000)
+--     until frame 1 line 300; PRE 5 = the same rows without the text (reference)
 --   SC 17 + OBJS 10: B65 examples/bounce.bas -- the 48-token star rows (6 x 4 x (GOTOX, FCM
 --     glyph)), 64 balls spread over the screen
 library ieee;
@@ -83,6 +89,7 @@ architecture sim of tb_viciv_lead is
   function stepsel(sc : integer; v4 : integer) return natural is
   begin
     if sc = 21 then return 40;                                 -- swarm2.bas rows: 20 tokens
+    elsif sc = 22 then return 80;                              -- OBJ65R3: LINESTEP 80
     elsif sc = 20 then
       if v4 = 2 then return 1020; else return 640; end if;    -- 25 x 1020 / 50 x 640 bytes
     elsif sc = 18 or sc = 19 then return 256; elsif sc = 17 then return 96; elsif sc >= 6 then return 492; else return 512; end if;
@@ -222,6 +229,10 @@ begin
           end if;
         end loop;
       end loop;
+    elsif OBJS = 11 then
+      -- OBJ65R3: 32 objects
+      no := 32;
+      for i in 0 to no - 1 loop ox(i) := 80 + (i * 97) mod 520; oy(i) := 16 + (i * 53) mod 360; end loop;
     elsif OBJS = 10 then
       -- bounce.bas: 64 balls spread over the screen
       no := 64;
@@ -328,6 +339,47 @@ begin
           w16(sp, 640); c16(cp, 16#10#, 255); nt := nt + 1;
         end loop;
       end loop;
+    elsif SC = 22 then
+      -- OBJ65R3: every row is $FFFF at its start (no tokens); PRE 2's text rows at $48000
+      ntok := 40;
+      for r in 0 to ROWS - 1 loop
+        sp := SCR + STEP * r; cp := STEP * r;
+        if PRE = 4 or PRE = 5 then                 -- (probe: 39 x GOTOX 640, $FFFF last)
+          for i in 0 to 38 loop w16(sp, 640); end loop;
+        end if;
+        w16(sp, 16#FFFF#);
+        if PRE = 3 then                            -- (probe: solid glyphs behind the $FFFF)
+          for i in 1 to 39 loop w16(sp, 160); end loop;
+        end if;
+        if PRE = 2 or PRE = 4 then
+          sp := 16#4A000# + STEP * r;
+          for i in 0 to 39 loop w16(sp, 1 + (i + r) mod 26); end loop;   -- letters
+        end if;
+      end loop;
+      if PRE = 3 then                              -- (probe: colour 2, red, for them)
+        for r in 0 to ROWS - 1 loop
+          cp := STEP * r;
+          for i in 0 to 39 loop c16(cp, 0, 2); end loop;
+        end loop;
+      end if;
+      if PRE = 4 or PRE = 5 then                   -- (probe: the GOTOX colour bytes)
+        for r in 0 to ROWS - 1 loop
+          cp := STEP * r;
+          for i in 0 to 38 loop c16(cp, 16#10#, 255); end loop;
+        end loop;
+      end if;
+      if PRE = 4 then                              -- (probe: the history text's colour, at $2000)
+        for r in 0 to ROWS - 1 loop
+          cp := 16#2000# + STEP * r;
+          for i in 0 to 39 loop c16(cp, 0, 1 + (i + r) mod 15); end loop;
+        end loop;
+      end if;
+      if PRE = 2 then                              -- colour for the text rows (also at STEP r)
+        for r in 0 to ROWS - 1 loop
+          cp := STEP * r;
+          for i in 0 to 39 loop c16(cp, 0, 1 + (i + r) mod 15); end loop;
+        end loop;
+      end if;
     elsif SC = 21 then
       -- swarm2.bas: 20 plain tokens a row (spaces; row 0: a score), LINESTEP 40, XCTL bit 3
       ntok := 20;
@@ -490,10 +542,18 @@ begin
     if CU = 1 then cu_en <= '1'; end if;
     if RL = 1 then rl_en <= '1'; end if;
     if SC = 2 or SC = 5 or SC = 8 or (SC >= 11 and SC /= 16 and SC /= 17) then rl_en <= '1'; end if;
-    if SC = 3 or SC = 7 or SC = 9 or SC = 16 or SC = 17 or SC = 21 then v2_en <= '1'; end if;
+    if SC = 3 or SC = 7 or SC = 9 or SC = 16 or SC = 17 or SC = 21 or SC = 22 then v2_en <= '1'; end if;
     if SC = 9 then ocount <= (others => '0'); end if;
     reg(16#51#, D051);                      -- NORRDEL (bit 7), DBLRR (bit 6)
     setup_done <= '1';
+    if PRE = 2 or PRE = 4 then
+      -- OBJ65R3 history: the text rows (screen at $48000) until frame 1 line 300
+      reg(16#60#, 0); reg(16#61#, 16#A0#); reg(16#62#, 4);
+      if PRE = 4 then reg(16#64#, 0); reg(16#65#, 16#20#); end if;
+      wait until frame = 1 and y = 300;
+      if PRE = 4 then reg(16#64#, 0); reg(16#65#, 0); end if;
+      reg(16#60#, SCR mod 256); reg(16#61#, (SCR / 256) mod 256); reg(16#62#, (SCR / 65536) mod 256);
+    end if;
     if PRE = 1 then
       -- history: v2 (bit 6) on these rows during frame 0 and part of frame 1, then bit 5 only
       v2_en <= '1'; rl_en <= '0';

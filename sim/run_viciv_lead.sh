@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run_viciv_lead.sh -- the real VIC-IV (viciv.vhdl, report-stripped copy) in GHDL: the K325T
-# RRB list mode lead (docs/rrb_list_mode.md, "First raster line budget").  71 scenarios of
-# tb_viciv_lead.vhdl in parallel (~14 min), then checks:
+# RRB list mode lead (docs/rrb_list_mode.md, "First raster line budget").  74 scenarios of
+# tb_viciv_lead.vhdl, JOBS (default 8) at a time (~45 min), then checks:
 #   s4 == s5   plain rows: XCTL bit 5 (lead) changes no pixel
 #   s2 == s3   reference GOTOX rows with the lead == v2 objects (6 objects, X 0/10/600, V400)
 #   g2 == g3   the same with 30 object parts in one row
@@ -43,54 +43,61 @@ grep -c "integer range 0 to 1023" $W/viciv.vhdl | grep -qx 3 || { echo "row_adva
 $G $W/viciv.vhdl 2>&1 | grep -i "error" && exit 1
 $G tb_viciv_lead.vhdl 2>&1 | grep -i error && exit 1
 ghdl -e --std=93c -fexplicit -frelaxed -fsynopsys --workdir=$W tb_viciv_lead 2>/dev/null
+# at most JOBS simulations at a time (default 8: the PC stays quiet; the suite takes longer)
+JOBS=${JOBS:-8}
+slot() { while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do wait -n; done; }
 run() {
   n=$1; shift
   ghdl -r --std=93c -fexplicit -frelaxed -fsynopsys --workdir=$W tb_viciv_lead "$@" -gOUTF=$W/$n.txt \
     --stop-time=80ms --ieee-asserts=disable 2>/dev/null | grep "^L " > $W/$n.log
 }
-run s1 -gSC=1 & run s2 -gSC=2 & run s3 -gSC=3 & run s4 -gSC=4 & run s5 -gSC=5 &
-run g1 -gSC=1 -gOBJS=1 & run g2 -gSC=2 -gOBJS=1 & run g3 -gSC=3 -gOBJS=1 &
+slot; run s1 -gSC=1 & slot; run s2 -gSC=2 & slot; run s3 -gSC=3 & slot; run s4 -gSC=4 & slot; run s5 -gSC=5 &
+slot; run g1 -gSC=1 -gOBJS=1 & slot; run g2 -gSC=2 -gOBJS=1 & slot; run g3 -gSC=3 -gOBJS=1 &
 # DBLRR on its schedule (V400 timing, 25 rows), parallax65.bas rows: plain, lead only, v2 birds,
 # v2 with an empty table
 D="-gOBJS=2 -gV400=2 -gD051=192"
-run q1 -gSC=6 $D & run q8 -gSC=8 $D & run q3 -gSC=7 $D & run q9 -gSC=9 $D &
+slot; run q1 -gSC=6 $D & slot; run q8 -gSC=8 $D & slot; run q3 -gSC=7 $D & slot; run q9 -gSC=9 $D &
 # fast token path (XCTL bit 7, FT=1) against the old path: three full-colour layers with
 # attributes (DBLRR schedule: the old path completes; and V200 with the one-line lead), the
 # parallax rows, v2 birds, the V400 objects, 30 parts, and the per-token microbenchmarks
-run t0 -gSC=11 $D -gFT=0 & run t1 -gSC=11 $D -gFT=1 & run t2 -gSC=11 -gOBJS=2 -gV400=0 -gFT=1 &
-run t3 -gSC=8 -gOBJS=2 -gV400=0 -gFT=0 & run t4 -gSC=8 -gOBJS=2 -gV400=0 -gFT=1 &
-run t5 -gSC=7 $D -gFT=0 & run t6 -gSC=7 $D -gFT=1 & run t7 -gSC=3 -gFT=1 & run t9 -gSC=3 -gOBJS=1 -gFT=1 &
-for m in 12 13 14 15; do run m${m}a -gSC=$m $D -gFT=0 & run m${m}b -gSC=$m $D -gFT=1 & done
+slot; run t0 -gSC=11 $D -gFT=0 & slot; run t1 -gSC=11 $D -gFT=1 & slot; run t2 -gSC=11 -gOBJS=2 -gV400=0 -gFT=1 &
+slot; run t3 -gSC=8 -gOBJS=2 -gV400=0 -gFT=0 & slot; run t4 -gSC=8 -gOBJS=2 -gV400=0 -gFT=1 &
+slot; run t5 -gSC=7 $D -gFT=0 & slot; run t6 -gSC=7 $D -gFT=1 & slot; run t7 -gSC=3 -gFT=1 & slot; run t9 -gSC=3 -gOBJS=1 -gFT=1 &
+for m in 12 13 14 15; do slot; run m${m}a -gSC=$m $D -gFT=0 & slot; run m${m}b -gSC=$m $D -gFT=1 & done
 wait
 # XCTL bit 3 (unpainted pixels show as background): sparse rows after dense rows == the same
 # rows over an opaque base of spaces; also with the lead, the fast token path, DBLRR + lead
-run u0 -gSC=19 -gV400=0 & run u1 -gSC=18 -gV400=0 -gCU=1 & run u2 -gSC=18 -gV400=0 &
-run u3 -gSC=18 -gV400=0 -gCU=1 -gRL=1 & run u4 -gSC=19 -gV400=0 -gRL=1 &
-run u5 -gSC=18 -gV400=0 -gCU=1 -gFT=1 & run u6 -gSC=18 $D -gCU=1 -gRL=1 & run u7 -gSC=19 $D -gRL=1 &
+slot; run u0 -gSC=19 -gV400=0 & slot; run u1 -gSC=18 -gV400=0 -gCU=1 & slot; run u2 -gSC=18 -gV400=0 &
+slot; run u3 -gSC=18 -gV400=0 -gCU=1 -gRL=1 & slot; run u4 -gSC=19 -gV400=0 -gRL=1 &
+slot; run u5 -gSC=18 -gV400=0 -gCU=1 -gFT=1 & slot; run u6 -gSC=18 $D -gCU=1 -gRL=1 & slot; run u7 -gSC=19 $D -gRL=1 &
 # bullet hell: SC 17 (v2 pile in row 10) against SC 20 (the same as plain parts, with the lead);
 # XCTL bit 3 (CU 1): the rows are sparse and the reference's padding GOTOX would move the line end
-run p64 -gSC=17 -gOBJS=4 -gCU=1 -gFT=1 & run r64 -gSC=20 -gOBJS=4 -gCU=1 -gFT=1 &
-run p128 -gSC=17 -gOBJS=5 -gCU=1 -gFT=1 & run p128d -gSC=17 $D -gOBJS=5 -gCU=1 -gFT=1 &
-run r128d -gSC=20 $D -gOBJS=5 -gCU=1 -gFT=1 &
-run p231 -gSC=17 $D -gOBJS=7 -gCU=1 -gFT=1 & run r231 -gSC=20 $D -gOBJS=7 -gCU=1 -gFT=1 &
-run p64d -gSC=17 $D -gOBJS=4 -gCU=1 & run r64d -gSC=20 $D -gOBJS=4 -gCU=1 & run p255 -gSC=17 $D -gOBJS=6 -gCU=1 -gFT=1 &
+slot; run p64 -gSC=17 -gOBJS=4 -gCU=1 -gFT=1 & slot; run r64 -gSC=20 -gOBJS=4 -gCU=1 -gFT=1 &
+slot; run p128 -gSC=17 -gOBJS=5 -gCU=1 -gFT=1 & slot; run p128d -gSC=17 $D -gOBJS=5 -gCU=1 -gFT=1 &
+slot; run r128d -gSC=20 $D -gOBJS=5 -gCU=1 -gFT=1 &
+slot; run p231 -gSC=17 $D -gOBJS=7 -gCU=1 -gFT=1 & slot; run r231 -gSC=20 $D -gOBJS=7 -gCU=1 -gFT=1 &
+slot; run p64d -gSC=17 $D -gOBJS=4 -gCU=1 & slot; run r64d -gSC=20 $D -gOBJS=4 -gCU=1 & slot; run p255 -gSC=17 $D -gOBJS=6 -gCU=1 -gFT=1 &
 # the reference after v2 ran on its rows (PRE 1, as rrb_list_test.py case L: v2 leaves its
 # expansion's $FFFF right after the 510-token rows, which must not shorten the row advance)
-run r231h -gSC=20 $D -gOBJS=7 -gCU=1 -gFT=1 -gPRE=1 &
+slot; run r231h -gSC=20 $D -gOBJS=7 -gCU=1 -gFT=1 -gPRE=1 &
 # v3 table: 1023 objects spread over the screen (V400, bit 7): reference rows with the parts (lead)
 # against the v2/v3 objects
-run x1 -gSC=2 -gOBJS=8 -gFT=1 & run x2 -gSC=3 -gOBJS=8 -gFT=1 &
+slot; run x1 -gSC=2 -gOBJS=8 -gFT=1 & slot; run x2 -gSC=3 -gOBJS=8 -gFT=1 &
 wait
 # step 7, 4 px painting (XCTL2 bit 0, QP 1): the same pictures as the 2 px fast path
 Q="-gFT=1 -gQP=1"
-run t1q -gSC=11 $D $Q & run t2q -gSC=11 -gOBJS=2 -gV400=0 $Q & run t4q -gSC=8 -gOBJS=2 -gV400=0 $Q &
-run t6q -gSC=7 $D $Q & run t7q -gSC=3 $Q & run t9q -gSC=3 -gOBJS=1 $Q &
-for m in 12 13 14 15; do run m${m}q -gSC=$m $D $Q & done
-run u5q -gSC=18 -gV400=0 -gCU=1 $Q & run p64q -gSC=17 -gOBJS=4 -gCU=1 $Q &
-run p231q -gSC=17 $D -gOBJS=7 -gCU=1 $Q & run x2q -gSC=3 -gOBJS=8 $Q &
+slot; run t1q -gSC=11 $D $Q & slot; run t2q -gSC=11 -gOBJS=2 -gV400=0 $Q & slot; run t4q -gSC=8 -gOBJS=2 -gV400=0 $Q &
+slot; run t6q -gSC=7 $D $Q & slot; run t7q -gSC=3 $Q & slot; run t9q -gSC=3 -gOBJS=1 $Q &
+for m in 12 13 14 15; do slot; run m${m}q -gSC=$m $D $Q & done
+slot; run u5q -gSC=18 -gV400=0 -gCU=1 $Q & slot; run p64q -gSC=17 -gOBJS=4 -gCU=1 $Q &
+slot; run p231q -gSC=17 $D -gOBJS=7 -gCU=1 $Q & slot; run x2q -gSC=3 -gOBJS=8 $Q &
 # (+ the expander's fast object parts): 128 objects in one line == 2 px; 255 objects in ONE line
 # (V400, no DBLRR: the step-7 gate) -- timing
-run p128q -gSC=17 -gOBJS=5 -gCU=1 $Q & run p255q -gSC=17 -gOBJS=6 -gCU=1 $Q &
+slot; run p128q -gSC=17 -gOBJS=5 -gCU=1 $Q & slot; run p255q -gSC=17 -gOBJS=6 -gCU=1 $Q &
+# K2 (XCTL bit 3): rows that paint nothing after text rows == the same rows without the text
+# (V400, v2 with 32 objects, bits 3/4/6/7; 2 px and 4 px)
+slot; run k2a -gSC=22 -gOBJS=11 -gCU=1 -gFT=1 -gPRE=4 & slot; run k2b -gSC=22 -gOBJS=11 -gCU=1 -gFT=1 -gPRE=5 &
+slot; run k2q -gSC=22 -gOBJS=11 -gCU=1 $Q -gPRE=4 &
 wait
 python3 - $W <<'PY'
 import sys
@@ -108,7 +115,8 @@ for a, b in (("s4", "s5"), ("s2", "s3"), ("g2", "g3"), ("q8", "q9"),
              ("p231", "r231h"), ("x1", "x2"),
              ("t1", "t1q"), ("t2", "t2q"), ("t4", "t4q"), ("t6", "t6q"), ("t7", "t7q"), ("t9", "t9q"),
              ("m12b", "m12q"), ("m13b", "m13q"), ("m14b", "m14q"), ("m15b", "m15q"), ("u5", "u5q"),
-             ("p64", "p64q"), ("p231", "p231q"), ("x2", "x2q"), ("p128", "p128q")):
+             ("p64", "p64q"), ("p231", "p231q"), ("x2", "x2q"), ("p128", "p128q"),
+             ("k2b", "k2a"), ("k2b", "k2q")):
     fa, fb = frame(a), frame(b)
     n = sum(1 for y in fa if fa[y] != fb.get(y))
     print("%s vs %s: %d lines differ (frame %d lines)" % (a, b, n, len(fa)))
@@ -134,7 +142,7 @@ for n in ("s1", "s2", "s3", "s4", "s5", "g1", "g2", "g3", "q1", "q8", "q3", "q9"
           "t3", "t4", "t5", "t6", "t7", "t9", "m12a", "m12b", "m13a", "m13b", "m14a", "m14b",
           "m15a", "m15b", "p64", "r64", "p128", "p128d", "r128d", "p231", "r231", "p64d", "r64d",
           "p255", "r231h", "x1", "x2", "t1q", "t2q", "t4q", "t6q", "t7q", "t9q", "m12q", "m13q",
-          "m14q", "m15q", "u5q", "p64q", "p231q", "x2q", "p128q", "p255q"):
+          "m14q", "m15q", "u5q", "p64q", "p231q", "x2q", "p128q", "p255q", "k2a", "k2b", "k2q"):
     L = lines(n)
     late = sum(1 for l in L if l[1] > 0)
     paint = max(l[2] for l in L)

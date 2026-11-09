@@ -40,6 +40,8 @@ must equal B with the bit on (list mode changes nothing in rows without a LIST t
      (groups / collides-with masks, circles) via $FFD7200-8C against the model; M2 multi-row
      objects (heights 1..4, objects spanning rows) == plain parts; M3 the pair budget
      ($FFD7288: truncated, status bit 2); M4 designed circles; level 3
+  K2) XCTL bit 3 on rows that paint nothing (GOTOX tokens only) after dense rows == over an
+     opaque base of spaces; with the lead + bit 7, v2 (empty table) + bit 7, and 4 px (level 4)
   N) level 4, XCTL2 $FFD71F1 bit 0 (4 px painting, step 7): the register; cases H, J, L, M run
      with XCTL2 0 and 1 -- every 4 px capture == its 2 px capture; 255 objects on one row in ONE
      line per painting (V400, no DBLRR): counter 25 < 2590, 23 == 0.  Skipped below level 4.
@@ -408,6 +410,8 @@ def run():
     ok_j = case_j()
     # K) XCTL bit 3: unpainted raster buffer pixels show as background
     ok_k = case_k()
+    # K2) XCTL bit 3 on rows that paint nothing (lead, v2, 4 px)
+    ok_k2 = case_k2()
     # L) bullet hell: 231 / 255 objects on one row (2 KB list rows, expansion overlapping painting)
     ok_l = case_l()
     # M) list mode v3: 1023 objects, buckets, collisions page, budget, circles
@@ -417,7 +421,7 @@ def run():
 
     # a handful of pixels differ between any two captures of the same picture (capture noise)
     print("RRB_LIST_TEST_%s" % ("PASS" if max(n1, n2, n3, n4, n5, n6, n7, n8) <= NOISE and ok_g
-                                and ok_h and ok_i and ok_j and ok_k and ok_l and ok_m and ok_n
+                                and ok_h and ok_i and ok_j and ok_k and ok_k2 and ok_l and ok_m and ok_n
                                 else "FAIL"))
 
 
@@ -820,6 +824,70 @@ def case_k():
             ok = ok and n <= NOISE
     finally:
         poke(XCTL, [x0])
+    return ok
+
+
+def case_k2():
+    """K2: XCTL bit 3 on rows that paint nothing: dense rows (80 solid glyphs) and rows of GOTOX
+    tokens only (X 640: nothing painted, no $FFFF -- a $FFFF at a row's start would be a short
+    row of 2 bytes) in turn, V200: with bit 3 the empty rows must equal the same rows over an
+    opaque base of 80 spaces (bit 3 off) -- also with the lead + bit 7, with v2 (an empty object
+    table) + bit 7, and at level 4 each again with XCTL2 bit 0 (4 px painting)."""
+    from PIL import ImageChops
+    x0 = peek(XCTL)[0]
+    lvl = peek(0xFFD71FD)[0]
+    x2_0 = peek(XCTL2)[0] if lvl >= 4 else 0
+    rows_s, rows_c, ref_s, ref_c = [], [], [], []
+    for r in range(ROWS):
+        if r % 2 == 0:
+            s_ = sum((w(160) for i in range(80)), [])
+            c_ = sum(([0, 1 + (i + r) % 15] for i in range(80)), [])
+            rows_s.append(s_); rows_c.append(c_); ref_s.append(s_); ref_c.append(c_)
+        else:
+            rows_s.append(gotox(640)); rows_c.append([0x10, 0xFF])
+            ref_s.append(sum((w(32) for i in range(80)), []))
+            ref_c.append(sum(([0, 1 + (i + r) % 15] for i in range(80)), []))
+    n_tok = max(len(x) for x in ref_s) // 2
+    for rs, rc in ((rows_s, rows_c), (ref_s, ref_c)):
+        for a_, b_ in zip(rs, rc):
+            while len(a_) // 2 < n_tok:                        # GOTOX past the end: paints nothing
+                a_ += gotox(640)
+                b_ += [0x10, 0xFF]
+
+    def diff(a, b):
+        d = ImageChops.difference(a, b)
+        pts = [(i % a.size[0], i // a.size[0]) for i, p in enumerate(d.getdata()) if max(p) > 40]
+        return len(pts), pts[:6]
+
+    variants = [("K2", 0x00, 0), ("K2 lead + bit 7", 0xB0, 0), ("K2 v2 + bit 7", 0xC0, 0)]
+    if lvl >= 4:
+        variants += [(n + " 4 px", b, 1) for n, b, _ in variants if b & 0x80]
+    ok = True
+    try:
+        # v2: no objects (count 0, no load)
+        poke(0xFFD71F8, [TAB & 0xFF, TAB >> 8 & 0xFF, TAB >> 16 & 0xF, 0])
+        poke(0xFFD728B, [0])
+        poke(0xFFD71FC, [0])
+        for name, bits, q in variants:
+            if lvl >= 4:
+                poke(XCTL2, [q])
+            poke(XCTL, [x0 & ~0xF8 | 0x10])
+            setup(ref_s, ref_c, n_tok)
+            poke(XCTL, [x0 & ~0xF8 | 0x10 | bits])
+            p_ref, img_ref = capture()
+            poke(XCTL, [x0 & ~0xF8 | 0x10])
+            setup(rows_s, rows_c, n_tok)
+            poke(XCTL, [x0 & ~0xF8 | 0x18 | bits])               # + bit 3
+            p_on, img_on = capture()
+            n, e = diff(img_on, img_ref)
+            print("%s rows that paint nothing, with bit 3 vs over a base of spaces: %d px differ "
+                  "%s%s  (%s %s)" % (name, n, e, "" if n <= NOISE else "  <-- FAIL",
+                  os.path.basename(p_ref), os.path.basename(p_on)))
+            ok = ok and n <= NOISE
+    finally:
+        poke(XCTL, [x0])
+        if lvl >= 4:
+            poke(XCTL2, [x2_0])
     return ok
 
 

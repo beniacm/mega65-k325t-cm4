@@ -808,6 +808,12 @@ before 2592.
   the colour RAM port is always released at the end of an expansion.
 - **A `$FFFF` row advances the next row by its own length** (VIC-IV short-row rule, not
   LINESTEP); list mode keeps that for the rows whose `$FFFF` the v2 objects replace.
+  So a row that is *only* a `$FFFF` at its start is a row of 2 bytes: the next row begins 2
+  bytes later and paints whatever tokens it finds there (the OBJ65R3 recipe's garbage strip,
+  2026-11-09; GHDL: the tokens behind the `$FFFF` are painted, with or without bit 7). An empty
+  row for v2 objects: a single transparent GOTOX with CHRCOUNT 1 (the objects are appended
+  after it), or the `$FFFF` as the row's last token (byte LINESTEP - 2). XCTL bit 3 clears such
+  rows like any other (GHDL and case K2: rows that paint nothing, after text, == no history).
 - Tests must stop the CPU (monitor `t1`): BASIC 65 rewrites VIC-IV registers while it runs.
 - The VIC-IV reads the token after a row's last one (CHRCOUNT + 1; never painted), and upstream
   takes a `$FFFF` there as the end of a short row: the row advance becomes that position instead
