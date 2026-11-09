@@ -1,3 +1,4 @@
+1 rem core: any mega65 core; k325t feature level 3 (step 6) adds the six birds. not on k325t levels 1-2.
 5 rem per frame: 19 statements (46 with the k325t birds), 3.9 ms in xemu without the vsync wait: 50 fps. rrb: 3 gotox + 123 fcm glyphs a line, ~1970 of 2592 cycles (16 per fcm glyph); dblrr on the v400 schedule doubles that
 10 rem parallax demo for basic 65: three overlapping rrb layers (vic-iv)
 20 rem twin of examples/parallax.bas (b65 basic): same picture, same motion.
@@ -72,7 +73,7 @@
 610 poke $d060,0,0,5:wpoke $d064,co
 620 poke $d020,0:poke $d021,16:if db then poke $d031,peek($d031) or 8:poke $d05b,0:poke $d07b,24:poke $d051,$c0
 625 poke $d05c,peek($d05c)+16:rem wider side border: hides the fine-scroll gap at the left edge
-630 if k then poke $ffd71f0,peek($ffd71f0) or $50
+630 if k then poke $ffd71f0,peek($ffd71f0) or $d0
 640 gosub 1600
 760 rem main loop: positions, one dma list, sprites, birds, wait for vsync
 765 rem v2 x/y must be 0..1023 (10-bit; y signed): negative values are masked with and 1023
@@ -83,7 +84,7 @@
 820 poke $d701,$31,5,0,0,0:rem list at $53100: the trigger ($d705) is written last
 830 x=mod(int(p/3),400):poke $d00c,x and 255:poke $d010,int(x/256)*64:poke $d00d,150+mod(int(p/10),6)
 840 x=400-mod(p*2,400):poke $d00e,x and 255:poke $d010,peek($d010) or int(x/256)*128:poke $d00f,80
-850 if k then poke $5f880,$c0+mod(int(p/4),4):poke $5f884,$c0+mod(int(p/4)+2,4):for i=0 to 5:e=$5f800+16*i:wpoke e,(1664-mod(p*5+i*110,700)) and 1023:wpoke e+2,(30+i*12+mod(int(p/4)+i*3,8)) and 1023:next i
+850 if k then poke $5f900,$c0+mod(int(p/4),4):poke $5f904,$c0+mod(int(p/4)+2,4):for i=0 to 5:e=$5f800+32*i:wpoke e,(1664-mod(p*5+i*110,700)) and 1023:wpoke e+2,(30+i*12+mod(int(p/4)+i*3,8)) and 1023:next i
 860 vsync 251
 870 if p<>bn then 790
 880 t=ti-t
@@ -93,7 +94,7 @@
 1020 rem dma job at j: options $0b,0; cmd cm, count nb, source s, target d
 1030 s2=s-int(s/1048576)*1048576:d2=d-int(d/1048576)*1048576
 1040 poke j,$0b,0,cm,mod(nb,256),int(nb/256),mod(s2,256),mod(int(s2/256),256),int(s2/65536),mod(d2,256),mod(int(d2/256),256),int(d2/65536),0,0,0:return
-1070 poke $d015,0:poke $d06b,0:poke $d051,$80:poke $d05b,d5:poke $d07b,d7:if k then poke $ffd71f0,peek($ffd71f0) and $af
+1070 poke $d015,0:poke $d06b,0:poke $d051,$80:poke $d05b,d5:poke $d07b,d7:if k then poke $ffd71f0,peek($ffd71f0) and $2f
 1080 poke $d05d,v4 or 128:poke $d031,vc:poke $d016,vd:poke $d05d,v4
 1085 poke $d054,v0:poke $d058,v1,v2:poke $d05c,v3:poke $d05e,v5:poke $d060,v6,v7,v8,v9,va,vb:poke $d021,ve
 1090 gosub 2860:scnclr:return
@@ -143,11 +144,11 @@
 1620 poke $d06c,0,$fa,$85:poke $5fa0c,$f0,$17,$f3,$17
 1630 poke $d06b,$c0:poke $d02d,0,0:poke $d01b,$40:poke $d017,0:poke $d01d,0:poke $d01c,0:poke $d015,$c0:return
 1700 rem four flapping frames (8x8 full colour) at $5f000 = glyphs $17c0-$17c3;
-1710 rem birds 0,2,4 use token list $5f880, birds 1,3,5 $5f884 (opposite phase)
+1710 rem birds 0,2,4 use token list $5f900, birds 1,3,5 $5f904 (opposite phase)
 1720 restore 1790:k$=".obBwy":for f=0 to 3:for y=0 to 7:read a$:for x=0 to 7
 1730 poke $5f000+64*f+8*y+x,val(mid$("000144197188175141",3*instr(k$,mid$(a$,x+1,1))-2,3)):next x,y,f
-1740 poke $5f880,$c0,$17,255,255,$c2,$17,255,255
-1750 for i=0 to 5:e=$5f800+16*i:poke e,0,0,0,0,255,1,$45,0:wpoke e+8,$f880+4*(i and 1):wpoke e+10,$3c00:poke e+12,0,0,0,0:next i
+1740 poke $5f900,$c0,$17,255,255,$c2,$17,255,255
+1750 for i=0 to 5:e=$5f800+32*i:poke e,0,0,0,0,255,1,$45,0:wpoke e+8,$f900+4*(i and 1):wpoke e+10,$3c00:poke e+12,0,0,0,0:next i
 1760 poke cb-co+$3c00,0,0:poke $ffd71f8,0,$f8,5,6:return
 1790 data "ow....wo",".owbbwo.","..obbo..","...bBy..","...BB...","........","........","........"
 1800 data "........","owwbbwwo","..obbo..","...bBy..","...BB...","........","........","........"

@@ -9,8 +9,8 @@
 90 poke ga+64*i+8*y+x,p:next x,y:restore
 100 rem object tokens: glyph, end ($ffff); colour bytes 0
 110 wpoke oa+16*i,g+i:wpoke oa+16*i+2,65535:wpoke c-$4000+oc+16*i,0
-120 rem object table entry: x, y, mask, height, address 19..16, -, address, colour, stride
-130 e=t+16*i:wpoke e,0:wpoke e+2,0:poke e+4,255:poke e+5,1:poke e+6,4:poke e+7,0
+120 rem object table entry (32 bytes, hardware reads 0..15): x, y, mask, height, address 19..16, -, address, colour, stride
+130 e=t+32*i:wpoke e,0:wpoke e+2,0:poke e+4,255:poke e+5,1:poke e+6,4:poke e+7,0
 140 wpoke e+8,$9000+16*i:wpoke e+10,oc+16*i:wpoke e+12,0:wpoke e+14,0
 150 next i
 160 data 60,126,255,255,255,255,126,60
@@ -23,7 +23,7 @@
 240 wpoke $d058,l:poke $d05e,80:poke $d063,peek($d063) and 192
 250 poke $d060,0:poke $d061,0:poke $d062,4:wpoke $d064,$4000
 255 rem object table at t, n objects; list mode v2 + fast rrb
-260 poke $ffd71f8,0:poke $ffd71f9,$c0:poke $ffd71fa,4:poke $ffd71fb,n:poke $ffd71f0,$50
+260 poke $ffd71f8,0:poke $ffd71f9,$c0:poke $ffd71fa,4:poke $ffd71fb,n:poke $ffd71f0,$d0
 270 dim x(n),y(n),dx(n),dy(n)
 280 for i=0 to n-1:x(i)=20+rnd(1)*590:y(i)=8+rnd(1)*380
 290 dx(i)=1+int(rnd(1)*3):dy(i)=1+int(rnd(1)*2):next i
@@ -31,6 +31,6 @@
 310 for i=0 to n-1
 320 x=x(i)+dx(i):if x<0 or x>630 then dx(i)=-dx(i):x=x(i)+dx(i)
 330 y=y(i)+dy(i):if y<0 or y>391 then dy(i)=-dy(i):y=y(i)+dy(i)
-340 x(i)=x:y(i)=y:e=t+16*i:wpoke e,x:wpoke e+2,y
+340 x(i)=x:y(i)=y:e=t+32*i:wpoke e,x:wpoke e+2,y
 350 next i
 360 goto 310

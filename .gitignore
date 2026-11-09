@@ -24,6 +24,7 @@ __pycache__/
 /c64test/*.d64
 # GHDL work dirs / generated sim copies of upstream files / test data derived from games
 /sim/*work/
+/sim/*work[0-9]/
 /sim/*_simcopy.vhd
 /sim/*_simcopy.vhdl
 /sim/eob_head.hex

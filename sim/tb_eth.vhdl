@@ -149,7 +149,7 @@ begin
   begin
     wait for 2 us;
     status;
-    assert st(23 downto 16) = x"03" report "bridge version" severity failure;
+    assert st(23 downto 16) = x"04" report "bridge version" severity failure;
     assert unsigned(st(151 downto 144)) = 8 report "expected 8 free RX slots" severity failure;
     -- push two frames to the MAC
     for f in RXLENS'range loop
