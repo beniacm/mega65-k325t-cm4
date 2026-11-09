@@ -32,7 +32,7 @@ G="ghdl -a --std=93c -fexplicit -frelaxed -fsynopsys --workdir=$W"
 for f in debugtools.vhdl cputypes.vhdl victypes.vhdl ghdl_ram18x2k.vhdl ghdl_screen_ram_buffer.vhdl \
          colourram.vhdl colourram_k325t.vhdl ghdl_ram32x1024.vhdl charrom.vhdl ghdl_alpha_blend.vhdl \
          pal_simulation.vhdl sprite.vhdl bitplane.vhdl ghdl_ram8x4096.vhdl bitplanes.vhdl \
-         vicii_sprites.vhdl rrb_list_expander.vhdl viciv.vhdl; do
+         vicii_sprites.vhdl rrb_list_expander.vhdl rrb_list_frontend.vhdl viciv.vhdl; do
   python3 strip_reports.py $V/$f $W/$f && $G $W/$f 2>&1 | grep -i "error" && exit 1
 done
 # row_advance / short_line_length are "integer range 0 to 512" = 10-bit registers in hardware

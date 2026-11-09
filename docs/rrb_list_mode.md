@@ -270,6 +270,12 @@ Hardware: `rrb_list_expander.vhdl` (the pass over the buckets, reading the shape
 
 ## How the VIC-IV does it
 
+Code: `viciv.vhdl` keeps the list mode states and branches of its raster FSM (ListWait, ListRun,
+FrontWait, the fast token decoder, the lead's shifted buffer halves) and instantiates
+`rrb_list_expander.vhdl` (lists, the object table, buckets, collisions) and
+`rrb_list_frontend.vhdl` (the XCTL bit 3 valid bits, the colour row buffer, the diagnostic
+counters: the parts that sit beside the FSM, moved out of `viciv.vhdl` unchanged).
+
 Today: at the badline the VIC-IV copies the screen row (screen RAM) into the 1 KB row buffer
 (`screen_ram_buffer`); while painting each raster line it reads tokens from that buffer, and the
 colour bytes **directly from colour RAM**, sequentially from `colour_ram_base + first_card`.
@@ -599,7 +605,7 @@ background pixel of the screen colour shows), and every line runs to the full te
 
 ## Diagnostic counters
 
-Hardware counters in the VIC-IV (pixel clock, 81 MHz) for the list mode path, read through the
+Hardware counters in the VIC-IV (pixel clock, 81 MHz; `rrb_list_frontend.vhdl`) for the list mode path, read through the
 K325T page; `scripts/rrb_diag.py` (print / `clear` / `watch SECONDS`) reads them via the serial
 monitor. Not gated by XCTL; reset does not clear them.
 
