@@ -1,7 +1,7 @@
 -- tb_soft_rtc.vhdl -- soft_rtc calendar: leap years, month ends, year 2099 -> 2000, register reads;
 -- list mode collision registers ($FFD71A0-C3): copy on the toggle, partner, status, IRQ;
 -- the v3 page $FFD7200-$FFD728C: 1024 bits, 10-bit index / partner / count, budget, count
--- registers ($FFD71FB clears the high bits), truncated / bucket-full status, level 3
+-- registers ($FFD71FB clears the high bits), truncated / bucket-full status, level 4
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -136,11 +136,11 @@ begin
     assert irq_n = '1' report "IRQ while disabled" severity failure;
     rst_n <= '0'; wait until rising_edge(clk); rst_n <= '1'; wait until rising_edge(clk);
     peek(16#C0#, v); assert v = x"00" report "status after reset" severity failure;
-    peek(16#FD#, v); assert v = x"03" report "feature level $FFD71FD not 3" severity failure;
+    peek(16#FD#, v); assert v = x"04" report "feature level $FFD71FD not 4" severity failure;
     report "collision registers ok";
 
     -- v3 page
-    peek2(16#8C#, v); assert v = x"03" report "level $FFD728C" severity failure;
+    peek2(16#8C#, v); assert v = x"04" report "level $FFD728C" severity failure;
     col_bits <= (5 => '1', 1000 => '1', 1023 => '1', others => '0');
     col_count <= to_unsigned(300, 10); col_trunc <= '1'; bk_full <= '1';
     col_toggle <= not col_toggle;

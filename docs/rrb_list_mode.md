@@ -71,7 +71,7 @@ Registers (cleared by reset):
 | `$FFD71FB` | number of objects, low byte (a write also clears bits 9..8: 0..255 for old programs) |
 | `$FFD728A-$FFD728B` | number of objects, 10 bits (0..1023; `$FFD728A` = `$FFD71FB` without clearing the high bits) |
 | `$FFD71FC` | bit 0 HOLD: keep the last snapshot (no copy per frame) |
-| `$FFD71FD` | read only: K325T extension level (1 = XCTL bits 0-7 incl. bit 3; 2 = also the collides-with mask +15 and painting overlapped with the expansion, 2 KB list rows; 3 = the v3 table: 32-byte entries, 1023 objects, per-row buckets, circle test, pair budget, the `$FFD7200` page) |
+| `$FFD71FD` | read only: K325T extension level (1 = XCTL bits 0-7 incl. bit 3; 2 = also the collides-with mask +15 and painting overlapped with the expansion, 2 KB list rows; 3 = the v3 table: 32-byte entries, 1023 objects, per-row buckets, circle test, pair budget, the `$FFD7200` page; 4 = XCTL2 `$FFD71F1` bit 0, 4 px painting, also at `$FFD728C`) |
 
 The address and the count are several bytes in the CPU's clock domain; the VIC-IV latches them
 at the start of each copy. Write them before setting XCTL bit 6, or with HOLD set (then clear
@@ -500,7 +500,8 @@ expansion 245, first object part at 1871), no late pixels; + the sprite fetch (~
 
 ## 4 px painting (XCTL2 bit 0, step 7)
 
-**XCTL2 `$FFD71F1`** (read/write, cleared by reset; bits 7..1 read 0 and are reserved). Bit 0
+**XCTL2 `$FFD71F1`** (level 4: test `$FFD71FD` >= 4 first; read/write, cleared by reset; bits
+7..1 read 0 and are reserved). Bit 0
 works only together with XCTL bits 4 and 7 (fast RRB painting + fast token path); with bit 0
 off, or without bits 4 and 7, every picture and every cycle is as before (GHDL: the 71
 `run_viciv_lead.sh` scenarios with the bit off are byte-identical to step 6's outputs).
@@ -515,6 +516,10 @@ What it changes (all of it gated by the bit):
 - **GOTOX**: dispatched as soon as the painter is idle (its last write is out); the decoder keeps
   its own copy of the GOTOX's Y offset, sign and draw mask, so the token behind it is decoded
   without waiting for the dispatch.
+- **decoder and fetch loop** (piece 3): 3 cycles per token -- the decoder puts colour byte 1's
+  address out in D0 and does D3's attribute decode in D2; PaintDispatch/TurboWait put the next
+  glyph's chip RAM read out themselves and go straight to PaintMemWait2 (no PaintMemWait); a
+  full-colour or plain glyph is dispatched as soon as the painter is idle.
 - **expander** (list mode v2/v3, object parts from the table scan): a one-row hit goes straight
   to emitting (no multiply); the object's first token reads go out during its GOTOX; the next
   table word is read ahead while a part is fetched; a part ends when its `$FFFF` comes back,
@@ -540,30 +545,31 @@ Text rows = 3 x (GOTOX + 81 tokens), non-badline painting cycles; piles = one-gl
 on row 10, painting end (expansion end) in cycles from the line start; DBLRR has 5184 per
 painting, otherwise 2592.
 
-| case | bit off (2 px, bit 7) | 4 px, painter only (parts 1-2) | + piece 1 (expander) + piece 2 (GOTOX) |
-|---|---|---|---|
-| all FCM | 1006 | 1002 | **993** |
-| all plain | 1490 | 1006 | **995** |
-| all NCM | 1974 | 1006 | **995** |
-| GOTOX + FCM pairs | 1611 | 1371 | **993** |
-| three FCM layers with attributes | 1123 | 1004 | **994** |
-| expansion per object part (unit test, MLAT 3) | 17 | 17 | **7** (9 if the token data is not 4-byte aligned; MLAT 4: 8) |
-| expansion per part in the VIC-IV (64 -> 255 objects) | 17.0 | 17.0 | **8.0** |
-| 64 objects, no DBLRR | 1371 (1258) | 1278 | **816** (515) |
-| 64 objects, DBLRR | - | - | **816** (515) |
-| 128 objects, no DBLRR | 2459 (2346) | - | **1328** (1027) |
-| 128 objects, DBLRR | 2459 (2346) | - | **1328** (1027) |
-| 231 objects, DBLRR | 4210 (4097) | 4117 | **2152** (1851) |
-| 255 objects, DBLRR | 4618 (4505) | - | **2344** (2043) |
-| 255 objects in one line, no DBLRR | does not fit | does not fit | **2344** (2043) of 2592 |
-| 1023 objects spread over 50 rows | 1189 (939) | 976 | **825** (334) |
+| case | bit off (2 px, bit 7) | 4 px, painter only (parts 1-2) | + piece 1 (expander) + piece 2 (GOTOX) | + piece 3 (3-cycle decoder, merged fetch loop) |
+|---|---|---|---|---|
+| all FCM | 1006 | 1002 | **993** | **745** |
+| all plain | 1490 | 1006 | **995** | 989 (the painter: 4 cycles per plain glyph) |
+| all NCM | 1974 | 1006 | **995** | 989 (the painter: 16 px = 4 cycles) |
+| GOTOX + FCM pairs | 1611 | 1371 | **993** | **745** |
+| three FCM layers with attributes | 1123 | 1004 | **994** | **785** |
+| expansion per object part (unit test, MLAT 3) | 17 | 17 | **7** (9 if the token data is not 4-byte aligned; MLAT 4: 8) | 7 |
+| expansion per part in the VIC-IV (64 -> 255 objects) | 17.0 | 17.0 | **8.0** | 8.8 (the faster fetch loop takes more of the port) |
+| 64 objects, no DBLRR | 1371 (1258) | 1278 | **816** (515) | **639** (489) |
+| 64 objects, DBLRR | - | - | **816** (515) | - |
+| 128 objects, no DBLRR | 2459 (2346) | - | **1328** (1027) | **1134** (1023) |
+| 128 objects, DBLRR | 2459 (2346) | - | **1328** (1027) | - |
+| 231 objects, DBLRR | 4210 (4097) | 4117 | **2152** (1851) | **2061** (1950) |
+| 255 objects, DBLRR | 4618 (4505) | - | **2344** (2043) | - |
+| 255 objects in one line, no DBLRR | does not fit | does not fit | **2344** (2043) of 2592 | **2277** (2166) of 2592 |
+| 1023 objects spread over 50 rows | 1189 (939) | 976 | **825** (334) | **741** (434) |
 
 DBLRR changes no cycle count here (it only gives two lines per painting). On the way, piece 1
 without its last two parts (the 32-bit `$FFFF` look-ahead and the GOTOX's port cycles) gave 9
 cycles per part in the unit test and 64/128/231 piles of 1080/1784/2917; with piece 2 887/1655/
-2891 and 255 on DBLRR 3179.  The remaining limits: the token pipeline (4 cycles per glyph, the
-decoder) for text rows, and for piles the decoder + the expander's chip RAM port (two tokens per
-part, ~8 cycles).
+2891 and 255 on DBLRR 3179.  After piece 3 the limits are: the painter for plain and NCM glyphs (4 cycles each), 3 cycles per
+token for FCM and GOTOX (decoder and fetch loop, the colour bytes come one per cycle from an
+8-bit port), and for piles the expander (~8-9 cycles per part, sharing the chip RAM port with the
+glyph reads).
 
 ## Unpainted pixels (XCTL bit 3)
 

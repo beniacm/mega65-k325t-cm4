@@ -40,6 +40,9 @@ must equal B with the bit on (list mode changes nothing in rows without a LIST t
      (groups / collides-with masks, circles) via $FFD7200-8C against the model; M2 multi-row
      objects (heights 1..4, objects spanning rows) == plain parts; M3 the pair budget
      ($FFD7288: truncated, status bit 2); M4 designed circles; level 3
+  N) level 4, XCTL2 $FFD71F1 bit 0 (4 px painting, step 7): the register; cases H, J, L, M run
+     with XCTL2 0 and 1 -- every 4 px capture == its 2 px capture; 255 objects on one row in ONE
+     line per painting (V400, no DBLRR): counter 25 < 2590, 23 == 0.  Skipped below level 4.
   K) XCTL bit 3: sparse rows after dense rows show no stale pixels (== the same rows over an
      opaque base of spaces), also with the lead and the fast token path
   I) list mode v2 collisions: objects placed to collide / not collide (groups, mask 0, group 0,
@@ -55,6 +58,7 @@ VIC-IV changed (reset afterwards).
 
     scripts/rrb_list_test.py [--keep] [--bit7]
       --keep: leave picture A on screen
+      --no-n: skip case N (it repeats H, J, L and M twice)
       --bit7: run every case with XCTL bits 4 + 7 (fast RRB + fast token path) kept on; the cases
               keep the other XCTL bits they do not set (H switches bit 7 off itself where it
               compares with the old path).  Expected: the same PASS.
@@ -79,12 +83,18 @@ NOISE = 20                                                # px
 ROWS, STEP = 25, 256                                      # rows, bytes per row (screen and colour)
 
 
+REC = None                                                # case N: captures recorded here
+
+
 def capture():
     out = subprocess.run([os.path.join(ROOT, "scripts/capture.sh"), "-n", "4"], capture_output=True,
                          text=True).stdout
     path = [l.split("file:")[1].strip() for l in out.splitlines() if "file:" in l][-1]
     from PIL import Image
-    return path, Image.open(path).convert("RGB")
+    img = Image.open(path).convert("RGB")
+    if REC is not None:
+        REC.append((path, img))
+    return path, img
 
 
 def load(addr, data):
@@ -402,10 +412,13 @@ def run():
     ok_l = case_l()
     # M) list mode v3: 1023 objects, buckets, collisions page, budget, circles
     ok_m = case_m()
+    # N) level 4: XCTL2 bit 0 (4 px painting) == 2 px pictures (H, J, L, M), 255 in one line
+    ok_n = case_n(d_s, d_c) if "--no-n" not in sys.argv else True
 
     # a handful of pixels differ between any two captures of the same picture (capture noise)
     print("RRB_LIST_TEST_%s" % ("PASS" if max(n1, n2, n3, n4, n5, n6, n7, n8) <= NOISE and ok_g
-                                and ok_h and ok_i and ok_j and ok_k and ok_l and ok_m else "FAIL"))
+                                and ok_h and ok_i and ok_j and ok_k and ok_l and ok_m and ok_n
+                                else "FAIL"))
 
 
 FCM_H = 0x1410                                            # H: full-colour layer glyphs ($50400)
@@ -609,8 +622,8 @@ def case_i():
                                 (104, 0, 52, 0, 255, 1, 1, 0, 0), (104, 0, 52, 0, 255, 1, 3, 0, 0)]))
     ok = True
     lvl = peek(0xFFD71FD)[0]                                  # K325T extension level
-    print("I feature level $FFD71FD = %d (expected 3)" % lvl)
-    ok = lvl == 3
+    print("I feature level $FFD71FD = %d (expected >= 3)" % lvl)
+    ok = lvl >= 3
     try:
         poke(COL + 0x20, [0x01])                              # IRQ off, clear bits 0 and 7
         for name, objs in cases:
@@ -893,6 +906,112 @@ def case_l():
 
 
 COL3 = 0xFFD7200                                          # M: the v3 collision page
+XCTL2 = 0xFFD71F1                                         # N: bit 0 = 4 px painting (level 4)
+
+
+def case_n(d_s, d_c):
+    """N: level 4, XCTL2 ($FFD71F1) bit 0 = 4 px painting (with XCTL bits 4 + 7).
+      N reg: reads back bit 0 only (bits 7..1 read 0), cleared by writing 0; level 4 at
+        $FFD71FD and $FFD728C (below level 4: N is skipped, not failed).
+      N H/J/L/M: the cases run twice, XCTL2 0 and XCTL2 1 (the cases set XCTL themselves and
+        never touch XCTL2); every capture of the 4 px run == the same capture of the 2 px run
+        (<= NOISE px), and both runs pass on their own.
+      N 255: 255 one-glyph objects on one row in ONE raster line per painting (V400, no DBLRR),
+        bits 3/4/6/7 + XCTL2: counter 25 < 2590, late pixels (23) 0 (timing only: the 2 px path
+        does not fit; the pixels are L's, compared on DBLRR above)."""
+    global REC
+    from PIL import ImageChops
+    from rrb_diag import read_counter
+    lv = peek(0xFFD71FD)[0], peek(COL3 + 0x8C)[0]
+    if lv[0] < 4:
+        print("N level %d / %d: no XCTL2 (4 px painting) -- skipped" % lv)
+        return True
+
+    def diff(a, b):
+        d = ImageChops.difference(a, b)
+        pts = [(i % a.size[0], i // a.size[0]) for i, p in enumerate(d.getdata()) if max(p) > 40]
+        return len(pts), pts[:6]
+
+    ok = lv == (4, 4)
+    x2_orig = peek(XCTL2)[0]
+    try:
+        got = []
+        for v in (0x01, 0xFF, 0x00):
+            poke(XCTL2, [v])
+            got.append(peek(XCTL2)[0])
+        good = got == [1, 1, 0]
+        print("N level %d / %d (expected 4 / 4); XCTL2 write 1/$FF/0 reads %s (expected [1, 1, 0])%s"
+              % (lv + (got, "" if good and ok else "  <-- FAIL")))
+        ok = ok and good
+        for name, fn in (("H", lambda: case_h(d_s, d_c)), ("J", case_j), ("L", case_l),
+                         ("M", case_m)):
+            runs = []
+            for q in (0, 1):
+                poke(XCTL2, [q])
+                REC = []
+                print("N %s with XCTL2 = %d:" % (name, q))
+                r = fn()
+                runs.append((r, REC))
+                REC = None
+            (r0, c0), (r1, c1) = runs
+            worst, where = 0, ""
+            for (pa, ia), (pb, ib) in zip(c0, c1):
+                nd, e = diff(ia, ib)
+                if nd >= worst:
+                    worst, where = nd, "%s %s %s" % (e, os.path.basename(pa), os.path.basename(pb))
+            good = r0 and r1 and len(c0) == len(c1) and worst <= NOISE
+            print("N %s: 2 px run %s, 4 px run %s, %d captures each, worst pair %d px differ %s%s"
+                  % (name, "PASS" if r0 else "FAIL", "PASS" if r1 else "FAIL", len(c0), worst,
+                     where, "" if good else "  <-- FAIL"))
+            ok = ok and good
+        poke(XCTL2, [1])
+        ok = n_255_one_line() and ok
+    finally:
+        REC = None
+        poke(XCTL2, [x2_orig])
+    return ok
+
+
+def n_255_one_line():
+    """N 255 (see case_n): case L's rows and objects, V400 one line per painting (no DBLRR)."""
+    from rrb_diag import read_counter
+    regs = {a: peek(a)[0] for a in (0xFFD3031, 0xFFD307B, 0xFFD305B, 0xFFD3054, 0xFFD3051)}
+    x0 = peek(XCTL)[0]
+    for g in range(4):
+        poke(FCM_H * 64 + 64 * g, [0 if (x + y + g) % 5 == 0 else 1 + (3 * g + y + 5 * x) % 15
+                                   for y in range(8) for x in range(8)])
+    obj, objcol = 0x48300, 0x7E20
+    poke(obj, w(FCM_H + 1) + w(0xFFFF))
+    poke(COLRAM + objcol, [0, 1, 0, 0])
+    rs, rc = [], []
+    for r in range(25):
+        s_, c_ = [], []
+        for g in range(6):
+            for t in range(4):
+                s_ += gotox(100 * g + 20 * t) + w(FCM_H + t)
+                c_ += [0x10, 0xFF, 0, 1 + (g + t + r) % 15]
+        rs.append(s_)
+        rc.append(c_)
+    try:
+        poke(0xFFD3054, [regs[0xFFD3054] | 4])
+        poke(0xFFD3051, [regs[0xFFD3051] & 0x3F])             # no DBLRR: one line per painting
+        n = 255
+        objs = [((631 * k) // n, 80, 1) for k in range(n)]
+        poke(XCTL, [x0 & ~0xF8 | 0x10])
+        v2table(b"".join(bytes(v2obj(x, y=y, h=h, obj=obj, objcol=objcol)) for x, y, h in objs))
+        setup(rs, rc, 48, step=1020, rows=25, colofs=0, v400=True)
+        poke(XCTL, [x0 & ~0xF8 | 0xD8])                        # v2 + bits 3, 4, 7
+        p, img, cv = late_capture()
+        exp_max = read_counter(10)
+        good = cv[23] == 0 and cv[25] < 2590
+        print("N 255 objects on one row in ONE line (V400, no DBLRR, bits 3/4/7 + XCTL2): longest "
+              "painting %d (< 2590), expansion %d, late %d%s  (%s)" % (cv[25], exp_max, cv[23],
+              "" if good else "  <-- FAIL", os.path.basename(p)))
+    finally:
+        poke(XCTL, [x0])
+        for a, v in regs.items():
+            poke(a, [v])
+    return good
 
 
 def col3_read(n):
@@ -1003,8 +1122,8 @@ def case_m():
     ok = True
     try:
         lv = peek(0xFFD71FD)[0], peek(COL3 + 0x8C)[0]
-        print("M level $FFD71FD / $FFD728C = %d / %d (expected 3 / 3)" % lv)
-        ok = lv == (3, 3)
+        print("M level $FFD71FD / $FFD728C = %d / %d (expected >= 3, the same)" % lv)
+        ok = lv[0] >= 3 and lv[0] == lv[1]
         poke(COL3 + 0x88, [0, 0])                          # no pair budget
         poke(COL3 + 0x80, [0x01])
         poke(0xFFD3054, [regs[0xFFD3054] | 4])

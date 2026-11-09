@@ -628,7 +628,8 @@ one row fit a raster line and 255 fit DBLRR's two lines (with bit 7).
 mask and the overlapped painting, 3 = the **v3 table**: 32-byte entries (bytes 16..31 belong to
 software: B65's motion block), up to 1023 objects, per-row buckets (the row scan and the
 collision pass only visit the objects on a row), a circle test, a pair budget and the register
-page `$FFD7200-$FFD72FF` (results for all 1023 objects).
+page `$FFD7200-$FFD72FF` (results for all 1023 objects), 4 = also XCTL2 `$FFD71F1` bit 0 (4 px
+painting, above).
 
 Tests: `sim/tb_chipram_k325t.vhdl`, `sim/tb_colourram_k325t.vhdl`, `sim/tb_rrb_list_expander.vhdl`,
 `sim/tb_rrb_list_v2.vhdl` (GHDL, all in `sim/run_sim.sh`); on the board `scripts/chipram_test.py`,
