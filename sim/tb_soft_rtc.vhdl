@@ -178,6 +178,13 @@ begin
     -- the $FFD72xx page does not alias $FFD71xx
     peek2(16#10#, v); assert v = x"00" report "v3 page aliases the RTC" severity failure;
     report "v3 registers ok";
+    -- XCTL2 ($FFD71F1): bit 0 only, reads back, bits 7..1 read 0, reset clears it
+    peek(16#F1#, v); assert v = x"00" report "XCTL2 not 0 after start" severity failure;
+    poke(16#F1#, x"FF"); peek(16#F1#, v); assert v = x"01" report "XCTL2 read back: $" & to_hstring(v) severity failure;
+    peek(16#F0#, v); assert v = x"00" report "XCTL2 write touched XCTL" severity failure;
+    rst_n <= '0'; wait until rising_edge(clk); rst_n <= '1'; wait until rising_edge(clk);
+    peek(16#F1#, v); assert v = x"00" report "XCTL2 after reset" severity failure;
+    report "XCTL2 ok";
     report "TB_SOFT_RTC_PASS";
     done <= true; wait;
   end process;

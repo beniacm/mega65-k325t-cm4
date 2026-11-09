@@ -37,6 +37,7 @@ entity tb_viciv_lead is
   generic (SC : integer := 3; OBJS : integer := 0; V400 : integer := 1; FAST : integer := 1;
            BG : integer := 80; D051 : integer := 16#80#; FT : integer := 0; CU : integer := 0;
            RL : integer := 0; PRE : integer := 0;
+           QP : integer := 0;                       -- XCTL2 bit 0: 4 px painting (step 7)
            OUTF : string := "/dev/null");
 end entity;
 
@@ -55,7 +56,7 @@ architecture sim of tb_viciv_lead is
   signal fw, fr, ccs : std_logic := '0';
   signal fwd : std_logic_vector(7 downto 0) := (others => '0');
   signal r, g, b : unsigned(7 downto 0);
-  signal rl_en, v2_en, fast_en, ft_en, cu_en : std_logic := '0';
+  signal rl_en, v2_en, fast_en, ft_en, cu_en, qp_en : std_logic := '0';
   signal tab_addr : unsigned(19 downto 0) := x"58000";   -- (32 KB: 1023 x 32 bytes)
   signal ocount : unsigned(9 downto 0) := (others => '0');
   signal dsel : unsigned(4 downto 0) := (others => '0');
@@ -139,7 +140,7 @@ begin
               fastio_addr => fa, fastio_read => fr, fastio_write => fw, fastio_wdata => fwd,
               fastio_rdata => rdata_dummy, colour_ram_fastio_rdata => crd, colour_ram_cs => ccs,
               fast_rrb_en => fast_en, rrb_list_en => rl_en, rrb_v2_en => v2_en, fast_token_en => ft_en,
-              clear_unpainted_en => cu_en,
+              clear_unpainted_en => cu_en, quad_px_en => qp_en,
               obj_tab_addr => tab_addr, obj_count => ocount, obj_hold => '0',
               diag_sel => dsel, diag_clr => dclr, diag_val => dval,
               charrom_fastio_rdata => chrd, charrom_cs => '0',
@@ -426,6 +427,7 @@ begin
     reg(16#68#, 0); reg(16#69#, 16#40#); reg(16#6A#, 5);   -- charset $54000
     if FAST = 1 then fast_en <= '1'; end if;
     if FT = 1 then ft_en <= '1'; end if;
+    if QP = 1 then qp_en <= '1'; end if;
     if CU = 1 then cu_en <= '1'; end if;
     if RL = 1 then rl_en <= '1'; end if;
     if SC = 2 or SC = 5 or SC = 8 or (SC >= 11 and SC /= 16 and SC /= 17) then rl_en <= '1'; end if;
