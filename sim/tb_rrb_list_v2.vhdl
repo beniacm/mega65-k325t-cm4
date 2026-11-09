@@ -1,5 +1,7 @@
--- tb_rrb_list_v2.vhdl -- GHDL test of rrb_list_expander list mode v2 (global object table).
--- Copies object tables from a fake chip RAM into the unit's table (copy_start), then expands
+-- tb_rrb_list_v2.vhdl -- GHDL test of rrb_list_expander list mode v3 (global object table of
+-- 32-byte entries; the unit reads bytes 0..15 of each, the software block 16..31 holds noise
+-- here and must never be read).  Copies object tables from a fake chip RAM into the unit's
+-- table (copy_start; the per-row buckets are built before copying falls), then expands
 -- character rows with start_scan and compares the row buffer with the expected tokens:
 --   * objects straddling two rows (top part / bottom part masks and Y offsets), REL X, a hidden
 --     object (mask 0, still an anchor for REL), multi-row objects (stride), FLIPX, FLIPY (rows
@@ -16,7 +18,11 @@
 --     the last token is $FFFF and the only one (object tokens never go beyond LIMIT + 1, only
 --     the end token may sit at LIMIT + 2 / LIMIT + 3); every GOTOX is followed by at least one
 --     token of its object (no part started that cannot fit); the parts appear in table order.
---   * always: no table write while copying = '0'; no copy read while the port was not free.
+--   * always: no table write while copying = '0'; no copy read while the port was not free;
+--     no read of an entry's bytes 16..31;
+--   * v3: 1023 objects (only the last one visible, scan right after the copy), objects in rows
+--     beyond 63 (no bucket: never drawn), a row beyond 63 (empty), the bucket capacity (1023
+--     objects 64 rows tall: 2048 entries, bk_full; the rows that fit are complete).
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -40,7 +46,8 @@ architecture sim of tb_rrb_list_v2 is
   signal caddr : unsigned(15 downto 0);
   signal mdata, cdata, bscreen, bcolour : unsigned(7 downto 0) := x"00";
   signal row : unsigned(7 downto 0) := x"00";
-  signal cnt : unsigned(7 downto 0) := x"00";
+  signal cnt : unsigned(9 downto 0) := (others => '0');
+  signal bk_full : std_logic;
   signal part_s : std_logic := '0';
 
   type r_t is array (natural range <>) of integer;
@@ -63,15 +70,15 @@ architecture sim of tb_rrb_list_v2 is
   -- v1 entries at $10000: one entry X 20 -> object row 0, then end of lists
   constant E : r_t := (20, 0, 16#FF#, 16#02#, 0, 0, 0, 16#40#,  16#FF#, 16#FF#, 0, 0, 0, 0, 0, 0);
 
-  -- the object table in chip RAM ($30000-$30FFF), written by the test
-  type mem_t is array (0 to 4095) of unsigned(7 downto 0);
+  -- the object table in chip RAM ($30000-$37FFF, 32 bytes per entry), written by the test
+  type mem_t is array (0 to 32767) of unsigned(7 downto 0);
   signal tabm : mem_t := (others => x"00");
 
   impure function chip(a : unsigned(19 downto 0)) return unsigned is
     variable i : integer;
   begin
     i := to_integer(a(7 downto 0));
-    if a(19 downto 12) = x"30" then return tabm(to_integer(a(11 downto 0))); end if;
+    if a(19 downto 15) = "00110" then return tabm(to_integer(a(14 downto 0))); end if;
     if a(19 downto 8) = x"100" and i < E'length then return to_unsigned(E(i), 8); end if;
     if a(19 downto 4) = x"2000" and i mod 16 < O0'length then return to_unsigned(O0(i mod 16), 8); end if;
     if a(19 downto 4) = x"2001" and i mod 16 < O1'length then return to_unsigned(O1(i mod 16), 8); end if;
@@ -107,7 +114,7 @@ begin
               bwe => bwe, baddr => baddr, bscreen => bscreen, bcolour => bcolour,
               scan_en => scan_en, start_scan => start_scan, row => row, obj_count => cnt,
               copy_start => copy_start, tab_addr => x"30000", mfree => mfree, copying => copying,
-              part => part_s);
+              part => part_s, bk_full => bk_full);
 
   -- memories, buffer and port checks
   process (clk)
@@ -129,6 +136,10 @@ begin
       -- the mfree seen there
       if mreq = '1' and busy = '0' and (mfree_d = '0' or copying = '0') then
         report "copy read without a free port" severity error;
+        port_errs <= port_errs + 1;
+      end if;
+      if mreq = '1' and busy = '0' and maddr(19 downto 15) = "00110" and maddr(4) = '1' then
+        report "copy read of an entry's software block (bytes 16..31)" severity error;
         port_errs <= port_errs + 1;
       end if;
       if tab_we = '1' and copying = '0' then
@@ -191,10 +202,11 @@ begin
       wait until rising_edge(clk);
     end procedure;
 
-    -- one 16-byte object of the table in chip RAM (x, y: 11 bits incl. REL)
+    -- one 32-byte entry of the table in chip RAM (x, y: 11 bits incl. REL); bytes 16..31 noise
     procedure put(k, x, y, mask, h, flags, addr, colo, stride : integer) is
-      constant b : integer := 16 * k;
+      constant b : integer := 32 * k;
     begin
+      for i in 16 to 31 loop tabm(b + i) <= to_unsigned((37 * k + 11 * i) mod 256, 8); end loop;
       tabm(b + 0) <= to_unsigned(x mod 256, 8);      tabm(b + 1) <= to_unsigned(x / 256, 8);
       tabm(b + 2) <= to_unsigned(y mod 256, 8);      tabm(b + 3) <= to_unsigned(y / 256, 8);
       tabm(b + 4) <= to_unsigned(mask, 8);           tabm(b + 5) <= to_unsigned(h, 8);
@@ -209,12 +221,15 @@ begin
     begin
       tabm <= (others => x"00");
       wait for 0 ns;
-      for i in T'range loop tabm(i) <= to_unsigned(T(i), 8); end loop;
+      for i in T'range loop tabm(32 * (i / 16) + i mod 16) <= to_unsigned(T(i), 8); end loop;
+      for k in 0 to T'length / 16 - 1 loop
+        for i in 16 to 31 loop tabm(32 * k + i) <= x"FF"; end loop;   -- software block
+      end loop;
     end procedure;
 
     procedure copy(n : integer; tog : boolean) is
     begin
-      cnt <= to_unsigned(n, 8); mfree_tog <= tog;
+      cnt <= to_unsigned(n, 10); mfree_tog <= tog;
       tick; copy_start <= '1';
       tick; copy_start <= '0';
       wait for 1 ns;
@@ -324,7 +339,7 @@ begin
     end procedure;
   begin
     load_t1;
-    cnt <= x"06";
+    cnt <= to_unsigned(6, 10);
     wait for 50 ns;
     -- no copy yet: the (empty) snapshot, not the live count
     expand(1, '1'); check("no snapshot", REMPTY);
@@ -357,7 +372,7 @@ begin
     copy(3, false);
     expand(0, '1'); check("count 3 row 0", REMPTY);
     expand(1, '1'); check("count 3 row 1", R1C3);
-    cnt <= x"06";
+    cnt <= to_unsigned(6, 10);
     expand(1, '1'); check("count 3 row 1, live count 6", R1C3);
 
     -- copy with the port free only sometimes: the same snapshot
@@ -395,7 +410,7 @@ begin
     put(254, 77, 0, 16#FF#, 1, 16#02#, 0, 16#4000#, 0);
     clr <= '1'; tick; clr <= '0';
     row <= x"00"; start_scan <= '1'; scan_en <= '1'; out_start <= to_unsigned(0, BUFW);
-    cnt <= x"FF";
+    cnt <= to_unsigned(255, 10);
     tick; copy_start <= '1';
     tick; copy_start <= '0';
     for n in 1 to 100000 loop
@@ -405,6 +420,46 @@ begin
     start <= '1'; tick; start <= '0';
     wait_done;
     check("count 255, scan right after the copy", R254);
+
+    -- 1023 objects, only the last one visible, scan right after the copy
+    tabm <= (others => x"00");
+    wait for 0 ns;
+    for k in 0 to 1021 loop put(k, 0, 0, 0, 1, 16#02#, 0, 16#4000#, 0); end loop;
+    put(1022, 77, 0, 16#FF#, 1, 16#02#, 0, 16#4000#, 0);
+    clr <= '1'; tick; clr <= '0';
+    row <= x"00"; start_scan <= '1'; scan_en <= '1'; out_start <= to_unsigned(0, BUFW);
+    cnt <= to_unsigned(1023, 10);
+    tick; copy_start <= '1';
+    tick; copy_start <= '0';
+    for n in 1 to 200000 loop
+      tick; wait for 1 ns;
+      exit when copying = '0';
+    end loop;
+    start <= '1'; tick; start <= '0';
+    wait_done;
+    check("count 1023, scan right after the copy", R254);
+
+    -- rows beyond 63: no bucket (object 0 at Y 512+ is never drawn; row 64 is empty)
+    tabm <= (others => x"00");
+    wait for 0 ns;
+    put(0, 77, 0, 16#FF#, 1, 16#02#, 0, 16#4000#, 0);
+    put(1, 10, 504, 16#FF#, 2, 16#02#, 0, 16#4000#, 16);   -- rows 63 (top) and 64 (not kept)
+    copy(2, false);
+    expand(0, '1'); check("row 0 with an object in row 63", R254);
+    expand(64, '1'); check("row 64", REMPTY);
+    expand(200, '1'); check("row 200", REMPTY);
+
+    -- bucket capacity: 1023 objects of 64 rows (65472 entries): rows 0 and 1 hold the first
+    -- 1023 + 1023 objects, the 2 entries over 2048 are dropped (bk_full)
+    tabm <= (others => x"00");
+    wait for 0 ns;
+    for k in 0 to 1022 loop put(k, 0, 0, 16#FF#, 63, 16#02#, 16#0020#, 16#4020#, 0); end loop;
+    copy(1023, false);
+    if bk_full /= '1' then report "bucket capacity: no bk_full" severity error; errs := errs + 1; end if;
+    -- (row 0: 1023 objects; their parts fill the buffer: check the order of the first ones)
+    expand(0, '1', 0); check_full("capacity row 0", 0, 1023);
+    copy(6, false);
+    if bk_full /= '0' then report "bk_full stays set" severity error; errs := errs + 1; end if;
 
     -- buffer overflow: 255 visible objects (3 glyphs each) on row 0
     tabm <= (others => x"00");

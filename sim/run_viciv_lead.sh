@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # run_viciv_lead.sh -- the real VIC-IV (viciv.vhdl, report-stripped copy) in GHDL: the K325T
-# RRB list mode lead (docs/rrb_list_mode.md, "First raster line budget").  49 scenarios of
+# RRB list mode lead (docs/rrb_list_mode.md, "First raster line budget").  51 scenarios of
 # tb_viciv_lead.vhdl in parallel (~14 min), then checks:
 #   s4 == s5   plain rows: XCTL bit 5 (lead) changes no pixel
 #   s2 == s3   reference GOTOX rows with the lead == v2 objects (6 objects, X 0/10/600, V400)
@@ -21,6 +21,7 @@
 #   painting < 2590; its plain reference loses badlines); 255 (timing only: the plain row would
 #   not fit 1 KB) < 5180; no late pixels, no port collisions; the 231 reference also after a v2
 #   phase on the same rows (history: a $FFFF after the row's last token is not a short row)
+#   v3 table (32-byte entries, per-row buckets): 1023 objects spread over 50 rows == plain parts
 # (V200: run the scenarios by hand with -gV400=0.)  Expects "TB_VICIV_LEAD_PASS".  Work dir: viciv_work (scratch, not committed).
 set -uo pipefail
 cd "$(dirname "$0")"
@@ -76,6 +77,9 @@ run p64d -gSC=17 $D -gOBJS=4 -gCU=1 & run r64d -gSC=20 $D -gOBJS=4 -gCU=1 & run 
 # the reference after v2 ran on its rows (PRE 1, as rrb_list_test.py case L: v2 leaves its
 # expansion's $FFFF right after the 510-token rows, which must not shorten the row advance)
 run r231h -gSC=20 $D -gOBJS=7 -gCU=1 -gFT=1 -gPRE=1 &
+# v3 table: 1023 objects spread over the screen (V400, bit 7): reference rows with the parts (lead)
+# against the v2/v3 objects
+run x1 -gSC=2 -gOBJS=8 -gFT=1 & run x2 -gSC=3 -gOBJS=8 -gFT=1 &
 wait
 python3 - $W <<'PY'
 import sys
@@ -90,7 +94,7 @@ for a, b in (("s4", "s5"), ("s2", "s3"), ("g2", "g3"), ("q8", "q9"),
              ("m12a", "m12b"), ("m13a", "m13b"), ("m14a", "m14b"), ("m15a", "m15b"),
              ("u0", "u1"), ("u4", "u3"), ("u0", "u5"), ("u7", "u6"),
              ("p64", "r64"), ("p128d", "r128d"), ("p231", "r231"), ("p64d", "r64d"),
-             ("p231", "r231h")):
+             ("p231", "r231h"), ("x1", "x2")):
     fa, fb = frame(a), frame(b)
     n = sum(1 for y in fa if fa[y] != fb.get(y))
     print("%s vs %s: %d lines differ (frame %d lines)" % (a, b, n, len(fa)))
@@ -115,7 +119,7 @@ ok = ok and len(par) <= 1
 for n in ("s1", "s2", "s3", "s4", "s5", "g1", "g2", "g3", "q1", "q8", "q3", "q9", "t0", "t1", "t2",
           "t3", "t4", "t5", "t6", "t7", "t9", "m12a", "m12b", "m13a", "m13b", "m14a", "m14b",
           "m15a", "m15b", "p64", "r64", "p128", "p128d", "r128d", "p231", "r231", "p64d", "r64d",
-          "p255", "r231h"):
+          "p255", "r231h", "x1", "x2"):
     L = lines(n)
     late = sum(1 for l in L if l[1] > 0)
     paint = max(l[2] for l in L)
@@ -124,7 +128,7 @@ for n in ("s1", "s2", "s3", "s4", "s5", "g1", "g2", "g3", "q1", "q8", "q3", "q9"
           "longest expansion %d, port collisions %d" % (n, late, paint, max(l[3] for l in L),
                                                         max(l[4] for l in L), col))
     ok = ok and col == 0                         # expander read while the VIC-IV reads: never
-    if n in ("s2", "s3", "s5", "g2", "g3", "t2", "t4", "t7", "t9", "p64", "r64", "p128"):
+    if n in ("s2", "s3", "s5", "g2", "g3", "t2", "t4", "t7", "t9", "p64", "r64", "p128", "x1", "x2"):
         ok = ok and late == 0 and paint < 2590
     if n in ("q8", "q3", "q9", "t0", "t1", "t5", "t6", "p128d", "r128d", "p231", "r231", "p64d", "r64d",
              "p255", "r231h"):

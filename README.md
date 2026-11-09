@@ -604,10 +604,10 @@ even more amazing" and #597).  Raster-rewrite objects moved like sprites: with b
 row may end with a LIST token (`$FFFC`) followed by 8-byte entries (X, Y offset, draw mask,
 FLIPX/FLIPY, transparent/behind, the address of the object's tokens); the VIC-IV expands them
 into the row buffer at the badline (`rrb_list_expander.vhdl`, with a colour row buffer).  With
-bit 6 one table of up to 255 16-byte objects with X **and** Y (`$FFD71F8-FC`: address, count,
+bit 6 one table of up to 1023 32-byte entries with X **and** Y (`$FFD71F8-FC`: address, count,
 HOLD) is snapshotted once per frame and scanned for every row, so a program writes only X/Y and
 objects can never tear.  Verified pixel-exact against plain GOTOX rows (`scripts/rrb_list_test.py`,
-cases A-L); hardware counters at `$FFD71E0-E3` (`scripts/rrb_diag.py`) count aborts, plain rows,
+cases A-M); hardware counters at `$FFD71E0-E3` (`scripts/rrb_diag.py`) count aborts, plain rows,
 port collisions, copy/expansion times, late pixels and the painting time per line.  With bit 5 or
 6 the VIC-IV paints every raster line one line ahead (two with DBLRR) and shows it a line later,
 so objects are complete on the first line of every row too ("First raster line budget" in the
@@ -619,7 +619,10 @@ collided objects, each one's first partner and the count at `$FFD71A0-C3`, with 
 still being expanded (the expander uses only idle chip RAM cycles), so 128 one-glyph objects on
 one row fit a raster line and 255 fit DBLRR's two lines (with bit 7).
 **`$FFD71FD`** (read only) is the K325T extension level: 1 = XCTL bits 0-7, 2 = also the +15
-mask and the overlapped painting.
+mask and the overlapped painting, 3 = the **v3 table**: 32-byte entries (bytes 16..31 belong to
+software: B65's motion block), up to 1023 objects, per-row buckets (the row scan and the
+collision pass only visit the objects on a row), a circle test, a pair budget and the register
+page `$FFD7200-$FFD72FF` (results for all 1023 objects).
 
 Tests: `sim/tb_chipram_k325t.vhdl`, `sim/tb_colourram_k325t.vhdl`, `sim/tb_rrb_list_expander.vhdl`,
 `sim/tb_rrb_list_v2.vhdl` (GHDL, all in `sim/run_sim.sh`); on the board `scripts/chipram_test.py`,

@@ -55,33 +55,36 @@ two rows with complementary draw masks, exactly as with GOTOX today.
 
 Normal tokens before the LIST token work as before (background, HUD).
 
-## List mode v2: global object table
+## List mode v2/v3: global object table
 
-Gated by **XCTL bit 6**. Instead of entries per row, one table of up to 255 objects, each with
-its own X **and Y**, like a sprite table; the VIC-IV works out the rows, Y offsets and draw masks.
-Moving an object = writing its X and Y (4 bytes), nothing else.
+Gated by **XCTL bit 6**. Instead of entries per row, one table of up to 1023 objects (level 3;
+255 at level 2), each with its own X **and Y**, like a sprite table; the VIC-IV works out the
+rows, Y offsets and draw masks. Moving an object = writing its X and Y (4 bytes), nothing else.
+Level 3 (the "v3 table", below) changed the entry to 32 bytes: the VIC-IV reads bytes 0..15,
+bytes 16..31 belong to software. There is no 16-byte mode any more.
 
 Registers (cleared by reset):
 
 | address | meaning |
 |---|---|
 | `$FFD71F8-$FFD71FA` | table address in chip RAM (20 bits, little endian) |
-| `$FFD71FB` | number of objects (0..255) |
+| `$FFD71FB` | number of objects, low byte (a write also clears bits 9..8: 0..255 for old programs) |
+| `$FFD728A-$FFD728B` | number of objects, 10 bits (0..1023; `$FFD728A` = `$FFD71FB` without clearing the high bits) |
 | `$FFD71FC` | bit 0 HOLD: keep the last snapshot (no copy per frame) |
-| `$FFD71FD` | read only: K325T extension level (1 = XCTL bits 0-7 incl. bit 3; 2 = also the collides-with mask +15 and painting overlapped with the expansion, 2 KB list rows) |
+| `$FFD71FD` | read only: K325T extension level (1 = XCTL bits 0-7 incl. bit 3; 2 = also the collides-with mask +15 and painting overlapped with the expansion, 2 KB list rows; 3 = the v3 table: 32-byte entries, 1023 objects, per-row buckets, circle test, pair budget, the `$FFD7200` page) |
 
 The address and the count are several bytes in the CPU's clock domain; the VIC-IV latches them
 at the start of each copy. Write them before setting XCTL bit 6, or with HOLD set (then clear
 HOLD: the next frame copies with the new values).
 
-Object (16 bytes):
+Entry (32 bytes; the VIC-IV reads bytes 0..15, see "v3 table" for 16..31):
 
 | offset | meaning |
 |---|---|
 | +0 | X 9..0 (as GOTOX); bit 10 REL: X = previous table object's X + signed offset |
 | +2 | Y 9..0, signed: pixel rows from the top of character row 0; bit 10 REL (as X) |
 | +4 | draw mask, ANDed with the computed one (`$FF` normally, `0` hides the object) |
-| +5 | bits 5..0: height in character rows, 0..63 (0 = 1); bits 7..6 ignored |
+| +5 | bits 5..0: height in character rows, 0..63 (0 = 1); bit 7 circle (collisions, level 3); bit 6 ignored |
 | +6 | bits 3..0 screen address 19..16, 4 FLIPX, 5 FLIPY, 6 transparent, 7 behind |
 | +7 | collision group mask: one bit per group (0 = never collides; "Collisions") |
 | +8 | screen address 15..0 of object row 0's tokens (an RRB token list ending with `$FFFF`) |
@@ -91,21 +94,24 @@ Object (16 bytes):
 | +15 | collides-with mask: groups this object collides with (0 = the same as +7; level 2) |
 
 - **Snapshot per frame**: at the top of every frame (unless HOLD is set) the VIC-IV copies the
-  table into its own table RAM (LUT RAM, 512 x 64 bits, no block RAM). The count is part of the
-  snapshot: every row of the frame scans the copied count, so an object beyond a new count never
-  appears, and an object can never be shown in two places or in halves.
+  table (bytes 0..15 of each entry) into its own table RAM (block RAM, 1024 objects) and
+  builds the per-row buckets ("v3 table"). The count is part of the snapshot: every row of the
+  frame uses the copied table, so an object beyond a new count never appears, and an object can
+  never be shown in two places or in halves.
 - **The copy only uses idle chip RAM cycles** of the VIC-IV (after the sprite fetches of a line,
   and the list-mode wait states); it never disturbs the row, glyph or sprite fetches (also in an
-  opened top border). 255 objects (4080 bytes) take a few lines of the top border. The fetch of
-  the first text row waits for the copy if it is still running; if it is not done by the next
-  line, that row is painted without objects for that frame.
+  opened top border). 1023 objects (16368 bytes) and their buckets take about 8 lines of the
+  top border (GHDL: 21280 cycles with a free port). The fetch of the first text row waits for
+  the copy if it is still running; if it is not done by the next line, that row is painted
+  without objects for that frame.
 - **HOLD** keeps the last snapshot, its count included (no copy at all while set). After reset
   the snapshot is empty: HOLD set before the first copy shows nothing.
 - A program may rewrite the table at any time. The copy reads an object's bytes within a few
   cycles, so an X/Y pair written with separate stores can still tear against it (a window of
   roughly 16 cycles per object per frame, also with B65's 4-byte `!`); HOLD makes it atomic.
-- **Per character row** the VIC-IV scans the snapshot (one object per cycle, from the table RAM, no chip
-  RAM time) and turns every object covering the row into one or two entries exactly as in v1:
+- **Per character row** the VIC-IV walks the row's bucket (only the objects touching the row,
+  in table order, from the table RAM, no chip RAM time) and turns every object into one or two
+  entries exactly as in v1:
   the top part of object row k = row - floor(Y/8) (Y offset -(Y mod 8), mask `$FF << (Y mod 8)`)
   and the bottom part of object row k-1 (offset +(8 - Y mod 8), the complementary mask).
   FLIPY reverses the object rows and swaps the offset's sign (the VIC-IV applies the offset to
@@ -120,17 +126,92 @@ Object (16 bytes):
   `$FFFF` (no object part is started that cannot fit).
 - Objects later in the table are painted later (on top).
 - REL lets a group follow an anchor: write the anchor's X/Y only. A hidden anchor (mask 0) is
-  fine.
-- Limits: the scan costs about one cycle per object per character row plus ~16-20 cycles per
-  object part drawn, in the badline's line time (shared with the row fetch and painting the
-  row's first raster line: see "First raster line budget"); vertical sub-row positioning needs
-  full-colour/NCM glyphs, as in v1.
+  fine. REL is resolved during the copy (the snapshot holds absolute positions), so every
+  object, drawn or not, is an anchor for the next one.
+- Limits: ~17 cycles per object part drawn (13 for the second part of a two-row object), in
+  the badline's time, overlapped with the painting ("Many objects on one row"); objects only
+  in character rows 0..63 (the buckets); at most 2048 bucket entries per frame; vertical
+  sub-row positioning needs full-colour/NCM glyphs, as in v1.
+
+## v3 table (level 3)
+
+`$FFD71FD` (and `$FFD728C`) read 3. Changes against level 2: 32-byte entries (the VIC-IV reads
+bytes 0..15, bytes 16..31 are the software block, never read), up to 1023 objects (10-bit
+count), per-row buckets, collisions over the buckets with a circle test and a pair budget, the
+register page `$FFD7200-$FFD72FF` (results for all 1023 objects). A flag day: there is no
+16-byte table any more.
+
+Entry (32 bytes):
+
+| bytes | owner | content |
+|---|---|---|
+| 0..15 | VIC-IV | the object (table above): X, Y, draw mask, height / circle, flags and screen address 19..16, group, screen address, colour offset, stride, width, collides-with mask |
+| 16..31 | software | the motion block (B65's object statements; documented for user assembler and BASIC 65 programs), below |
+
+Software motion block (bytes 16..31; owned by B65, which may refine it while implementing its
+object statements; the hardware never reads it):
+
+| byte | field |
+|---|---|
+| +16 | mode: 0 static, 1 cartesian, 2 polar, 3 orbit; bit 4 harmonic-to-anchor; bits 5..6 bounds set 0..3; bit 7 pixel-collision hint |
+| +17 | exit action X (bits 1..0) and Y (bits 3..2): 0 none, 1 wrap, 2 bounce, 3 kill; bit 4 kill at lifetime 0; bit 5 half restitution on bounce |
+| +18 | cartesian VX (16-bit signed, 8.8 px/frame) / polar speed (8.8) / orbit radius |
+| +20 | cartesian VY / polar and orbit heading (16-bit, 1/65536 turn) |
+| +22 | cartesian AX (1/256 px/frame^2) / polar speed change per frame |
+| +24 | cartesian AY / polar and orbit turn rate (16-bit signed, 1/65536 turn per frame) |
+| +26 | lifetime in frames (16-bit, 0 = unlimited) |
+| +28 | harmonic k (1/256) / orbit anchor object number (10 bits) |
+| +30 | X fraction (8 bits) |
+| +31 | Y fraction (8 bits) |
+
+Register page `$FFD7200-$FFD72FF` (soft_rtc; reset clears the budget and the count):
+
+| address | meaning |
+|---|---|
+| `$FFD7200-$FFD727F` | read: collided objects of the last pass, byte n bit b = object 8n + b (0..1023) |
+| `$FFD7280` | as `$FFD71C0` (bit 0 latched collision, bit 1 IRQ enable, bit 7 pending; write bit 1 = enable, bit 0 = 1 clears 0 and 7), + read bit 2 = the last pass was cut off by the pair budget, bit 3 = the last bucket build dropped entries (more than 2048) |
+| `$FFD7282-$FFD7283` | r/w: object number (10 bits; the same register as `$FFD71C1`, whose write clears bits 9..8) |
+| `$FFD7284-$FFD7285` | read: its first partner (lowest number; `$3FF` = none) |
+| `$FFD7286-$FFD7287` | read: number of collided objects (0..1023; `$FFD71C3` reads 255 above 255) |
+| `$FFD7288-$FFD7289` | r/w: pair budget per pass (0 = no limit) |
+| `$FFD728A-$FFD728B` | r/w: number of objects (10 bits) |
+| `$FFD728C` | read: K325T extension level (= `$FFD71FD`) |
+
+The `$FFD71A0-$FFD71C3` window keeps serving objects 0..255 (`$FFD71C2` reads `$FF` for a
+partner above 255).
+
+**Buckets.** After the copy the VIC-IV lists, for each character row 0..63, the visible objects
+(draw mask /= 0) whose rows Y .. Y + 8 H - 1 touch it, in table order: a counting sort (the
+counts are made while the copy runs, then prefix sums, then one pass over the table filling
+the lists), at most 2048 entries in all (one RAMB36). The row scan walks its bucket instead of
+the whole table, and the collision pass tests only objects sharing a bucket. An object above
+row 0 or below row 63 is neither drawn nor tested there; entries beyond 2048 are dropped (the
+rows filled last lose objects; `$FFD7280` bit 3).
+
+| | GHDL (`tb_rrb_collide`, `tb_rrb_list_v2`) |
+|---|---|
+| copy + buckets, 1023 objects | 21280 cycles (8.2 raster lines, port free) |
+| collision pass, 1023 random objects over 50 rows (1/5 circles) | 52694 cycles (20 lines) |
+| collision pass, 255 objects in one place (straddling two rows) | 35753 cycles (13.8 lines) |
+| collision pass, 1023 objects in one place | ~523000 cycles (one pair per cycle: ~200 lines) -- use the budget |
+| row scan per object part | 17 cycles (unchanged) |
+
+**Pair budget.** `$FFD7288-9` /= 0 limits the pairs one pass tests; a pass that reaches it ends
+there (`$FFD7280` bit 2): its results are a subset (the pairs of the upper rows first). 0 = all
+pairs. The pass always finishes within a frame (~523000 cycles for all 1023 objects in one
+place, a PAL frame has 1.6 million), so the budget is about latency, not correctness.
+
+Hardware: `rrb_list_expander.vhdl` (generic `NOBJ` = 1024 or 512: the snapshot's depth, 4 or
+about 2 RAMB36; the bucket RAM one RAMB36), `viciv.vhdl` (generic `rrb_nobj`, port widths),
+`soft_rtc.vhdl` (the page), `iomapper.vhdl` (decodes `$FFD72xx` on the K325T: no I2C device
+there on this target), `machine.vhdl` (wiring).
 
 ## Collisions
 
-Once per frame the VIC-IV compares every pair of objects of the frame's snapshot (list mode v2,
-XCTL bit 6) and reports which objects overlap -- like the VIC-II's sprite collision register, for
-up to 255 objects.
+Once per frame the VIC-IV compares the pairs of objects of the frame's snapshot that share a
+character row (list mode v2/v3, XCTL bit 6) and reports which objects overlap -- like the
+VIC-II's sprite collision register, for up to 1023 objects (level 3; all pairs of up to 255 at
+level 2).
 
 - **Box** of an object: X .. X + W - 1 (W = +14, 0 = 8 pixels), Y .. Y + 8 H - 1 (H = +5 bits
   5..0, 0 = 1 row; Y signed, -512..511); X and Y after REL, exactly as the rows are drawn. The box
@@ -142,25 +223,35 @@ up to 255 objects.
   level-1 rule (the group masks share a bit). Example: bullets group 1 with 2, the player group
   2 with 1: a bullet hits the player, bullets never collide with each other (1 and 1 = 0 on the
   with side), and an object with group 4 / with 4 sees neither.
-- The **pass** runs after the frame's table copy (with HOLD set: on the held snapshot, every
-  frame): all pairs i < j, one pair per pixel cycle, n (n - 1) / 2 + ~7 n cycles: 255 objects
-  34164 cycles = 13.2 raster lines, 60 objects ~2200. The copy and the pass start at the top of
-  the frame (vertical blank), so the result of frame N's positions is complete long before
-  frame N's first text row (PAL: the copy of 255 objects ~4100 cycles + the pass ~34200 = ~15
-  lines; the text starts ~100 lines later). It uses its own box RAM, so it never delays a row.
-  The next copy waits for a pass still running (it cannot happen in a normal frame).
+- **Circles** (level 3): +5 bit 7 makes the object a circle of radius W/2 about its box centre
+  (X + W/2, Y + 4 H). Circle and circle collide if the centres are at most the sum of the radii
+  apart; circle and box if the circle reaches the box (the nearest point of the box: touching
+  counts); box and box as above. The pass only meets objects whose boxes share a character
+  row, so keep a circle inside its box vertically (W <= 8 H).
+- **Rows** (level 3): the pass walks the per-row buckets ("v3 table"): only pairs listed in a
+  common row 0..63 are tested, each once (in the first row both are listed in; a row in which
+  no object starts is skipped). Objects outside rows 0..63 never collide.
+- The **pass** runs after the frame's table copy and bucket build (with HOLD set: on the held
+  snapshot, every frame): per row, the pairs of its bucket, one pair per pixel cycle (a 6-stage
+  pipeline: bucket read, table read, shape, tests, squares, result) plus ~12 cycles per object:
+  255 objects in one place 35753 cycles = 13.8 raster lines, 1023 objects spread over 50 rows
+  52694 (20 lines). The copy and the pass start at the top of the frame, so for spread objects
+  the result of frame N's positions is complete before frame N's first text row. It reads the
+  snapshot through the table RAM's second port, so it never delays a row. The pair budget
+  (`$FFD7288`, "v3 table") cuts a long pass off. The next copy waits for a pass still running.
 - **Results**, double buffered: the pass writes the working set; at its end it becomes the
   readable one in one step (a pass's results are never mixed with another's), and the CPU
   side copies it: a bit per object (collided this pass), the **first partner** per object (the
-  lowest-numbered object it collides with), the number of collided objects.
+  lowest-numbered object it collides with), the number of collided objects. Objects 0..255 at
+  `$FFD71A0-C3` (below), all 1023 at `$FFD7200-87` ("v3 table").
 
 | address | meaning |
 |---|---|
 | `$FFD71A0-$FFD71BF` | read: collided objects of the last pass, byte n bit b = object 8n + b |
 | `$FFD71C0` | read: bit 0 = a pass found a collision (latched until cleared), bit 1 = IRQ enable, bit 7 = IRQ pending (set together with bit 0); write: bit 1 = IRQ enable, bit 0 = 1 clears bits 0 and 7 |
 | `$FFD71C1` | write: object number; read: it back |
-| `$FFD71C2` | read: first partner of that object ($FF: none) |
-| `$FFD71C3` | read: number of collided objects in the last pass (0..255) |
+| `$FFD71C2` | read: first partner of that object ($FF: none, or above 255) |
+| `$FFD71C3` | read: number of collided objects in the last pass (0..255; 255 if more) |
 
 - **IRQ**: with bit 1 set, the IRQ line is active while bit 7 is set, i.e. from the end of a
   pass with a collision until the program writes bit 0 = 1. It is one more input of the
@@ -173,7 +264,7 @@ up to 255 objects.
 - From BASIC (polling): `IF PEEK($FFD71C0) AND 1 THEN` read `$FFD71A0+N/8` bit `N AND 7`, or
   `POKE $FFD71C1,N : P = PEEK($FFD71C2)`; then `POKE $FFD71C0,1`.
 
-Hardware: `rrb_list_expander.vhdl` (box RAM, 64 bits per object, written during the copy; the pass; double buffers),
+Hardware: `rrb_list_expander.vhdl` (the pass over the buckets, reading the shapes from the table RAM; the partner RAMs, 1024 x 10 bits each; double buffers),
 `viciv.vhdl` (a tick per frame), `soft_rtc.vhdl` (registers, CPU-side copy on a toggle, IRQ),
 `iomapper.vhdl` (IRQ input), `machine.vhdl` (wiring).
 
@@ -430,6 +521,10 @@ background pixel of the screen colour shows), and every line runs to the full te
 
 ## Limits
 
+- Objects (level 3): 1023 per table (`NOBJ` = 1024; 511 with `NOBJ` = 512); drawn and tested
+  for collisions in character rows 0..63 only; 2048 bucket entries per frame (an object counts
+  once per row it touches: 1023 one-row objects at random Y need ~1918, 2046 if all straddle
+  two rows); the collision pass one pair per cycle (budget `$FFD7288`).
 - Row buffer: rows with list mode (bit 5 or 6 on) 2 KB = 1022 tokens per character row after
   expansion (background + all objects; the row's own tokens still come from the first 1 KB, at
   most 512 as before); plain rows 1 KB = 512 tokens (the upstream wrap). 255 one-glyph objects
@@ -497,6 +592,10 @@ background pixel of the screen colour shows), and every line runs to the full te
   (write them one line earlier), see "First raster line budget".
 - BRAM: the colour row buffer and the 2 KB list-row screen buffer cost no new block RAM
   (build after step 5: 421.5 of 445 tiles, 63.2k LUTs, WNS +0.028 ns); the lead needs none.
+  Level 3: the table snapshot (1024 objects in three block RAMs by reader: X/Y/mask/height
+  read by both the scan and the pass, 1 RAMB36; the collision fields, 1; the drawing fields,
+  2) and the buckets (2048 x 10 bits, 1 RAMB36), replacing two LUT RAMs (the 512 x 64 table,
+  the 256 x 64 box RAM): build after step 6 425.5 of 445 tiles (+4), 69.2k LUTs, WNS +0.275 ns.
 
 ## Diagnostic counters
 
@@ -558,7 +657,11 @@ before 2592.
   widths, heights), six random tables of 60 objects, 255 overlapping objects (and the pass's
   cycle budget), double buffering (the old result stays readable during a pass), a pass on the
   held snapshot, a copy requested during a pass (waits), 0 and 1 objects, collides-with masks
-  (+15: asymmetric masks, 0 = legacy; random tables with +15).
+  (+15: asymmetric masks, 0 = legacy; random tables with +15); level 3: circles (circle/circle,
+  circle/box side and corner), overlaps only above row 0 (not reported), tall objects sharing
+  63 rows (one pair), 1023 random objects with circles, the pair budget (truncated: a subset).
+  `sim/tb_soft_rtc.vhdl` also: the `$FFD72xx` page (1024 bits, 10-bit index / partner / count,
+  budget, count registers, status bits 2/3, level 3, no aliasing of `$FFD71xx`).
   `sim/tb_soft_rtc.vhdl`: the CPU side (copy on the toggle, `$FFD71A0-C3`, partner `$FF`,
   latched bit 0, IRQ line, acknowledge, reset).
 - GHDL (`sim/run_sim.sh`, MLAT 3 and 4): the expansion FSM with a fake screen/colour RAM
@@ -566,7 +669,8 @@ before 2592.
   handling, buffer overflow and aborts; v2: copies with count 0/255 and count changes, user
   masks, REL Y, FLIPY, scans at any start index, overflow, a copy with the port only sometimes
   free; timing cases 64 / 128 / 231 / 255 parts on one row, also with the 2 KB buffer
-  (`-gBUFW=11 -gLIMIT=2044`) (`sim/tb_rrb_list_v2.vhdl`).
+  (`-gBUFW=11 -gLIMIT=2044`); level 3: 32-byte entries with a noise software block (never
+  read), 1023 objects, rows beyond 63, the bucket capacity (bk_full) (`sim/tb_rrb_list_v2.vhdl`).
 - GHDL, the whole VIC-IV (`sim/run_viciv_lead.sh`, ~6 min, not part of `run_sim.sh`): the real
   `viciv.vhdl` (report-stripped copy) with a PAL frame, a chip RAM model and fastio register /
   colour RAM writes, V400, fast RRB; frame dumps and the counters per line. Checks: plain rows
@@ -589,7 +693,10 @@ before 2592.
   the fast token path against the old path / plain parts; I: collisions against a model, the
   registers and the IRQ pending bit; I2: collides-with masks (+15); J: 64 objects on one row
   against plain parts, counter 25 < 2590; K: XCTL bit 3; L: 231 objects on one row on DBLRR's
-  schedule against plain parts, 255 objects (2 KB list row) counter 25 < 5180), then the demos.
+  schedule against plain parts, 255 objects (2 KB list row) counter 25 < 5180; M: level 3 --
+  1023 objects spread over the screen against plain parts and their collisions (+15 masks,
+  circles) through `$FFD7200`, multi-row objects against plain parts, the pair budget, designed
+  circles), then the demos.
 - Regression: intro-disk demo run with the bit clear.
 
 ## Demos
@@ -656,3 +763,7 @@ before 2592.
   expansion delay the painting; the beam passes the left part first). Measured with the CPU
   stopped (bitstream 9719b5145): X 10 lost one 8-pixel row, X 600 never; V200 hid it because
   every glyph row has two lines. With the lead no line is lost.
+- Level 3 (32-byte entries): the v2 demos write entry n at table + 32 n (bytes 16..31 left to
+  software): `rrblist65v2.bas` and `parallax65.bas` (BASIC 65; parallax65's token lists moved
+  to `$5F900`), and B65's twins in b65-basic (05b3ac7). A level-2 bitstream would read them as
+  16-byte objects: run them on level 3 (`PEEK($FFD71FD)` = 3).

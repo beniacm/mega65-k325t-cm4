@@ -35,6 +35,11 @@ must equal B with the bit on (list mode changes nothing in rows without a LIST t
      over an opaque base on DBLRR's schedule: v2 == plain parts
   L) bullet hell on DBLRR's schedule with bits 3/4/7: 231 v2 objects on one row == plain parts;
      255 objects (2 KB list row): counter 25 < 5180
+  M) list mode v3 (32-byte entries, 1023 objects, buckets): M1 1023 one-glyph objects spread
+     over the screen == plain parts (DBLRR's schedule, bits 3/4/7) and their collisions
+     (groups / collides-with masks, circles) via $FFD7200-8C against the model; M2 multi-row
+     objects (heights 1..4, objects spanning rows) == plain parts; M3 the pair budget
+     ($FFD7288: truncated, status bit 2); M4 designed circles; level 3
   K) XCTL bit 3: sparse rows after dense rows show no stale pixels (== the same rows over an
      opaque base of spaces), also with the lead and the fast token path
   I) list mode v2 collisions: objects placed to collide / not collide (groups, mask 0, group 0,
@@ -64,7 +69,7 @@ from rasterdma_test import peek, poke, mon                  # monitor helpers
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 XCTL, SCR, COLOFS = 0xFFD71F0, 0x40000, 0x4000            # row: screen $40000, colour offset $4000
 OBJ, OBJCOL = 0x48000, 0x6000                             # object data (clear of the 25 rows)
-TAB = 0x4A000                                             # v2 object table
+TAB = 0x58000                                             # v3 object table (32 KB: 1023 x 32)
 OBJD, OBJDCOL = 0x48100, 0x6100                           # D: two-row object (rows 6 bytes apart)
 FCM_G = 0x1400                                            # D: full-colour glyphs (data at $50000)
 SPR_PTRS, SPR_DATA, SPR_Y = 0x1FF8, 0x1F00, 10            # F: sprite pointers / data (bank 0)
@@ -173,19 +178,26 @@ def xctl(bit5, bit6=0):
     poke(XCTL, [x | bit5 << 5 | bit6 << 6])
 
 
+SOFT = [0xA5, 0x5A] * 8                                   # bytes 16..31 (software block): noise
+
+
 def v2obj(x, rel=0, y=0, h=ROWS, flipx=0, mask=0xFF, obj=OBJ, objcol=OBJCOL, stride=0, grp=0,
-          width=0, yrel=0, wth=0):
-    """16-byte list mode v2 object (docs/rrb_list_mode.md); grp: collision group mask (+7),
-    width: collision box width in pixels (+14, 0 = 8), wth: collides-with mask (+15, 0 = grp)"""
-    return w(x | rel << 10) + w((y & 0x3FF) | yrel << 10) + [mask, h, (obj >> 16 & 0xF) | flipx << 4,
-                                                           grp] \
-        + w(obj & 0xFFFF) + w(objcol) + w(stride) + [width, wth]
+          width=0, yrel=0, wth=0, circ=0):
+    """32-byte list mode v3 entry (docs/rrb_list_mode.md "v3 table"); grp: collision group mask
+    (+7), width: collision box width in pixels (+14, 0 = 8), wth: collides-with mask (+15, 0 =
+    grp), circ: +5 bit 7 (circle); bytes 16..31 belong to software (noise here: never read)"""
+    return w(x | rel << 10) + w((y & 0x3FF) | yrel << 10) \
+        + [mask, (h & 0x3F) | circ << 7, (obj >> 16 & 0xF) | flipx << 4, grp] \
+        + w(obj & 0xFFFF) + w(objcol) + w(stride) + [width, wth] + SOFT
 
 
 def v2table(tab):
-    """object table at TAB, count, HOLD off (XCTL bit 6 must be off while the registers change)"""
+    """object table at TAB, count (10 bits: $FFD71FB, then $FFD728B), HOLD off (XCTL bit 6 must
+    be off while the registers change)"""
+    n = len(tab) // 32
     load(TAB, tab)
-    poke(0xFFD71F8, [TAB & 0xFF, TAB >> 8 & 0xFF, TAB >> 16 & 0xF, len(tab) // 16])
+    poke(0xFFD71F8, [TAB & 0xFF, TAB >> 8 & 0xFF, TAB >> 16 & 0xF, n & 0xFF])
+    poke(0xFFD728B, [n >> 8])
     poke(0xFFD71FC, [0])
 
 
@@ -388,10 +400,12 @@ def run():
     ok_k = case_k()
     # L) bullet hell: 231 / 255 objects on one row (2 KB list rows, expansion overlapping painting)
     ok_l = case_l()
+    # M) list mode v3: 1023 objects, buckets, collisions page, budget, circles
+    ok_m = case_m()
 
     # a handful of pixels differ between any two captures of the same picture (capture noise)
     print("RRB_LIST_TEST_%s" % ("PASS" if max(n1, n2, n3, n4, n5, n6, n7, n8) <= NOISE and ok_g
-                                and ok_h and ok_i and ok_j and ok_k and ok_l else "FAIL"))
+                                and ok_h and ok_i and ok_j and ok_k and ok_l and ok_m else "FAIL"))
 
 
 FCM_H = 0x1410                                            # H: full-colour layer glyphs ($50400)
@@ -513,31 +527,59 @@ def case_h(d_s, d_c):
 COL = 0xFFD71A0                                           # I: collision table, $C0-$C3 at +$20
 
 
-def col_model(objs):
-    """expected collision result for objects (x, xrel, y, yrel, mask, h, grp, width[, wth]):
-    REL X/Y from the previous object, Y signed 10 bit, box X..X+W-1 x Y..Y+8H-1; collide if
-    both draw masks and group masks are non-zero, each group meets the other's collides-with
-    mask (+15; 0 = the group mask) and the boxes overlap; the first partner is the
-    lowest-numbered one"""
+def col_model(objs, none=255):
+    """expected collision result for objects (x, xrel, y, yrel, mask, h, grp, width[, wth[,
+    circ]]): REL X/Y from the previous object, Y signed 10 bit, box X..X+W-1 x Y..Y+8H-1;
+    collide if both draw masks and group masks are non-zero, each group meets the other's
+    collides-with mask (+15; 0 = the group mask), the boxes share a character row 0..63 and
+    the boxes overlap -- or with circles (radius W/2 about the box centre; doubled units below)
+    circle/circle by the centre distance, circle/box by the distance to the box, touching
+    counts; the first partner is the lowest-numbered one (none: `none`)"""
     boxes, ax, ay = [], 0, 0
     for o in objs:
         x, xrel, y, yrel, mask, h, grp, width = o[:8]
         wth = (o[8] if len(o) > 8 else 0) or grp
+        circ = o[9] if len(o) > 9 else 0
         ax = (ax + x) % 1024 if xrel else x % 1024
         ay = (ay + y) % 1024 if yrel else y % 1024
         y0 = ay - 1024 if ay >= 512 else ay
         hh = (h % 64) or 1
-        boxes.append((ax, ax + (width or 8) - 1, y0, y0 + 8 * hh - 1, grp, mask != 0 and grp != 0,
-                      wth))
-    part = [255] * 256
+        ww = width or 8
+        y1 = y0 + 8 * hh - 1
+        boxes.append(dict(x0=ax, x1=ax + ww - 1, y0=y0, y1=y1, g=grp, act=mask != 0 and grp != 0,
+                          wth=wth, w=ww, h=hh, c=circ, fr=max(y0 // 8, 0), lr=min(y1 // 8, 63)))
+
+    def out(c, lo, hi):
+        return lo - c if c < lo else (c - hi if c > hi else 0)
+
+    def hit(a, b):
+        if not (a["act"] and b["act"] and a["g"] & b["wth"] and b["g"] & a["wth"]):
+            return False
+        if max(a["fr"], b["fr"]) > min(a["lr"], b["lr"]):
+            return False                                  # no shared row 0..63
+        ca = (2 * a["x0"] + a["w"], 2 * a["y0"] + 8 * a["h"])
+        cb = (2 * b["x0"] + b["w"], 2 * b["y0"] + 8 * b["h"])
+        if a["c"] and b["c"]:
+            dx, dy, r = ca[0] - cb[0], ca[1] - cb[1], a["w"] + b["w"]
+        elif a["c"] or b["c"]:
+            c, bx = (a, b) if a["c"] else (b, a)
+            cc = ca if a["c"] else cb
+            dx = out(cc[0], 2 * bx["x0"], 2 * bx["x0"] + 2 * bx["w"])
+            dy = out(cc[1], 2 * bx["y0"], 2 * bx["y0"] + 16 * bx["h"])
+            r = c["w"]
+        else:
+            return a["x0"] <= b["x1"] and b["x0"] <= a["x1"] and a["y0"] <= b["y1"] \
+                and b["y0"] <= a["y1"]
+        return dx * dx + dy * dy <= r * r
+
+    n = max(len(boxes), 256)
+    part = [none] * n
     for i, a in enumerate(boxes):
         for j in range(i + 1, len(boxes)):
-            b = boxes[j]
-            if a[5] and b[5] and a[4] & b[6] and b[4] & a[6] and a[0] <= b[1] and b[0] <= a[1] \
-                    and a[2] <= b[3] and b[2] <= a[3]:
+            if hit(a, boxes[j]):
                 part[i] = min(part[i], j)
                 part[j] = min(part[j], i)
-    bits = [p != 255 for p in part]
+    bits = [p != none for p in part]
     return bits, part, sum(bits)
 
 
@@ -567,8 +609,8 @@ def case_i():
                                 (104, 0, 52, 0, 255, 1, 1, 0, 0), (104, 0, 52, 0, 255, 1, 3, 0, 0)]))
     ok = True
     lvl = peek(0xFFD71FD)[0]                                  # K325T extension level
-    print("I feature level $FFD71FD = %d (expected 2)" % lvl)
-    ok = lvl == 2
+    print("I feature level $FFD71FD = %d (expected 3)" % lvl)
+    ok = lvl == 3
     try:
         poke(COL + 0x20, [0x01])                              # IRQ off, clear bits 0 and 7
         for name, objs in cases:
@@ -844,6 +886,188 @@ def case_l():
                       "" if good else "  <-- FAIL", os.path.basename(p_v2[0])))
             ok = ok and good
     finally:
+        poke(XCTL, [x0])
+        for a, v in regs.items():
+            poke(a, [v])
+    return ok
+
+
+COL3 = 0xFFD7200                                          # M: the v3 collision page
+
+
+def col3_read(n):
+    """the v3 page: collided bits of objects 0..1023, count, status, partners of objects 0..n-1"""
+    raw = b"".join(peek(COL3 + 16 * i, 16) for i in range(8))
+    bits = [bool(raw[k // 8] >> (k % 8) & 1) for k in range(1024)]
+    st = peek(COL3 + 0x80, 16)
+    count = st[6] | (st[7] & 3) << 8
+    parts = []
+    for k in range(n):
+        poke(COL3 + 0x82, [k & 0xFF, k >> 8])
+        p = peek(COL3 + 0x84, 2)
+        parts.append(p[0] | (p[1] & 3) << 8)
+    return bits, count, st[0], parts
+
+
+def case_m():
+    """M: list mode v3.  M1: 1023 one-glyph objects spread over 25 rows (about 80 parts per row,
+    most objects straddle two rows: 1918 bucket entries) on DBLRR's V400 schedule with bits
+    3/4/7, v2 (bits 6) == the same parts as plain GOTOX tokens (bit 5), counters 23 == 0 and 25
+    < 5180; the same objects carry groups (bullets: group 1 with 2; every 10th a "player":
+    group 2 with 1; every 7th a circle, width 6..13): the collision page ($FFD7200-7F, count
+    $86-87, partners $82-85 of the first 40) against col_model, status bits 2/3 clear.
+    M2: 300 objects of heights 1..4 (object rows of different glyphs, stride 4) at arbitrary Y
+    == plain parts.  M3: 255 objects in one place with a pair budget of 100 ($FFD7288):
+    status bit 2 (truncated), fewer than 255 collided; budget 0: all 255, bit 2 clear.
+    M4: designed circles (circle/circle touching and apart, circle/box side and corner) against
+    the model.  The level reads 3 at $FFD71FD and $FFD728C."""
+    import time
+    from PIL import ImageChops
+    from rrb_diag import read_counter
+    regs = {a: peek(a)[0] for a in (0xFFD3031, 0xFFD307B, 0xFFD305B, 0xFFD3054, 0xFFD3051)}
+    x0 = peek(XCTL)[0]
+    for g in range(4):
+        poke(FCM_H * 64 + 64 * g, [0 if (x + y + g) % 5 == 0 else 1 + (3 * g + y + 5 * x) % 15
+                                   for y in range(8) for x in range(8)])
+    obj, objcol = 0x48300, 0x7E20                       # one glyph (case L's object)
+    poke(obj, w(FCM_H + 1) + w(0xFFFF))
+    poke(COLRAM + objcol, [0, 1, 0, 0])
+    o_s, o_c = [w(FCM_H + 1) + w(0xFFFF)], [[0, 1, 0, 0]]
+    obj4, objcol4 = 0x48400, 0x7E40                     # 4 object rows, glyphs 1, 2, 3, 0
+    o4_s = [w(FCM_H + (1 + r) % 4) + w(0xFFFF) for r in range(4)]
+    o4_c = [[0, 1, 0, 0]] * 4
+    poke(obj4, sum(o4_s, []))
+    poke(COLRAM + objcol4, sum(o4_c, []))
+    rs, rc = [], []
+    for r in range(25):
+        s_, c_ = [], []
+        for g in range(6):
+            for t in range(4):
+                s_ += gotox(100 * g + 20 * t) + w(FCM_H + t)
+                c_ += [0x10, 0xFF, 0, 1 + (g + t + r) % 15]
+        rs.append(s_)
+        rc.append(c_)
+
+    def diff(a, b):
+        d = ImageChops.difference(a, b)
+        pts = [(i % a.size[0], i // a.size[0]) for i, p in enumerate(d.getdata()) if max(p) > 40]
+        return len(pts), pts[:6]
+
+    def compare(name, objs, tab, os_, oc_):
+        """v2 (the table) vs the plain parts of objs (x, y, h) with object rows os_/oc_"""
+        poke(XCTL, [x0 & ~0xF8 | 0x10])
+        v2table(tab)
+        setup(rs, rc, 48, step=512, rows=25, colofs=0, v400=True)
+        poke(XCTL, [x0 & ~0xF8 | 0xD8])                    # v2 + bits 3, 4, 7
+        p_v2 = late_capture()
+        ps_rows, pc_rows = [], []
+        for r in range(25):
+            ps, pc = parts(r, objs, os_, oc_)
+            ps_rows.append(rs[r] + ps)
+            pc_rows.append(rc[r] + pc)
+        n_tok = max(len(x) for x in ps_rows) // 2
+        for a_, b_ in zip(ps_rows, pc_rows):
+            while len(a_) // 2 < n_tok:
+                a_ += gotox(640)
+                b_ += [0x10, 0xFF]
+        poke(XCTL, [x0 & ~0xF8 | 0x10])
+        setup(ps_rows, pc_rows, n_tok, step=1020 if n_tok > 256 else 512, rows=25, colofs=0,
+              v400=True)
+        poke(XCTL, [x0 & ~0xF8 | 0xB8])                    # plain parts + bits 3, 4, 5, 7
+        p_ref = late_capture()
+        nd, e = diff(p_v2[1], p_ref[1])
+        cv, cr = p_v2[2], p_ref[2]
+        good = nd <= NOISE and cv[23] == 0 and cr[23] == 0 and cv[25] < 5180 and cr[25] < 5180
+        print("%s: v2 vs plain parts (%d tokens per row): %d px differ %s; longest painting v2 %d, "
+              "ref %d (< 5180), late %d/%d%s  (%s %s)"
+              % (name, n_tok, nd, e, cv[25], cr[25], cv[23], cr[23], "" if good else "  <-- FAIL",
+                 os.path.basename(p_v2[0]), os.path.basename(p_ref[0])))
+        return good
+
+    def collisions(name, objs, nparts):
+        time.sleep(0.2)
+        poke(COL3 + 0x80, [0x01])                          # clear, then one more pass
+        time.sleep(0.1)
+        bits, count, st, part = col3_read(nparts)
+        mb, mp, mc = col_model(objs, none=1023)
+        mb = (mb + [False] * 1024)[:1024]
+        good = bits == mb and count == mc and part == mp[:nparts] and st & 0x0C == 0 \
+            and (st & 1) == (1 if mc else 0)
+        bad = [k for k in range(1024) if bits[k] != mb[k]][:8]
+        badp = [k for k in range(nparts) if part[k] != mp[k]][:8]
+        print("%s: %d collided (model %d), status $%02X, bits %s, partners %s%s"
+              % (name, count, mc, st, "ok" if not bad else "differ at %s" % bad,
+                 "ok" if not badp else "differ at %s" % badp, "" if good else "  <-- FAIL"))
+        return good
+
+    ok = True
+    try:
+        lv = peek(0xFFD71FD)[0], peek(COL3 + 0x8C)[0]
+        print("M level $FFD71FD / $FFD728C = %d / %d (expected 3 / 3)" % lv)
+        ok = lv == (3, 3)
+        poke(COL3 + 0x88, [0, 0])                          # no pair budget
+        poke(COL3 + 0x80, [0x01])
+        poke(0xFFD3054, [regs[0xFFD3054] | 4])
+        poke(0xFFD3051, [0xC0])                            # DBLRR on its V400 schedule
+        # M1: 1023 objects spread over the screen
+        objs, cobjs, tab = [], [], []
+        for k in range(1023):
+            x, y = (k * 157) % 625, (k * 61) % 192
+            player = k % 10 == 0
+            circ = 1 if k % 7 == 0 else 0
+            wd = 6 + k % 8 if circ else 8
+            grp, wth = (2, 1) if player else (1, 2)
+            objs.append((x, y, 1))
+            cobjs.append((x, 0, y, 0, 0xFF, 1, grp, wd, wth, circ))
+            tab += v2obj(x, y=y, h=1, obj=obj, objcol=objcol, grp=grp, width=wd, wth=wth,
+                         circ=circ)
+        ok = compare("M1 1023 objects", objs, bytes(tab), o_s, o_c) and ok
+        poke(XCTL, [x0 & ~0xF8 | 0xD8])                    # (the v2 table again for the pass)
+        ok = collisions("M1 collisions of 1023 objects (+15 masks, circles)", cobjs, 40) and ok
+        # M2: multi-row objects (heights 1..4) spanning rows
+        objs, tab = [], []
+        for k in range(300):
+            x, y, h = (k * 211) % 625, (k * 37) % 170, 1 + k % 4
+            objs.append((x, y, h))
+            tab += v2obj(x, y=y, h=h, obj=obj4, objcol=objcol4, stride=4)
+        ok = compare("M2 300 objects of heights 1..4", objs, bytes(tab), o4_s, o4_c) and ok
+        # M3: the pair budget
+        xctl(0)
+        poke(XCTL, [x0 & ~0xF8 | 0x10])
+        v2table(b"".join(bytes(v2obj(100 + k % 3, y=50, h=1, grp=1)) for k in range(255)))
+        poke(COL3 + 0x88, [100, 0])
+        poke(XCTL, [x0 & ~0xF8 | 0x50])
+        time.sleep(0.2)
+        poke(COL3 + 0x80, [0x01])
+        time.sleep(0.1)
+        bits, count, st, _ = col3_read(0)
+        good = st & 0x04 == 0x04 and 0 < count < 255
+        print("M3 budget 100 pairs: %d of 255 collided, status $%02X (bit 2: truncated)%s"
+              % (count, st, "" if good else "  <-- FAIL"))
+        ok = ok and good
+        poke(COL3 + 0x88, [0, 0])
+        time.sleep(0.2)
+        poke(COL3 + 0x80, [0x01])
+        time.sleep(0.1)
+        bits, count, st, _ = col3_read(0)
+        good = st & 0x04 == 0 and count == 255
+        print("M3 no budget: %d of 255 collided, status $%02X%s" % (count, st, "" if good else "  <-- FAIL"))
+        ok = ok and good
+        # M4: designed circles
+        cobjs = [(100, 0, 100, 0, 255, 2, 1, 16, 0, 1), (124, 0, 100, 0, 255, 2, 1, 16, 0, 1),
+                 (116, 0, 100, 0, 255, 2, 1, 16, 0, 1), (300, 0, 100, 0, 255, 2, 2, 16, 0, 1),
+                 (314, 0, 114, 0, 255, 1, 2, 8, 0, 0), (314, 0, 104, 0, 255, 1, 2, 8, 0, 0),
+                 (500, 0, 100, 0, 255, 2, 4, 16, 0, 1), (520, 0, 110, 0, 255, 2, 4, 16, 0, 1),
+                 (510, 0, 103, 0, 255, 2, 4, 16, 0, 1), (700, 0, 100, 0, 255, 2, 8, 16, 0, 1),
+                 (704, 0, 104, 0, 255, 1, 8, 4, 0, 0)]
+        poke(XCTL, [x0 & ~0xF8 | 0x10])
+        v2table(b"".join(bytes(v2obj(o[0], y=o[2], mask=o[4], h=o[5], grp=o[6], width=o[7],
+                                     wth=o[8], circ=o[9])) for o in cobjs))
+        poke(XCTL, [x0 & ~0xF8 | 0x50])
+        ok = collisions("M4 circles", cobjs, len(cobjs)) and ok
+    finally:
+        poke(COL3 + 0x88, [0, 0])
+        poke(COL3 + 0x80, [0x01])
         poke(XCTL, [x0])
         for a, v in regs.items():
             poke(a, [v])

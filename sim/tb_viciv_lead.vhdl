@@ -25,6 +25,7 @@
 -- V400 2: V400 timing with 25 rows ($D05B 0, $D07B 24), the schedule DBLRR needs
 -- OBJS 0: 6 two-row objects, 2 glyphs wide (case D's object), (X 0/10/600 on rows 10-12/20-22/30-32, all three on 40-42)
 -- OBJS 4/5/6/7: 64/128/255/231 one-glyph, one-row objects at Y 80, X = 631 k / n (row 10)
+-- OBJS 8: 1023 one-glyph, one-row objects at X = 157 k mod 625, Y = 61 k mod 392 (v3 table)
 -- OBJS 1: 15 two-row objects, 1 glyph wide, at Y = 8*20+3, X = 42 k (30 parts in row 21)
 library ieee;
 use ieee.std_logic_1164.all;
@@ -55,8 +56,8 @@ architecture sim of tb_viciv_lead is
   signal fwd : std_logic_vector(7 downto 0) := (others => '0');
   signal r, g, b : unsigned(7 downto 0);
   signal rl_en, v2_en, fast_en, ft_en, cu_en : std_logic := '0';
-  signal tab_addr : unsigned(19 downto 0) := x"4A000";
-  signal ocount : unsigned(7 downto 0) := x"00";
+  signal tab_addr : unsigned(19 downto 0) := x"58000";   -- (32 KB: 1023 x 32 bytes)
+  signal ocount : unsigned(9 downto 0) := (others => '0');
   signal dsel : unsigned(4 downto 0) := (others => '0');
   signal dclr : std_logic := '0';
   signal dval : unsigned(15 downto 0);
@@ -167,14 +168,19 @@ begin
       wr(16#80000# + p, lo, true); wr(16#80000# + p + 1, hi, true); p := p + 2;
     end procedure;
     variable sp, cp, ntok, nt : natural;
-    variable ox, oy : objs_t(0 to 254);
+    variable ox, oy : objs_t(0 to 1022);
+    variable hgt : integer;
     variable no : natural;
     variable k, o, rr, mask : integer;
     variable tp : natural;
     variable fl : natural;
   begin
     -- objects
-    if OBJS >= 4 then
+    if OBJS = 8 then
+      -- v3: 1023 one-glyph, one-row objects spread over rows 0..49 (about 40 parts per row)
+      no := 1023;
+      for i in 0 to no - 1 loop ox(i) := (i * 157) mod 625; oy(i) := (i * 61) mod 392; end loop;
+    elsif OBJS >= 4 then
       -- 64 / 128 / 255 / 231 one-glyph, one-row objects all in row 10 (a pile on one row)
       if OBJS = 4 then no := 64; elsif OBJS = 5 then no := 128; elsif OBJS = 7 then no := 231;
       else no := 255; end if;
@@ -222,15 +228,16 @@ begin
     w16(tp, 16#FFFF#);
     for gl in 0 to W - 1 loop w16(tp, FCM_G + 2 + gl); end loop;
     w16(tp, 16#FFFF#);
-    -- object table (v2), 16 bytes each
+    -- object table (v3): 32-byte entries, the VIC-IV reads bytes 0..15 (16..31: noise here)
     for i in 0 to no - 1 loop
-      tp := 16#4A000# + 16 * i;
+      for b in 16 to 31 loop mem(16#58000# + 32 * i + b) := (7 * i + b) mod 256; end loop;
+      tp := 16#58000# + 32 * i;
       w16(tp, ox(i)); w16(tp, oy(i)); mem(tp) := 255;
       if OBJS = 2 or OBJS >= 4 then mem(tp + 1) := 1; else mem(tp + 1) := 2; end if;   -- height
       mem(tp + 2) := (OBJD / 65536) mod 16; mem(tp + 3) := 0; tp := tp + 4;
       w16(tp, OBJD mod 65536); w16(tp, OBJDCOL); w16(tp, 2 * W + 2); w16(tp, 0);
     end loop;
-    ocount <= to_unsigned(no, 8);
+    ocount <= to_unsigned(no, 10);
 
     reset <= '0';
     for i in 0 to 20 loop wait until rising_edge(cclk); end loop;
@@ -341,14 +348,16 @@ begin
         end loop;
       end loop;
     end if;
+    -- object rows of the reference parts (one-row objects for OBJS 4..8)
+    if OBJS >= 4 then hgt := 1; else hgt := 2; end if;
     if SC <= 2 then
       -- reference rows: count the longest
       for r in 0 to ROWS - 1 loop
         nt := BG + 2;
         for i in 0 to no - 1 loop
           k := r - oy(i) / 8; o := oy(i) mod 8;
-          if k >= 0 and k < 2 then nt := nt + 1 + W; end if;
-          if o /= 0 and k - 1 >= 0 and k - 1 < 2 then nt := nt + 1 + W; end if;
+          if k >= 0 and k < hgt then nt := nt + 1 + W; end if;
+          if o /= 0 and k - 1 >= 0 and k - 1 < hgt then nt := nt + 1 + W; end if;
         end loop;
         if nt > ntok then ntok := nt; end if;
       end loop;
@@ -365,7 +374,7 @@ begin
         for i in 0 to no - 1 loop
           k := r - oy(i) / 8; o := oy(i) mod 8;
           -- top part of object row k: Y offset o down (sign bit), mask $FF << o
-          if k >= 0 and k < 2 then
+          if k >= 0 and k < hgt then
             mask := (255 * (2 ** o)) mod 256;
             w16(sp, ox(i) + 4096 + o * 8192);
             if mask /= 255 then c16(cp, 16#18#, mask); else c16(cp, 16#10#, mask); end if;
@@ -373,7 +382,7 @@ begin
             nt := nt + 1 + W;
           end if;
           -- bottom part of object row k-1: (8-o) up, mask (1 << o) - 1
-          if o /= 0 and k - 1 >= 0 and k - 1 < 2 then
+          if o /= 0 and k - 1 >= 0 and k - 1 < hgt then
             mask := 2 ** o - 1;
             w16(sp, ox(i) + ((8 - o) mod 8) * 8192);
             c16(cp, 16#18#, mask);
@@ -421,7 +430,7 @@ begin
     if RL = 1 then rl_en <= '1'; end if;
     if SC = 2 or SC = 5 or SC = 8 or (SC >= 11 and SC /= 16 and SC /= 17) then rl_en <= '1'; end if;
     if SC = 3 or SC = 7 or SC = 9 or SC = 16 or SC = 17 then v2_en <= '1'; end if;
-    if SC = 9 then ocount <= x"00"; end if;
+    if SC = 9 then ocount <= (others => '0'); end if;
     reg(16#51#, D051);                      -- NORRDEL (bit 7), DBLRR (bit 6)
     setup_done <= '1';
     if PRE = 1 then
