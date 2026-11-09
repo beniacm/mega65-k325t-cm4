@@ -68,7 +68,7 @@ program can `CALL` its custom per-object logic from the same interrupt slot.
 5 (hardware, running) and S1 (software, running) → 6 and S2/S3 in parallel → swarm-hw on the
 board (gate: 1022 bullets, hardware motion in the IRQ, 50 fps, hits correct) → S4 + jumper → 7 →
 S5, docs, B65 release v0.2. Each hardware step: GHDL model tests, board cases, commits after the
-board run, pushed by the lead. Each software step: Xemu check scripts, smoke, board run.
+board run, then pushed. Each software step: Xemu check scripts, smoke, board run.
 
 ## Decisions taken (user, 2026-11-09)
 
@@ -122,6 +122,11 @@ copies this table.
   after a reset; mount a disk without AUTOBOOT first), capture the intro disks and BASIC screens
   with the pre-extension port bitstream, then compare every later bitstream with XCTL = 0 against
   that set pixel-for-pixel. Required before the step-6 flag day and after every hardware step.
+  Result 2026-11-09: `golden_step5` (step-5 bitstream, 169 captures: INTRO1 + INTRO2 + BASIC
+  screens) equals `golden_xctl` (07-11 bitstream) on every static screen; the only differences are
+  the ROM clock, blinking cursors, running counters, random boards and animation phase, each one
+  checked by eye and now masked or listed in `scripts/golden_compare.py`. `golden_step5` is the
+  reference for step 6 (its PALEDIT capture is the valid one).
 - **VIC refactor (between steps 6 and 7):** the list-mode front end now inside `viciv.vhdl`
   (ListWait/ListRun, fast token decoder states, lead, bit-3 valid bits, counters) moves into a
   sub-entity with a narrow interface; `viciv.vhdl` keeps hooks only. Gate: all testbenches and board
@@ -177,4 +182,21 @@ copies this table.
   116), compiled MOD/DIV with power-of-two fast paths, unwind in one walk; every example starts
   with `1 REM Core: ...` (any core / K325T any level / K325T level 3); docs/RELEASE_v0.2.md draft.
   List mode v1 (bit 5, LIST token) survives step 6 unchanged .
+
+### Step 6 implementation notes (interim, expander/bucket simulation passing)
+
+- Hardware reads bytes 0..15 of each 32-byte entry only (checked in the testbench); count 10 bits;
+  generic NOBJ (512/1024) = snapshot depth (NOBJ x 128 bits, true dual-port, 4 RAMB36 at 1024);
+  REL resolved during the copy (the snapshot holds absolute X/Y).
+- Buckets: rows 0..63, 2048 entries in one RAMB36, counting sort during the copy (counts, prefix
+  sums, fill in table order); more than 2048 entries -> extra ones dropped, status bit 3 (bk_full).
+  Row scan reads only the row's bucket (one 128-bit word per object).
+- Collision pass: pairs sharing a bucket, tested in the first row both are in; empty rows and the
+  tail of a row without starting objects skipped; 6-stage pipeline, one pair per cycle, 3 DSPs for
+  the circle test (+5 bit 7, radius W/2 about the box centre; keep radius <= 4H); pair budget +
+  truncated flag; first partner = lowest-numbered (min-tracked).
+- Only rows 0..63 are drawn and collision-checked.
+- GHDL: 1023 objects copy + buckets 21,280 cycles (8.2 lines); 1023 random objects over 50 rows
+  pass 52,694 cycles (20 lines); 255 objects straddling two rows 35,753; expansion unchanged at 17
+  cycles per part. Feature level mirror at `$FFD728C`.
 
