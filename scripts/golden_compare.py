@@ -32,6 +32,9 @@ DEFAULT_IGNORE = {
     "INTRO2_XANADU": "dancing figures (flagged BLACK)",
     "INTRO1_FB_BS_DEMO": "moving shapes (flagged BLACK)",
     "INTRO1_LUNAR_TAXI_2": "intro text typed out over seconds (capture phase)",
+    "INTRO1_MEGADOTS": "ROM 920413 incompatibility, not a K325T bug: $01 = $85 at READY, the stub's INC $01 leaves I/O visible and the decruncher writes over $D000-$DFFF (stock Xemu + 920413 fails the same way); garbage differs with memory contents",
+    "INTRO1_SKI": "same ROM 920413 incompatibility as MEGADOTS (the D81's SKI decrunches over $D000-$DFFF; stock Xemu + 920413 fails the same way after DLOAD + RUN)",
+    "INTRO1_ARTHURS_DAY_OUT": "golden_step5 reference caught it before its text appeared",
 }
 
 
