@@ -6,6 +6,8 @@
 --   (+0 / +2 bit 10) from the previous table object (also a hidden one); objects collide if both
 --   draw masks (+4) and group masks (+7) are non-zero, the group masks share a bit and the boxes
 --   overlap; first partner = the lowest-numbered partner (255: none).
+-- +15 = collides-with mask (0 = the group mask): i and j collide if (g_i and w_j) /= 0 and
+-- (g_j and w_i) /= 0.
 -- Cases: designed boxes (overlap, touching edges, group masks, mask 0, group 0, negative Y,
 -- REL chains, widths 1 / 8 / 255, heights), random tables (REL, negative Y, all sizes), 255
 -- objects all overlapping (count 255; the pass finishes within its cycle budget), double
@@ -76,7 +78,7 @@ begin
 
     -- object k: X (10 bit, + REL bit 10), Y (10 bit two's complement, + REL), draw mask,
     -- height, group mask, width
-    procedure put(k, x, xrel, y, yrel, mask, h, grp, wid : integer) is
+    procedure put(k, x, xrel, y, yrel, mask, h, grp, wid : integer; wth : integer := 0) is
       variable b : integer := 16 * k;
       variable yy : integer;
     begin
@@ -91,7 +93,7 @@ begin
       tabm(b + 7) <= to_unsigned(grp, 8);
       for i in 8 to 13 loop tabm(b + i) <= x"00"; end loop;
       tabm(b + 14) <= to_unsigned(wid, 8);
-      tabm(b + 15) <= x"00";
+      tabm(b + 15) <= to_unsigned(wth, 8);       -- collides-with mask (0 = the group mask)
     end procedure;
 
     function rd8(m : mem_t; a : integer) return integer is
@@ -102,7 +104,7 @@ begin
     -- the expected result for objects 0..n-1 of the table in tabm
     procedure model(n : integer; variable bits : out ba; variable part : out ia;
                     variable count : out integer) is
-      variable x0, x1, y0, y1, g : ia;
+      variable x0, x1, y0, y1, g, wm : ia;
       variable act : ba;
       variable ax, ay, v, h, w : integer;
     begin
@@ -118,6 +120,7 @@ begin
         if ay >= 512 then y0(k) := ay - 1024; else y0(k) := ay; end if;
         y1(k) := y0(k) + 8 * h - 1;
         g(k) := rd8(tabm, 16 * k + 7);
+        wm(k) := rd8(tabm, 16 * k + 15); if wm(k) = 0 then wm(k) := g(k); end if;
         act(k) := rd8(tabm, 16 * k + 4) /= 0 and g(k) /= 0;
       end loop;
       count := 0;
@@ -125,7 +128,8 @@ begin
       for i in 0 to n - 1 loop
         for j in i + 1 to n - 1 loop
           if act(i) and act(j)
-             and (to_unsigned(g(i), 8) and to_unsigned(g(j), 8)) /= x"00"
+             and (to_unsigned(g(i), 8) and to_unsigned(wm(j), 8)) /= x"00"
+             and (to_unsigned(g(j), 8) and to_unsigned(wm(i), 8)) /= x"00"
              and x0(i) <= x1(j) and x0(j) <= x1(i) and y0(i) <= y1(j) and y0(j) <= y1(i) then
             if part(i) = 255 or j < part(i) then part(i) := j; end if;
             if part(j) = 255 or i < part(j) then part(j) := i; end if;
@@ -218,6 +222,17 @@ begin
     wait for 1 ns;
     copy_pass(17);
     check("designed", 17);
+    -- collides-with masks (+15): bullets (group 1, with 2) never pair with each other, but with
+    -- the player (group 2, with 1); an object with with-mask 4 meets nobody here; 0 = legacy
+    for k in 0 to 7 loop put(k, 100 + 2 * k, 0, 50, 0, 255, 1, 1, 0, 2); end loop;   -- bullets
+    put(8, 104, 0, 52, 0, 255, 1, 2, 0, 1);       -- the player, over all bullets
+    put(9, 104, 0, 52, 0, 255, 1, 2, 0, 4);       -- group 2, but collides only with group 4
+    put(10, 104, 0, 52, 0, 255, 1, 1, 0, 0);      -- legacy (+15 = 0): with group 1 objects? no:
+                                                  -- bullets' with-mask is 2 (not group 1)
+    put(11, 104, 0, 52, 0, 255, 1, 3, 0, 0);      -- legacy groups 1|2: with the player (2/1)
+    wait for 1 ns;
+    copy_pass(12);
+    check("collides-with masks", 12);
     -- count 0 and 1: no pairs
     copy_pass(1);
     check("one object", 1);
@@ -228,13 +243,14 @@ begin
     for round in 1 to 6 loop
       for k in 0 to 59 loop
         rnd(0, 1023, a); rnd(0, 7, b); rnd(-512, 511, c); rnd(0, 7, d);
-        rnd(0, 255, e); rnd(0, 3, f); rnd(0, 255, g); rnd(0, 40, h);
+        rnd(0, 255, e); rnd(0, 3, f); rnd(0, 255, g); rnd(0, 40, h); rnd(0, 255, t);
+        if t < 128 then t := 0; end if;                              -- half without +15
         if b /= 0 then b := 0; else b := 1; a := a mod 64; end if;   -- 1 in 8 REL X
         if d /= 0 then d := 0; else d := 1; c := c mod 64; end if;   -- 1 in 8 REL Y
         if e < 20 then e := 0; end if;                              -- some hidden
         if g < 30 then g := 0; end if;                              -- some without group
         if round <= 3 then a := a mod 300; c := c mod 120; end if;   -- denser
-        put(k, a, b, c, d, e, f, g, h);
+        put(k, a, b, c, d, e, f, g, h, t);
       end loop;
       wait for 1 ns;
       copy_pass(60);

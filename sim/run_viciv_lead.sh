@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # run_viciv_lead.sh -- the real VIC-IV (viciv.vhdl, report-stripped copy) in GHDL: the K325T
-# RRB list mode lead (docs/rrb_list_mode.md, "First raster line budget").  38 scenarios of
+# RRB list mode lead (docs/rrb_list_mode.md, "First raster line budget").  49 scenarios of
 # tb_viciv_lead.vhdl in parallel (~14 min), then checks:
 #   s4 == s5   plain rows: XCTL bit 5 (lead) changes no pixel
 #   s2 == s3   reference GOTOX rows with the lead == v2 objects (6 objects, X 0/10/600, V400)
@@ -15,6 +15,12 @@
 #   == the old path's on DBLRR's schedule (which shows each painting one line later)
 #   XCTL bit 3: sparse rows after dense rows == over an opaque base of spaces (also with the
 #   lead, bit 7, DBLRR); without it the stale pixels show
+#   bullet hell (level 2: painting overlaps the expansion, 2 KB list rows, XCTL bit 3): 64
+#   one-glyph objects on one row (V400, bit 7), 128 and 231 on DBLRR's schedule (bit 7; 64 also
+#   with bit 7 off) == the same objects as plain GOTOX parts; 128 in one line (V400, bit 7:
+#   painting < 2590; its plain reference loses badlines); 255 (timing only: the plain row would
+#   not fit 1 KB) < 5180; no late pixels, no port collisions; the 231 reference also after a v2
+#   phase on the same rows (history: a $FFFF after the row's last token is not a short row)
 # (V200: run the scenarios by hand with -gV400=0.)  Expects "TB_VICIV_LEAD_PASS".  Work dir: viciv_work (scratch, not committed).
 set -uo pipefail
 cd "$(dirname "$0")"
@@ -28,6 +34,12 @@ for f in debugtools.vhdl cputypes.vhdl victypes.vhdl ghdl_ram18x2k.vhdl ghdl_scr
          vicii_sprites.vhdl rrb_list_expander.vhdl viciv.vhdl; do
   python3 strip_reports.py $V/$f $W/$f && $G $W/$f 2>&1 | grep -i "error" && exit 1
 done
+# row_advance / short_line_length are "integer range 0 to 512" = 10-bit registers in hardware
+# (LINESTEP up to 1023 works on the board, e.g. rrb_list_test.py case H at 640); GHDL checks
+# the range: widen it to the register's 10 bits in the sim copy (SC 20 rows are 640 / 1020 apart)
+sed -i -E 's/((signal (n_)?short_line_length|signal row_advance) *: *integer range 0 to )512/\11023/' $W/viciv.vhdl
+grep -c "integer range 0 to 1023" $W/viciv.vhdl | grep -qx 3 || { echo "row_advance patch failed"; exit 1; }
+$G $W/viciv.vhdl 2>&1 | grep -i "error" && exit 1
 $G tb_viciv_lead.vhdl 2>&1 | grep -i error && exit 1
 ghdl -e --std=93c -fexplicit -frelaxed -fsynopsys --workdir=$W tb_viciv_lead 2>/dev/null
 run() {
@@ -54,6 +66,16 @@ wait
 run u0 -gSC=19 -gV400=0 & run u1 -gSC=18 -gV400=0 -gCU=1 & run u2 -gSC=18 -gV400=0 &
 run u3 -gSC=18 -gV400=0 -gCU=1 -gRL=1 & run u4 -gSC=19 -gV400=0 -gRL=1 &
 run u5 -gSC=18 -gV400=0 -gCU=1 -gFT=1 & run u6 -gSC=18 $D -gCU=1 -gRL=1 & run u7 -gSC=19 $D -gRL=1 &
+# bullet hell: SC 17 (v2 pile in row 10) against SC 20 (the same as plain parts, with the lead);
+# XCTL bit 3 (CU 1): the rows are sparse and the reference's padding GOTOX would move the line end
+run p64 -gSC=17 -gOBJS=4 -gCU=1 -gFT=1 & run r64 -gSC=20 -gOBJS=4 -gCU=1 -gFT=1 &
+run p128 -gSC=17 -gOBJS=5 -gCU=1 -gFT=1 & run p128d -gSC=17 $D -gOBJS=5 -gCU=1 -gFT=1 &
+run r128d -gSC=20 $D -gOBJS=5 -gCU=1 -gFT=1 &
+run p231 -gSC=17 $D -gOBJS=7 -gCU=1 -gFT=1 & run r231 -gSC=20 $D -gOBJS=7 -gCU=1 -gFT=1 &
+run p64d -gSC=17 $D -gOBJS=4 -gCU=1 & run r64d -gSC=20 $D -gOBJS=4 -gCU=1 & run p255 -gSC=17 $D -gOBJS=6 -gCU=1 -gFT=1 &
+# the reference after v2 ran on its rows (PRE 1, as rrb_list_test.py case L: v2 leaves its
+# expansion's $FFFF right after the 510-token rows, which must not shorten the row advance)
+run r231h -gSC=20 $D -gOBJS=7 -gCU=1 -gFT=1 -gPRE=1 &
 wait
 python3 - $W <<'PY'
 import sys
@@ -66,7 +88,9 @@ ok = True
 for a, b in (("s4", "s5"), ("s2", "s3"), ("g2", "g3"), ("q8", "q9"),
              ("t0", "t1"), ("t3", "t4"), ("t5", "t6"), ("s3", "t7"), ("g3", "t9"),
              ("m12a", "m12b"), ("m13a", "m13b"), ("m14a", "m14b"), ("m15a", "m15b"),
-             ("u0", "u1"), ("u4", "u3"), ("u0", "u5"), ("u7", "u6")):
+             ("u0", "u1"), ("u4", "u3"), ("u0", "u5"), ("u7", "u6"),
+             ("p64", "r64"), ("p128d", "r128d"), ("p231", "r231"), ("p64d", "r64d"),
+             ("p231", "r231h")):
     fa, fb = frame(a), frame(b)
     n = sum(1 for y in fa if fa[y] != fb.get(y))
     print("%s vs %s: %d lines differ (frame %d lines)" % (a, b, n, len(fa)))
@@ -90,15 +114,21 @@ print("q1 vs q8 (DBLRR, lead off / on): lines differ only in one parity of the p
 ok = ok and len(par) <= 1
 for n in ("s1", "s2", "s3", "s4", "s5", "g1", "g2", "g3", "q1", "q8", "q3", "q9", "t0", "t1", "t2",
           "t3", "t4", "t5", "t6", "t7", "t9", "m12a", "m12b", "m13a", "m13b", "m14a", "m14b",
-          "m15a", "m15b"):
+          "m15a", "m15b", "p64", "r64", "p128", "p128d", "r128d", "p231", "r231", "p64d", "r64d",
+          "p255", "r231h"):
     L = lines(n)
     late = sum(1 for l in L if l[1] > 0)
     paint = max(l[2] for l in L)
+    col = sum(l[5] for l in L)
     print("%s: %d lines with late pixels, longest painting %d cycles, latest first object %d, "
-          "longest expansion %d" % (n, late, paint, max(l[3] for l in L), max(l[4] for l in L)))
-    if n in ("s2", "s3", "s5", "g2", "g3", "t2", "t4", "t7", "t9"):
+          "longest expansion %d, port collisions %d" % (n, late, paint, max(l[3] for l in L),
+                                                        max(l[4] for l in L), col))
+    ok = ok and col == 0                         # expander read while the VIC-IV reads: never
+    if n in ("s2", "s3", "s5", "g2", "g3", "t2", "t4", "t7", "t9", "p64", "r64", "p128"):
         ok = ok and late == 0 and paint < 2590
-    if n in ("q8", "q3", "q9", "t0", "t1", "t5", "t6"):   # DBLRR: two lines per painting
+    if n in ("q8", "q3", "q9", "t0", "t1", "t5", "t6", "p128d", "r128d", "p231", "r231", "p64d", "r64d",
+             "p255", "r231h"):
+        # DBLRR: two lines per painting
         ok = ok and late == 0 and paint < 5180
     if n in ("s1", "g1"):
         ok = ok and late > 0

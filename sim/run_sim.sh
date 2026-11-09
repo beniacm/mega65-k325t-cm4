@@ -89,10 +89,10 @@ for g in "-gMLAT=3" "-gMLAT=4" "-gMLAT=4 -gLIMIT=24"; do
   ghdl -r --std=08 -frelaxed --workdir=k325work tb_rrb_list_expander $g --ieee-asserts=disable 2>&1 \
     | grep -v "simulation stopped" | sed 's/.*(report note): //;s/.*(report failure): /FAIL: /;s/.*(assertion failure): /FAIL: /'
 done
-for m in 3 4; do
-  ghdl -r --std=08 -frelaxed --workdir=k325work tb_rrb_list_v2 -gMLAT=$m --ieee-asserts=disable 2>&1 \
+for g in "-gMLAT=3" "-gMLAT=4" "-gMLAT=3 -gBUFW=11 -gLIMIT=2044" "-gMLAT=4 -gBUFW=11 -gLIMIT=2044"; do
+  ghdl -r --std=08 -frelaxed --workdir=k325work tb_rrb_list_v2 $g --ieee-asserts=disable 2>&1 \
     | grep -v "simulation stopped" | sed 's/.*(report note): //;s/.*(report failure): /FAIL: /;s/.*(assertion failure): /FAIL: /'
-done
+done   # (BUFW 11 / LIMIT 2044: the VIC-IV's 2 KB row buffer)
 # list mode v2 collisions: the per-frame pass over the snapshot against a model (designed and
 # random boxes, groups, REL, negative Y, 255 objects, double buffering, held snapshot)
 ghdl -a --std=08 -frelaxed --workdir=k325work tb_rrb_collide.vhdl

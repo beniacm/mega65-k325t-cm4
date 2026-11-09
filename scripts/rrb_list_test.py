@@ -33,9 +33,12 @@ must equal B with the bit on (list mode changes nothing in rows without a LIST t
   J) 64 one-glyph v2 objects on one row of 48 tokens (bit 7): timing in V400 (counter 25 <
      2590 for the pile's badline, prints 26 and 10; sparse rows: no pixel compare), and pixels
      over an opaque base on DBLRR's schedule: v2 == plain parts
+  L) bullet hell on DBLRR's schedule with bits 3/4/7: 231 v2 objects on one row == plain parts;
+     255 objects (2 KB list row): counter 25 < 5180
   K) XCTL bit 3: sparse rows after dense rows show no stale pixels (== the same rows over an
      opaque base of spaces), also with the lead and the fast token path
   I) list mode v2 collisions: objects placed to collide / not collide (groups, mask 0, group 0,
+     ...; I2: collides-with masks (+15): bullets that never pair with each other, a player
      negative Y, REL, width, height, touching edges); the table $FFD71A0-BF, the partners
      ($FFD71C1/C2), the count ($FFD71C3) and $FFD71C0 against a model; IRQ pending with the
      enable set (the IRQ itself is tested from BASIC)
@@ -171,12 +174,12 @@ def xctl(bit5, bit6=0):
 
 
 def v2obj(x, rel=0, y=0, h=ROWS, flipx=0, mask=0xFF, obj=OBJ, objcol=OBJCOL, stride=0, grp=0,
-          width=0, yrel=0):
+          width=0, yrel=0, wth=0):
     """16-byte list mode v2 object (docs/rrb_list_mode.md); grp: collision group mask (+7),
-    width: collision box width in pixels (+14, 0 = 8)"""
+    width: collision box width in pixels (+14, 0 = 8), wth: collides-with mask (+15, 0 = grp)"""
     return w(x | rel << 10) + w((y & 0x3FF) | yrel << 10) + [mask, h, (obj >> 16 & 0xF) | flipx << 4,
                                                            grp] \
-        + w(obj & 0xFFFF) + w(objcol) + w(stride) + [width, 0]
+        + w(obj & 0xFFFF) + w(objcol) + w(stride) + [width, wth]
 
 
 def v2table(tab):
@@ -383,10 +386,12 @@ def run():
     ok_j = case_j()
     # K) XCTL bit 3: unpainted raster buffer pixels show as background
     ok_k = case_k()
+    # L) bullet hell: 231 / 255 objects on one row (2 KB list rows, expansion overlapping painting)
+    ok_l = case_l()
 
     # a handful of pixels differ between any two captures of the same picture (capture noise)
     print("RRB_LIST_TEST_%s" % ("PASS" if max(n1, n2, n3, n4, n5, n6, n7, n8) <= NOISE and ok_g
-                                and ok_h and ok_i and ok_j and ok_k else "FAIL"))
+                                and ok_h and ok_i and ok_j and ok_k and ok_l else "FAIL"))
 
 
 FCM_H = 0x1410                                            # H: full-colour layer glyphs ($50400)
@@ -509,22 +514,26 @@ COL = 0xFFD71A0                                           # I: collision table, 
 
 
 def col_model(objs):
-    """expected collision result for objects (x, xrel, y, yrel, mask, h, grp, width): REL X/Y
-    from the previous object, Y signed 10 bit, box X..X+W-1 x Y..Y+8H-1; collide if both draw
-    masks and group masks are non-zero, the groups share a bit and the boxes overlap; the first
-    partner is the lowest-numbered one"""
+    """expected collision result for objects (x, xrel, y, yrel, mask, h, grp, width[, wth]):
+    REL X/Y from the previous object, Y signed 10 bit, box X..X+W-1 x Y..Y+8H-1; collide if
+    both draw masks and group masks are non-zero, each group meets the other's collides-with
+    mask (+15; 0 = the group mask) and the boxes overlap; the first partner is the
+    lowest-numbered one"""
     boxes, ax, ay = [], 0, 0
-    for x, xrel, y, yrel, mask, h, grp, width in objs:
+    for o in objs:
+        x, xrel, y, yrel, mask, h, grp, width = o[:8]
+        wth = (o[8] if len(o) > 8 else 0) or grp
         ax = (ax + x) % 1024 if xrel else x % 1024
         ay = (ay + y) % 1024 if yrel else y % 1024
         y0 = ay - 1024 if ay >= 512 else ay
         hh = (h % 64) or 1
-        boxes.append((ax, ax + (width or 8) - 1, y0, y0 + 8 * hh - 1, grp, mask != 0 and grp != 0))
+        boxes.append((ax, ax + (width or 8) - 1, y0, y0 + 8 * hh - 1, grp, mask != 0 and grp != 0,
+                      wth))
     part = [255] * 256
     for i, a in enumerate(boxes):
         for j in range(i + 1, len(boxes)):
             b = boxes[j]
-            if a[5] and b[5] and a[4] & b[4] and a[0] <= b[1] and b[0] <= a[1] \
+            if a[5] and b[5] and a[4] & b[6] and b[4] & a[6] and a[0] <= b[1] and b[0] <= a[1] \
                     and a[2] <= b[3] and b[2] <= a[3]:
                 part[i] = min(part[i], j)
                 part[j] = min(part[j], i)
@@ -550,14 +559,23 @@ def case_i():
                          (700, 0, 200, 0, 255, 4, 16, 255), (950, 0, 231, 0, 255, 1, 16, 0),
                          (955, 0, 231, 0, 255, 1, 16, 0), (1020, 0, 500, 0, 255, 63, 32, 8),
                          (1, 1, 503, 0, 255, 1, 32, 0)]),
-        ("I apart", [(40 * k, 0, 8 * k, 0, 255, 1, 255, 8) for k in range(20)]))
+        ("I apart", [(40 * k, 0, 8 * k, 0, 255, 1, 255, 8) for k in range(20)]),
+        # I2: collides-with masks (+15): bullets (group 1, with 2) never pair with each other but
+        # with the player (group 2, with 1); with 4: nobody; +15 = 0: the group mask (legacy)
+        ("I2 collides-with", [(100 + 2 * k, 0, 50, 0, 255, 1, 1, 0, 2) for k in range(8)]
+                             + [(104, 0, 52, 0, 255, 1, 2, 0, 1), (104, 0, 52, 0, 255, 1, 2, 0, 4),
+                                (104, 0, 52, 0, 255, 1, 1, 0, 0), (104, 0, 52, 0, 255, 1, 3, 0, 0)]))
     ok = True
+    lvl = peek(0xFFD71FD)[0]                                  # K325T extension level
+    print("I feature level $FFD71FD = %d (expected 2)" % lvl)
+    ok = lvl == 2
     try:
         poke(COL + 0x20, [0x01])                              # IRQ off, clear bits 0 and 7
         for name, objs in cases:
             xctl(0)
-            v2table(b"".join(bytes(v2obj(x, rel=xr, y=y, yrel=yr, mask=m, h=h, grp=g, width=wd))
-                             for x, xr, y, yr, m, h, g, wd in objs))
+            v2table(b"".join(bytes(v2obj(o[0], rel=o[1], y=o[2], yrel=o[3], mask=o[4], h=o[5],
+                                         grp=o[6], width=o[7], wth=o[8] if len(o) > 8 else 0))
+                             for o in objs))
             xctl(0, 1)
             time.sleep(0.2)                                   # a few frames: a pass each
             poke(COL + 0x20, [0x01])                          # clear, then one more pass
@@ -747,6 +765,88 @@ def case_k():
             ok = ok and n <= NOISE
     finally:
         poke(XCTL, [x0])
+    return ok
+
+
+def case_l():
+    """L: bullet hell, all objects on one row (row 10), rows of 48 tokens (6 x 4 x (GOTOX, one
+    full-colour glyph)), DBLRR's V400 schedule (25 rows, two lines per painting), XCTL bits 4 + 7
+    (fast token path) + 3 (unpainted pixels as background: the rows are sparse, no base layer):
+      L pixels: 231 one-glyph v2 objects (bits 6) == the same parts as plain GOTOX tokens (bit 5)
+        -- 48 + 2 x 231 = 510 tokens, the most a plain row holds (1 KB); counters 25 < 5180, 23 0;
+      L 255: 255 objects (v2 rows use 2 KB): counter 25 < 5180 (timing only)."""
+    from PIL import ImageChops
+    from rrb_diag import read_counter
+    regs = {a: peek(a)[0] for a in (0xFFD3031, 0xFFD307B, 0xFFD305B, 0xFFD3054, 0xFFD3051)}
+    x0 = peek(XCTL)[0]
+    for g in range(4):
+        poke(FCM_H * 64 + 64 * g, [0 if (x + y + g) % 5 == 0 else 1 + (3 * g + y + 5 * x) % 15
+                                   for y in range(8) for x in range(8)])
+    obj, objcol = 0x48300, 0x7E20
+    poke(obj, w(FCM_H + 1) + w(0xFFFF))
+    poke(COLRAM + objcol, [0, 1, 0, 0])
+    o_s, o_c = [w(FCM_H + 1) + w(0xFFFF)], [[0, 1, 0, 0]]
+    rs, rc = [], []
+    for r in range(25):
+        s_, c_ = [], []
+        for g in range(6):
+            for t in range(4):
+                s_ += gotox(100 * g + 20 * t) + w(FCM_H + t)
+                c_ += [0x10, 0xFF, 0, 1 + (g + t + r) % 15]
+        rs.append(s_)
+        rc.append(c_)
+
+    def diff(a, b):
+        d = ImageChops.difference(a, b)
+        pts = [(i % a.size[0], i // a.size[0]) for i, p in enumerate(d.getdata()) if max(p) > 40]
+        return len(pts), pts[:6]
+
+    ok = True
+    try:
+        poke(0xFFD3054, [regs[0xFFD3054] | 4])
+        poke(0xFFD3051, [0xC0])                                # DBLRR on its V400 schedule
+        # rows 1020 bytes apart: the VIC-IV's row advance is 10 bits (LINESTEP 1024 would be 0)
+        for n in (231, 255):
+            objs = [((631 * k) // n, 80, 1) for k in range(n)]
+            poke(XCTL, [x0 & ~0xF8 | 0x10])
+            v2table(b"".join(bytes(v2obj(x, y=y, h=h, obj=obj, objcol=objcol)) for x, y, h in objs))
+            setup(rs, rc, 48, step=1020, rows=25, colofs=0, v400=True)
+            poke(XCTL, [x0 & ~0xF8 | 0xD8])                    # v2 + bits 3, 4, 7
+            p_v2 = late_capture()
+            exp_max = read_counter(10)
+            cv = p_v2[2]
+            if n == 231:
+                ps_rows, pc_rows = [], []
+                for r in range(25):
+                    ps, pc = parts(r, objs, o_s, o_c)
+                    ps_rows.append(rs[r] + ps)
+                    pc_rows.append(rc[r] + pc)
+                n_tok = max(len(x) for x in ps_rows) // 2
+                for a_, b_ in zip(ps_rows, pc_rows):
+                    while len(a_) // 2 < n_tok:
+                        a_ += gotox(640)
+                        b_ += [0x10, 0xFF]
+                poke(XCTL, [x0 & ~0xF8 | 0x10])
+                setup(ps_rows, pc_rows, n_tok, step=1020, rows=25, colofs=0, v400=True)
+                poke(XCTL, [x0 & ~0xF8 | 0xB8])                # plain parts + bits 3, 4, 5, 7
+                p_ref = late_capture()
+                cr = p_ref[2]
+                nd, e = diff(p_v2[1], p_ref[1])
+                good = nd <= NOISE and cv[23] == 0 and cr[23] == 0 and cv[25] < 5180 and cr[25] < 5180
+                print("L 231 objects on one row (DBLRR, bits 3/4/7), v2 vs plain parts: %d px differ "
+                      "%s; longest painting v2 %d, ref %d (< 5180), expansion %d, late %d/%d%s  (%s %s)"
+                      % (nd, e, cv[25], cr[25], exp_max, cv[23], cr[23], "" if good else "  <-- FAIL",
+                         os.path.basename(p_v2[0]), os.path.basename(p_ref[0])))
+            else:
+                good = cv[23] == 0 and cv[25] < 5180
+                print("L 255 objects on one row (DBLRR, bits 3/4/7, 2 KB list row): longest painting "
+                      "%d (< 5180), expansion %d, late %d%s  (%s)" % (cv[25], exp_max, cv[23],
+                      "" if good else "  <-- FAIL", os.path.basename(p_v2[0])))
+            ok = ok and good
+    finally:
+        poke(XCTL, [x0])
+        for a, v in regs.items():
+            poke(a, [v])
     return ok
 
 

@@ -117,6 +117,7 @@ begin
     assert irq_n = '1' report "IRQ while disabled" severity failure;
     rst_n <= '0'; wait until rising_edge(clk); rst_n <= '1'; wait until rising_edge(clk);
     peek(16#C0#, v); assert v = x"00" report "status after reset" severity failure;
+    peek(16#FD#, v); assert v = x"02" report "feature level $FFD71FD not 2" severity failure;
     report "collision registers ok";
     report "TB_SOFT_RTC_PASS";
     done <= true; wait;

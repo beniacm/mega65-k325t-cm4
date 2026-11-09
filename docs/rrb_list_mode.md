@@ -68,6 +68,7 @@ Registers (cleared by reset):
 | `$FFD71F8-$FFD71FA` | table address in chip RAM (20 bits, little endian) |
 | `$FFD71FB` | number of objects (0..255) |
 | `$FFD71FC` | bit 0 HOLD: keep the last snapshot (no copy per frame) |
+| `$FFD71FD` | read only: K325T extension level (1 = XCTL bits 0-7 incl. bit 3; 2 = also the collides-with mask +15 and painting overlapped with the expansion, 2 KB list rows) |
 
 The address and the count are several bytes in the CPU's clock domain; the VIC-IV latches them
 at the start of each copy. Write them before setting XCTL bit 6, or with HOLD set (then clear
@@ -87,6 +88,7 @@ Object (16 bytes):
 | +10 | colour RAM offset of object row 0's tokens |
 | +12 | row stride: bytes from one object row's tokens to the next (screen and colour) |
 | +14 | collision box width in pixels (0 = 8) |
+| +15 | collides-with mask: groups this object collides with (0 = the same as +7; level 2) |
 
 - **Snapshot per frame**: at the top of every frame (unless HOLD is set) the VIC-IV copies the
   table into its own table RAM (LUT RAM, 512 x 64 bits, no block RAM). The count is part of the
@@ -113,7 +115,7 @@ Object (16 bytes):
   the expansion ends with its own `$FFFF`; the short row keeps its row advance). A row with a
   LIST token gets them at the token, after its own v1 entries if bit 5 is on too. The first of
   LIST / `$FFFF` in the row counts; nothing after an end of row does.
-- **Full rows**: if the append point is beyond 1018 (the 1 KB buffer minus a GOTOX), the row is
+- **Full rows**: if the append point is beyond 2042 (the 2 KB list row buffer minus a GOTOX), the row is
   painted plainly, without objects; an expansion that reaches the buffer limit ends there with
   `$FFFF` (no object part is started that cannot fit).
 - Objects later in the table are painted later (on top).
@@ -133,9 +135,13 @@ up to 255 objects.
 - **Box** of an object: X .. X + W - 1 (W = +14, 0 = 8 pixels), Y .. Y + 8 H - 1 (H = +5 bits
   5..0, 0 = 1 row; Y signed, -512..511); X and Y after REL, exactly as the rows are drawn. The box
   does not depend on the glyphs (an object 3 glyphs wide sets W = 24).
-- Two objects collide if both have a **draw mask** (+4) /= 0 and a **group mask** (+7) /= 0, the
-  group masks share a bit ((A and B) /= 0) and the boxes overlap (touching edges count: X 0..7
-  and X 7..14 overlap at 7).
+- Two objects A and B collide if both have a **draw mask** (+4) /= 0 and a **group mask** (+7)
+  /= 0, each one's group mask shares a bit with the other's **collides-with mask** (+15, 0 =
+  its +7): (grp_A and with_B) /= 0 and (grp_B and with_A) /= 0, and the boxes overlap
+  (touching edges count: X 0..7 and X 7..14 overlap at 7). With +15 = 0 everywhere this is the
+  level-1 rule (the group masks share a bit). Example: bullets group 1 with 2, the player group
+  2 with 1: a bullet hits the player, bullets never collide with each other (1 and 1 = 0 on the
+  with side), and an object with group 4 / with 4 sees neither.
 - The **pass** runs after the frame's table copy (with HOLD set: on the held snapshot, every
   frame): all pairs i < j, one pair per pixel cycle, n (n - 1) / 2 + ~7 n cycles: 255 objects
   34164 cycles = 13.2 raster lines, 60 objects ~2200. The copy and the pass start at the top of
@@ -167,7 +173,7 @@ up to 255 objects.
 - From BASIC (polling): `IF PEEK($FFD71C0) AND 1 THEN` read `$FFD71A0+N/8` bit `N AND 7`, or
   `POKE $FFD71C1,N : P = PEEK($FFD71C2)`; then `POKE $FFD71C0,1`.
 
-Hardware: `rrb_list_expander.vhdl` (box RAM written during the copy; the pass; double buffers),
+Hardware: `rrb_list_expander.vhdl` (box RAM, 64 bits per object, written during the copy; the pass; double buffers),
 `viciv.vhdl` (a tick per frame), `soft_rtc.vhdl` (registers, CPU-side copy on a toggle, IRQ),
 `iomapper.vhdl` (IRQ input), `machine.vhdl` (wiring).
 
@@ -179,9 +185,10 @@ colour bytes **directly from colour RAM**, sequentially from `colour_ram_base + 
 
 List mode expands the lists **at the badline**:
 
-1. A second 1 KB buffer, the **colour row buffer**, is filled in step with the screen row buffer:
-   ordinary tokens get their colour RAM bytes (the VIC's colour RAM port is idle during the
-   badline fetch), list data gets the bytes at its own colour offset.
+1. A second buffer, the **colour row buffer** (2 KB, as the screen row buffer of list rows), is
+   filled in step with the screen row buffer: ordinary tokens get their colour RAM bytes (the
+   VIC's colour RAM port is idle during the badline fetch), list data gets the bytes at its own
+   colour offset.
 2. On the LIST token the fetch FSM stops copying the row and walks the entries: for each one it
    writes a **synthesised GOTOX** (word 0 with REL cleared, colour bytes as above) and then
    copies the object data (screen and colour) until `$FFFF`. FLIPX/FLIPY are XORed into every
@@ -423,7 +430,10 @@ background pixel of the screen colour shows), and every line runs to the full te
 
 ## Limits
 
-- Row buffer: 1 KB = 512 tokens per character row after expansion (background + all objects).
+- Row buffer: rows with list mode (bit 5 or 6 on) 2 KB = 1022 tokens per character row after
+  expansion (background + all objects; the row's own tokens still come from the first 1 KB, at
+  most 512 as before); plain rows 1 KB = 512 tokens (the upstream wrap). 255 one-glyph objects
+  after a 48-token row are 558 tokens.
 - Badline time: expansion reads 2 bytes per token (+8 per entry) from chip RAM at the pixel
   clock; 512 tokens about 13 us of a 64 us line. An expansion still running at the next line
   start is cut off and the row painted plainly.
@@ -444,28 +454,49 @@ background pixel of the screen colour shows), and every line runs to the full te
   opaque base layer first (e.g. GOTOX 0 + 80 glyphs, ~330 cycles with bit 7, ~640 without), or
   XCTL bit 3 ("Unpainted pixels"); tests comparing two different rows must make them opaque
   (cases E, J) because the gaps' history differs between the two.
-- **Many objects on one row** (a pile on the floor). The badline of such a row does, one
-  after the other: the row fetch (1 + 2 x CHRCOUNT), the expansion of all its object parts
-  (they are emitted one by one, before any painting), then the painting of the row's tokens
-  and of the parts. So counter 26 (first object part) = fetch + expansion + the row's own
-  tokens: it is large by design, not a stall. Expansion per part (one-glyph objects,
-  `tb_rrb_list_v2` timing case): 22 cycles before step 4, now **17** (a finished object's
-  extra reads are ignored instead of waited for, HitB0's read starts in the hit cycle, the
-  scan's next table read is issued while the hit ends; 13 per part for the second part of a
-  two-row object). Measured in GHDL, V400, 48-token row (24 GOTOX + 24 FCM), bit 7, 64 objects
-  in the row: expansion 1413 -> 1094, first object part 1839 -> 1520, painting of the badline
-  2591 (cut off: the next line was lost) -> **2350**; the other lines of the row 1151. Row
-  buffer: 231 one-glyph parts fit after 48 tokens (1 KB); 231 parts expand in 3933 cycles.
-- To go well below that, painting must overlap the expansion (the row's tokens and the first
-  parts painted while later parts are still emitted): ~fetch + expansion + one part = ~1200
-  for 64 objects, ~4000 for 231 parts (within DBLRR's 5184). It needs the row's colour bytes in
-  the colour row buffer (the expander owns the colour RAM port while it runs), the expander's
-  chip RAM reads in the VIC-IV's idle port cycles (and the mono glyph byte latched instead of
-  held on the port), and the token decoder waiting at the expander's write position: not done
-  yet (step 4 note).
+- **Many objects on one row** (a pile on the floor; level 2). The badline of such a row does
+  the row fetch (1 + 2 x CHRCOUNT, with the row's colour bytes copied into the colour row
+  buffer in the same cycles: the colour RAM port is idle there), then starts the expansion and
+  **paints at the same time**: the row's own tokens at once (they are in the buffer), and every
+  object part as soon as the expander has written it. Pipeline:
+  - the expander reads chip RAM only in cycles where the VIC-IV's port is idle in the next
+    cycle too (`exp_ofree`: the token states that issue no read -- FetchNextCharacter, the
+    high byte, the waits, a full-colour glyph's second word, EndOfChargen -- and no row fetch),
+    so it never collides with the painting's glyph reads (counter 7 stays 0);
+  - the mono glyph byte is latched when it arrives (`mono_l`) instead of held on the port, so
+    the expander may use the port during the painting of a plain glyph;
+  - the token readers wait at the expander's write position: a buffer index at or beyond it is
+    read only after the expander has written it plus one (`rd_ok`: the old path waits in
+    FrontWait, the fast token path's decoder stalls in D0 on the write position one cycle
+    later, `exp_wpos_d`: an expander byte is in the row buffer two cycles after its write
+    strobe, and D0 reads in the cycle it decides), and the end of the expansion's `$FFFF` ends
+    the row as before.
+  Expansion per part is unchanged (17 cycles per one-glyph object, 13 for a second part), but
+  it is now hidden behind painting: the badline ends ~fetch + expansion + the last part's
+  painting. Measured in GHDL (`tb_viciv_lead`, V400, 48-token row of 24 GOTOX + 24 FCM, bits 4
+  and 7, one-glyph full-colour objects all in row 10):
+
+  | objects | expansion | badline painting (counter 25) | other lines | plain parts | was (step 4) |
+  |---|---|---|---|---|---|
+  | 64 | 1258 | **1371** | 1151 | 1576 | 2350 |
+  | 128 | 2346 | **2459** (one line, 2592) | 1983 | 2728 (DBLRR; loses badlines in one line) | lost line |
+  | 231 (DBLRR V400) | 4097 | **4210** (two lines, 5184) | 3322 | 4582 | -- |
+  | 255 (DBLRR V400, 2 KB) | 4505 | **4618** | 3634 | (does not fit 1 KB) | -- |
+
+  So a pile of objects now costs less than the same parts written as plain GOTOX tokens (the
+  expansion runs in the reader's idle cycles); pictures are identical (GHDL, all four sizes).
+  Expander alone (`tb_rrb_list_v2` timing cases, MLAT 3): 64 parts 1095 cycles, 128 parts
+  2183, 231 parts 3933, 255 parts 4342 (2 KB; MLAT 4: 4597). Without the fast token path (bit 7
+  off) the painting itself is the limit: 64 objects need 2591 in one line (lost; on DBLRR 2847,
+  pixel-exact), 255 objects on DBLRR 5183 (cut off) -- use bit 7 for piles.
+- **Colour bytes of list rows** come from the colour row buffer, also the row's own tokens (copied
+  at the badline, like the screen bytes): a colour RAM write to the row after its badline shows
+  on the next frame, as the screen bytes always did. Rows without list mode read colour RAM
+  while painting, as upstream.
 - Raster effects: with list mode on, paint-time registers take effect one raster line later
   (write them one line earlier), see "First raster line budget".
-- BRAM: one more 18 Kb block for the colour row buffer (the lead needs none).
+- BRAM: the colour row buffer and the 2 KB list-row screen buffer cost no new block RAM
+  (build after step 5: 421.5 of 445 tiles, 63.2k LUTs, WNS +0.028 ns); the lead needs none.
 
 ## Diagnostic counters
 
@@ -526,14 +557,16 @@ before 2592.
   model -- designed boxes (overlap, touching edges, groups, mask 0, group 0, negative Y, REL,
   widths, heights), six random tables of 60 objects, 255 overlapping objects (and the pass's
   cycle budget), double buffering (the old result stays readable during a pass), a pass on the
-  held snapshot, a copy requested during a pass (waits), 0 and 1 objects.
+  held snapshot, a copy requested during a pass (waits), 0 and 1 objects, collides-with masks
+  (+15: asymmetric masks, 0 = legacy; random tables with +15).
   `sim/tb_soft_rtc.vhdl`: the CPU side (copy on the toggle, `$FFD71A0-C3`, partner `$FF`,
   latched bit 0, IRQ line, acknowledge, reset).
 - GHDL (`sim/run_sim.sh`, MLAT 3 and 4): the expansion FSM with a fake screen/colour RAM
   (token streams in, buffer contents out), including REL, FLIPX/FLIPY, empty lists, `$FFFF`
   handling, buffer overflow and aborts; v2: copies with count 0/255 and count changes, user
   masks, REL Y, FLIPY, scans at any start index, overflow, a copy with the port only sometimes
-  free (`sim/tb_rrb_list_v2.vhdl`).
+  free; timing cases 64 / 128 / 231 / 255 parts on one row, also with the 2 KB buffer
+  (`-gBUFW=11 -gLIMIT=2044`) (`sim/tb_rrb_list_v2.vhdl`).
 - GHDL, the whole VIC-IV (`sim/run_viciv_lead.sh`, ~6 min, not part of `run_sim.sh`): the real
   `viciv.vhdl` (report-stripped copy) with a PAL frame, a chip RAM model and fastio register /
   colour RAM writes, V400, fast RRB; frame dumps and the counters per line. Checks: plain rows
@@ -543,14 +576,20 @@ before 2592.
   changes only the first line of each pair, no late pixels, v2 with an empty table changes nothing.
   Fast token path (XCTL bit 7): pixel-identical with the old path on FCM layers with attributes,
   parallax rows, v2 objects, 30 parts and the per-token microbenchmarks.
+  Bullet hell (level 2): 64 one-glyph objects on one row (V400, bit 7), 128 and 231 on DBLRR's
+  schedule, 64 with bit 7 off == the same objects as plain GOTOX parts (XCTL bit 3 on: the rows
+  are sparse), 128 objects within one line (bit 7), 255 within DBLRR's two lines; no late pixels,
+  no port collisions (counter 7). The plain references need LINESTEP 640 / 1020: the sim copy
+  widens `row_advance` to its 10 hardware bits (GHDL checks the `0 to 512` range).
   The same checks pass in V200 (`-gV400=0`, run by hand).
 - Board: `scripts/rrb_list_test.py` (pixel-exact comparison of a list-mode screen with the same
   picture built with plain GOTOX tokens; v2 two-row objects, short rows, a sprite in the opened
   top border during the copy; G/G2: V400 objects at the left edge and 30 parts in a row, late
   pixel counter; G3: the same with DBLRR on the V400 schedule; H: three full-colour layers with
   the fast token path against the old path / plain parts; I: collisions against a model, the
-  registers and the IRQ pending bit; J: 64 objects on one row against plain parts, counter
-  25 < 2590), then the demos.
+  registers and the IRQ pending bit; I2: collides-with masks (+15); J: 64 objects on one row
+  against plain parts, counter 25 < 2590; K: XCTL bit 3; L: 231 objects on one row on DBLRR's
+  schedule against plain parts, 255 objects (2 KB list row) counter 25 < 5180), then the demos.
 - Regression: intro-disk demo run with the bit clear.
 
 ## Demos
@@ -583,6 +622,12 @@ before 2592.
 - **A `$FFFF` row advances the next row by its own length** (VIC-IV short-row rule, not
   LINESTEP); list mode keeps that for the rows whose `$FFFF` the v2 objects replace.
 - Tests must stop the CPU (monitor `t1`): BASIC 65 rewrites VIC-IV registers while it runs.
+- The VIC-IV reads the token after a row's last one (CHRCOUNT + 1; never painted), and upstream
+  takes a `$FFFF` there as the end of a short row: the row advance becomes that position instead
+  of LINESTEP. With the 2 KB list rows the slot after a plain row can hold an earlier v2
+  expansion's `$FFFF` (case L's reference after its v2 picture: every row 2 bytes further on, a
+  diagonal of shifted glyphs). With XCTL bit 5 or 6 on, a `$FFFF` in that slot of a plain row is
+  ignored (both token paths); with both off, nothing changes. GHDL: `r231h` (PRE 1).
 
 ## Demos
 

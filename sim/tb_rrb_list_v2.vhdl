@@ -22,20 +22,20 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 entity tb_rrb_list_v2 is
-  generic ( MLAT : integer := 3 );
+  generic ( MLAT : integer := 3; BUFW : integer := 10; LIMIT : integer := 1020 );
 end entity;
 
 architecture sim of tb_rrb_list_v2 is
-  constant LIMIT : integer := 1020;
+  constant BUFN : integer := 2 ** BUFW;                 -- row buffer bytes (VIC-IV: 2 KB)
   signal clk : std_logic := '0';
   signal start, busy, done, mreq, bwe, start_scan, scan_en, copy_start, copying : std_logic := '0';
   signal abort : std_logic := '0';
   signal mfree : std_logic := '1';
   signal mfree_tog : boolean := false;
   signal ent_addr : unsigned(19 downto 0) := x"10000";
-  signal out_start : unsigned(9 downto 0) := to_unsigned(0, 10);
-  signal out_len : unsigned(10 downto 0);
-  signal baddr : unsigned(9 downto 0);
+  signal out_start : unsigned(BUFW - 1 downto 0) := to_unsigned(0, BUFW);
+  signal out_len : unsigned(BUFW downto 0);
+  signal baddr : unsigned(BUFW - 1 downto 0);
   signal maddr : unsigned(19 downto 0);
   signal caddr : unsigned(15 downto 0);
   signal mdata, cdata, bscreen, bcolour : unsigned(7 downto 0) := x"00";
@@ -88,9 +88,9 @@ architecture sim of tb_rrb_list_v2 is
     return x"CC";
   end function;
 
-  type buf_t is array (0 to 1023) of unsigned(7 downto 0);
+  type buf_t is array (0 to BUFN - 1) of unsigned(7 downto 0);
   signal bs, bc : buf_t := (others => x"55");
-  type wr_t is array (0 to 1023) of boolean;
+  type wr_t is array (0 to BUFN - 1) of boolean;
   signal wr : wr_t := (others => false);                    -- written since the last clear
   type pipe_t is array (1 to MLAT) of unsigned(7 downto 0);
   signal mp : pipe_t := (others => x"00");
@@ -100,7 +100,7 @@ begin
   clk <= not clk after 5 ns;
 
   dut : entity work.rrb_list_expander
-    generic map (MLAT => MLAT, CLAT => 1, LIMIT => LIMIT)
+    generic map (MLAT => MLAT, CLAT => 1, LIMIT => LIMIT, BUFW => BUFW)
     port map (clk => clk, start => start, abort => abort, ent_addr => ent_addr,
               out_start => out_start, busy => busy, done => done, out_len => out_len,
               mreq => mreq, maddr => maddr, mdata => mdata, caddr => caddr, cdata => cdata,
@@ -242,7 +242,7 @@ begin
     begin
       clr <= '1'; tick; clr <= '0';
       row <= to_unsigned(r, 8); start_scan <= scan_only; scan_en <= '1';
-      out_start <= to_unsigned(os, 10);
+      out_start <= to_unsigned(os, BUFW);
       tick; start <= '1';
       tick; start <= '0';
       wait_done;
@@ -267,7 +267,7 @@ begin
         report name & ": out_len " & integer'image(to_integer(out_len)) severity error;
         errs := errs + 1;
       end if;
-      for i in 0 to 1023 loop
+      for i in 0 to BUFN - 1 loop
         if wr(i) and (i < os or i >= os + x'length / 2) then
           report name & ": written outside the expected range at " & integer'image(i) severity error;
           errs := errs + 1;
@@ -286,7 +286,7 @@ begin
         errs := errs + 1;
         return;
       end if;
-      for i in 0 to 1023 loop
+      for i in 0 to BUFN - 1 loop
         if wr(i) /= (i >= os and i < l) then
           report name & ": write map wrong at " & integer'image(i) severity error;
           errs := errs + 1;
@@ -339,7 +339,7 @@ begin
     -- abort at many points of a scan (scan, part, object data), then a clean row
     for d in 0 to 24 loop
       clr <= '1'; tick; clr <= '0';
-      row <= to_unsigned(2, 8); start_scan <= '1'; scan_en <= '1'; out_start <= to_unsigned(0, 10);
+      row <= to_unsigned(2, 8); start_scan <= '1'; scan_en <= '1'; out_start <= to_unsigned(0, BUFW);
       tick; start <= '1';
       tick; start <= '0';
       for n in 1 to 1 + 4 * d loop tick; end loop;
@@ -394,7 +394,7 @@ begin
     for k in 0 to 253 loop put(k, 0, 0, 0, 1, 16#02#, 0, 16#4000#, 0); end loop;
     put(254, 77, 0, 16#FF#, 1, 16#02#, 0, 16#4000#, 0);
     clr <= '1'; tick; clr <= '0';
-    row <= x"00"; start_scan <= '1'; scan_en <= '1'; out_start <= to_unsigned(0, 10);
+    row <= x"00"; start_scan <= '1'; scan_en <= '1'; out_start <= to_unsigned(0, BUFW);
     cnt <= x"FF";
     tick; copy_start <= '1';
     tick; copy_start <= '0';
@@ -425,7 +425,7 @@ begin
 
     -- timing (no check): object parts appended after a 48-token row (out_start 96), one-glyph
     -- objects; cycles from start to done, to the first part, and per part
-    for tcase in 0 to 3 loop
+    for tcase in 0 to 5 loop
       tabm <= (others => x"00");
       wait for 0 ns;
       if tcase = 0 then        -- 64 objects inside row 5
@@ -437,12 +437,18 @@ begin
       elsif tcase = 2 then     -- 32 two-row objects at Y = 35: two parts each in row 5
         for k in 0 to 31 loop put(k, 10 * k, 35, 16#FF#, 2, 16#02#, 0, 16#4000#, 16); end loop;
         copy(32, false);
-      else                     -- 255 objects inside row 5 (the buffer ends the expansion)
+      elsif tcase = 3 then     -- 255 objects inside row 5 (1 KB: the buffer ends the expansion)
         for k in 0 to 254 loop put(k, 4 * k, 40, 16#FF#, 1, 16#02#, 0, 16#4000#, 0); end loop;
+        copy(255, false);
+      elsif tcase = 4 then     -- 128 objects inside row 5
+        for k in 0 to 127 loop put(k, 5 * k, 40, 16#FF#, 1, 16#02#, 0, 16#4000#, 0); end loop;
+        copy(128, false);
+      else                     -- 255 objects inside row 5 again (all of them fit 2 KB)
+        for k in 0 to 254 loop put(k, 2 * k, 40, 16#FF#, 1, 16#02#, 0, 16#4000#, 0); end loop;
         copy(255, false);
       end if;
       clr <= '1'; tick; clr <= '0';
-      row <= to_unsigned(5, 8); start_scan <= '1'; scan_en <= '1'; out_start <= to_unsigned(96, 10);
+      row <= to_unsigned(5, 8); start_scan <= '1'; scan_en <= '1'; out_start <= to_unsigned(96, BUFW);
       tick; start <= '1';
       tick; start <= '0';
       tcnt := 0; tfirst := -1; nparts := 0;

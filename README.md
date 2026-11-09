@@ -607,14 +607,19 @@ into the row buffer at the badline (`rrb_list_expander.vhdl`, with a colour row 
 bit 6 one table of up to 255 16-byte objects with X **and** Y (`$FFD71F8-FC`: address, count,
 HOLD) is snapshotted once per frame and scanned for every row, so a program writes only X/Y and
 objects can never tear.  Verified pixel-exact against plain GOTOX rows (`scripts/rrb_list_test.py`,
-cases A-H); hardware counters at `$FFD71E0-E3` (`scripts/rrb_diag.py`) count aborts, plain rows,
+cases A-L); hardware counters at `$FFD71E0-E3` (`scripts/rrb_diag.py`) count aborts, plain rows,
 port collisions, copy/expansion times, late pixels and the painting time per line.  With bit 5 or
 6 the VIC-IV paints every raster line one line ahead (two with DBLRR) and shows it a line later,
 so objects are complete on the first line of every row too ("First raster line budget" in the
 design note).  Demos: `scripts/demos/rrblist65*.bas` (BASIC 65) and `rrblist_b65*.bas` (B65
 BASIC).  **Collisions** (list mode v2): once per frame the VIC-IV checks every pair of objects
-(boxes from X/Y, width +14, height +5; group masks +7) and reports the collided objects, each
-one's first partner and the count at `$FFD71A0-C3`, with an optional IRQ.
+(boxes from X/Y, width +14, height +5; group masks +7, collides-with masks +15) and reports the
+collided objects, each one's first partner and the count at `$FFD71A0-C3`, with an optional IRQ.
+**Bullet hell**: list rows have a 2 KB row buffer and the VIC-IV paints while the objects are
+still being expanded (the expander uses only idle chip RAM cycles), so 128 one-glyph objects on
+one row fit a raster line and 255 fit DBLRR's two lines (with bit 7).
+**`$FFD71FD`** (read only) is the K325T extension level: 1 = XCTL bits 0-7, 2 = also the +15
+mask and the overlapped painting.
 
 Tests: `sim/tb_chipram_k325t.vhdl`, `sim/tb_colourram_k325t.vhdl`, `sim/tb_rrb_list_expander.vhdl`,
 `sim/tb_rrb_list_v2.vhdl` (GHDL, all in `sim/run_sim.sh`); on the board `scripts/chipram_test.py`,

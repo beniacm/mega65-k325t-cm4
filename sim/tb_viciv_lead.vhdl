@@ -18,9 +18,13 @@
 --         SC 17: 48 tokens = 6 x 4 x (GOTOX, FCM glyph), LINESTEP 96, v2 (OBJS 4: 64 one-glyph
 --         objects in row 10).  SC 18: dense and sparse rows in turn (XCTL bit 3, CU 1: unpainted
 --         pixels show as background); SC 19: the sparse rows over an opaque base of spaces.
---         RL 1: XCTL bit 5 (the list mode lead)
+--         RL 1: XCTL bit 5 (the list mode lead).  SC 20: the SC 17 rows with the objects
+--         as plain GOTOX parts in row 10 (bit 5: the lead), the reference of SC 17 (LINESTEP
+--         640, or 1020 with V400 2: 25 rows; OBJS 4/5/7, 231 objects = 510 tokens at most)
+--         PRE 1: v2 (bit 6) on the rows until frame 1 line 300, then bit 5 only (history)
 -- V400 2: V400 timing with 25 rows ($D05B 0, $D07B 24), the schedule DBLRR needs
 -- OBJS 0: 6 two-row objects, 2 glyphs wide (case D's object), (X 0/10/600 on rows 10-12/20-22/30-32, all three on 40-42)
+-- OBJS 4/5/6/7: 64/128/255/231 one-glyph, one-row objects at Y 80, X = 631 k / n (row 10)
 -- OBJS 1: 15 two-row objects, 1 glyph wide, at Y = 8*20+3, X = 42 k (30 parts in row 21)
 library ieee;
 use ieee.std_logic_1164.all;
@@ -31,7 +35,7 @@ use work.victypes.all;
 entity tb_viciv_lead is
   generic (SC : integer := 3; OBJS : integer := 0; V400 : integer := 1; FAST : integer := 1;
            BG : integer := 80; D051 : integer := 16#80#; FT : integer := 0; CU : integer := 0;
-           RL : integer := 0;
+           RL : integer := 0; PRE : integer := 0;
            OUTF : string := "/dev/null");
 end entity;
 
@@ -65,11 +69,13 @@ architecture sim of tb_viciv_lead is
   shared variable mem : mem_t := (others => 0);
 
   constant SCR : natural := 16#40000#;
-  function stepsel(sc : integer) return natural is
+  function stepsel(sc : integer; v4 : integer) return natural is
   begin
-    if sc = 18 or sc = 19 then return 256; elsif sc = 17 then return 96; elsif sc >= 6 then return 492; else return 512; end if;
+    if sc = 20 then
+      if v4 = 2 then return 1020; else return 640; end if;    -- 25 x 1020 / 50 x 640 bytes
+    elsif sc = 18 or sc = 19 then return 256; elsif sc = 17 then return 96; elsif sc >= 6 then return 492; else return 512; end if;
   end function;
-  constant STEP : natural := stepsel(SC);           -- 492: parallax65.bas rows
+  constant STEP : natural := stepsel(SC, V400);           -- 492: parallax65.bas rows
   constant OBJD : natural := 16#48100#;
   constant OBJDCOL : natural := 16#7F00#;
   constant FCM_G : natural := 16#1400#;
@@ -168,10 +174,11 @@ begin
     variable fl : natural;
   begin
     -- objects
-    if OBJS = 4 then
-      -- 64 one-glyph, one-row objects all in row 10 (step 4: a pile on one row)
-      no := 64;
-      for i in 0 to 63 loop ox(i) := 10 * i; oy(i) := 80; end loop;
+    if OBJS >= 4 then
+      -- 64 / 128 / 255 / 231 one-glyph, one-row objects all in row 10 (a pile on one row)
+      if OBJS = 4 then no := 64; elsif OBJS = 5 then no := 128; elsif OBJS = 7 then no := 231;
+      else no := 255; end if;
+      for i in 0 to no - 1 loop ox(i) := (i * 631) / no; oy(i) := 80; end loop;
     elsif OBJS = 3 then
       -- six two-row objects at Y = 8*10 + 3: 12 parts in row 11 (rrb_list_test.py case H)
       no := 6;
@@ -219,7 +226,7 @@ begin
     for i in 0 to no - 1 loop
       tp := 16#4A000# + 16 * i;
       w16(tp, ox(i)); w16(tp, oy(i)); mem(tp) := 255;
-      if OBJS = 2 or OBJS = 4 then mem(tp + 1) := 1; else mem(tp + 1) := 2; end if;   -- height
+      if OBJS = 2 or OBJS >= 4 then mem(tp + 1) := 1; else mem(tp + 1) := 2; end if;   -- height
       mem(tp + 2) := (OBJD / 65536) mod 16; mem(tp + 3) := 0; tp := tp + 4;
       w16(tp, OBJD mod 65536); w16(tp, OBJDCOL); w16(tp, 2 * W + 2); w16(tp, 0);
     end loop;
@@ -264,17 +271,33 @@ begin
           w16(sp, 640); c16(cp, 16#10#, 255); nt := nt + 1;
         end loop;
       end loop;
-    elsif SC = 17 then
-      -- step 4: 48 tokens = 6 groups of 4 x (GOTOX, one full-colour glyph), LINESTEP 96
+    elsif SC = 17 or SC = 20 then
+      -- step 4: 48 tokens = 6 groups of 4 x (GOTOX, one full-colour glyph), LINESTEP 96;
+      -- SC 20: + the objects of row 10 as plain parts (GOTOX X, the object's glyph), padded
       ntok := 48;
+      if SC = 20 then ntok := 48 + 2 * no; end if;
       for r in 0 to ROWS - 1 loop
+        exit when SC = 20 and V400 = 2 and r >= ROWS / 2;
         sp := SCR + STEP * r; cp := STEP * r;
         for g in 0 to 5 loop
           for t in 0 to 3 loop
             w16(sp, 100 * g + 20 * t); c16(cp, 16#10#, 255);
-            w16(sp, FCM_G + t); c16(cp, 0, 1);
+            w16(sp, FCM_G + t); c16(cp, 0, 1 + (g + t + r) mod 15);   -- as rrb_list_test.py case L
           end loop;
         end loop;
+        if SC = 20 then
+          nt := 48;
+          if r = 10 then
+            for i in 0 to no - 1 loop
+              w16(sp, ox(i) + 4096); c16(cp, 16#10#, 255);    -- top part, Y offset 0
+              w16(sp, FCM_G); c16(cp, 0, 1);
+              nt := nt + 2;
+            end loop;
+          end if;
+          while nt < ntok loop
+            w16(sp, 640); c16(cp, 16#10#, 255); nt := nt + 1;
+          end loop;
+        end if;
       end loop;
     elsif SC >= 6 then
       -- parallax65.bas rows: 3 layers = GOTOX (fine X) + 81 normal glyphs, 246 tokens, 492 bytes;
@@ -401,13 +424,19 @@ begin
     if SC = 9 then ocount <= x"00"; end if;
     reg(16#51#, D051);                      -- NORRDEL (bit 7), DBLRR (bit 6)
     setup_done <= '1';
+    if PRE = 1 then
+      -- history: v2 (bit 6) on these rows during frame 0 and part of frame 1, then bit 5 only
+      v2_en <= '1'; rl_en <= '0';
+      wait until frame = 1 and y = 300;
+      v2_en <= '0'; rl_en <= '1';
+    end if;
     wait;
   end process;
 
   -- per line (frame 2, before this line's fetch start at x ~677): counters, then clear
   mon : process
     variable l : line;
-    variable v23, v25, v26, v10 : natural;
+    variable v23, v25, v26, v10, v7 : natural;
     procedure rd(n : natural; variable v : out natural) is
     begin
       dsel <= to_unsigned(n, 5);
@@ -418,11 +447,12 @@ begin
     wait until frame = 2 and y = 1;
     loop
       wait until rising_edge(pclk) and x = 600 and ph = 0;
-      rd(23, v23); rd(25, v25); rd(26, v26); rd(10, v10);
+      rd(23, v23); rd(25, v25); rd(26, v26); rd(10, v10); rd(7, v7);
       dclr <= not dclr;
       write(l, string'("L ")); write(l, y); write(l, string'(" late ")); write(l, v23);
       write(l, string'(" paint ")); write(l, v25); write(l, string'(" obj ")); write(l, v26);
       write(l, string'(" exp ")); write(l, v10);
+      write(l, string'(" col ")); write(l, v7);
       writeline(output, l);
       exit when y >= 600;
     end loop;
