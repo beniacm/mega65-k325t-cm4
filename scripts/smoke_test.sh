@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # smoke_test.sh — unattended MEGA65 bring-up on the QMTech K325T (only J11 HDMI fitted;
 # SD card, keyboard, joysticks and serial monitor are all terminated on the Rockchip).
-#   scripts/smoke_test.sh [path.bit] [--no-power]
+#   scripts/smoke_test.sh [path.bit] [--no-power]      (M65_HOST=addr: reach the module over ssh, not adb)
 #  1. power via the Matter plug          5. RUN/STOP past MEGAFLASH (the QSPI holds non-MEGA65 slots)
 #  2. JTAG-program the bitstream         6. wait for HYPPO to boot from the served SD image
 #  3. (re)start m65d on the Rockchip     7. type a BASIC line, check a joystick via CIA1, capture HDMI
@@ -16,11 +16,24 @@ if [ "${2:-}" != "--no-power" ]; then
   PLUG="${PLUG:-$HOME/matter-plug/plug}"   # smart-plug client (optional; --no-power skips)
   "$PLUG" status | grep -q ON || { "$PLUG" on; sleep 90; }
 fi
-adb get-state >/dev/null 2>&1 || fail "Rockchip not reachable over adb"
+# Module access: adb (Luckfox with the mini-USB cable) unless $M65_HOST is set, then ssh/scp to
+# root@$M65_HOST (e.g. the Radxa CM3, where adb does not work on this carrier).
+if [ -n "${M65_HOST:-}" ]; then
+  rk_ok()   { ssh -o ConnectTimeout=8 "root@$M65_HOST" true >/dev/null 2>&1; }
+  rk_push() { scp -q "$@" "root@$M65_HOST:/root/m65/"; }
+  rk_sh()   { ssh -o ConnectTimeout=8 "root@$M65_HOST" "$@"; }
+  RK_NAME="ssh root@$M65_HOST"
+else
+  rk_ok()   { adb get-state >/dev/null 2>&1; }
+  rk_push() { adb push "$@" /root/m65/; }
+  rk_sh()   { adb shell "$@"; }
+  RK_NAME="adb"
+fi
+rk_ok || fail "Rockchip not reachable over $RK_NAME"
 "$ROOT/scripts/program.sh" "$BIT" | grep -q "PROGRAMMED=" || fail "JTAG programming"
 
-adb push "$ROOT"/rockchip/{m65io.c,m65d.py,m65input.py,m65d_restart.sh,m65d_stop.sh,rk_pins.py} /root/m65/ >/dev/null
-adb shell sh /root/m65/m65d_restart.sh | grep -q "bridge found" || fail "rk_bridge not answering on spidev3.0"
+rk_push "$ROOT"/rockchip/{m65io.c,m65d.py,m65input.py,m65d_restart.sh,m65d_stop.sh} >/dev/null
+rk_sh sh /root/m65/m65d_restart.sh | grep -q "bridge found" || fail "rk_bridge not answering on spidev3.0"
 
 # MEGAFLASH: "slot messed up, press any key" + slot menu; RUN/STOP answers both and
 # then HYPPO boots from SD.  Keep tapping until SD reads start (harmless afterwards).

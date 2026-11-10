@@ -13,13 +13,14 @@ card; $D689 is restored.  The MEGA65 should be idle (BASIC READY).
                 are reported from m65io.stats
 """
 import hashlib
+import os
 import random
 import socket
 import subprocess
 import sys
 import time
 
-HOST = "192.168.1.143"
+HOST = os.environ.get("M65_HOST", "192.168.1.143")
 IMAGE = "/root/m65/card.img"
 
 

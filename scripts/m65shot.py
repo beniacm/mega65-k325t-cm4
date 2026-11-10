@@ -79,7 +79,7 @@ def nib(v):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-o", "--output")
-    ap.add_argument("--host", default="192.168.1.143")
+    ap.add_argument("--host", default=os.environ.get("M65_HOST", "192.168.1.143"))
     ap.add_argument("--text", action="store_true")
     a = ap.parse_args()
     m = Monitor(a.host)
