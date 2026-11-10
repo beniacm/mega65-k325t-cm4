@@ -54,6 +54,7 @@ entity tb_viciv_lead is
            BG : integer := 80; D051 : integer := 16#80#; FT : integer := 0; CU : integer := 0;
            RL : integer := 0; PRE : integer := 0;
            QP : integer := 0;                       -- XCTL2 bit 0: 4 px painting (step 7)
+           QSW : integer := 0;                      -- 1/2: XCTL2 bit 0 switched on/off mid-line (frame 2 y 200)
            OUTF : string := "/dev/null");
 end entity;
 
@@ -558,6 +559,12 @@ begin
       wait until frame = 1 and y = 300;
       if PRE = 4 then reg(16#64#, 0); reg(16#65#, 0); end if;
       reg(16#60#, SCR mod 256); reg(16#61#, (SCR / 256) mod 256); reg(16#62#, (SCR / 65536) mod 256);
+    end if;
+    if QSW = 1 or QSW = 2 then
+      -- XCTL2 bit 0 changes in the middle of a line (as a program poking it any time)
+      if QSW = 1 then qp_en <= '0'; else qp_en <= '1'; end if;
+      wait until frame = 2 and y = 200 and x = 400;
+      if QSW = 1 then qp_en <= '1'; else qp_en <= '0'; end if;
     end if;
     if PRE = 1 then
       -- history: v2 (bit 6) on these rows during frame 0 and part of frame 1, then bit 5 only
