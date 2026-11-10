@@ -10,6 +10,8 @@ WorkingDirectory=/root/m65
 ExecStartPre=-/bin/sh -c 'echo on > /sys/bus/platform/devices/fe640000.spi/power/control'
 ExecStartPre=/bin/sh -c '[ m65io -nt m65io.c ] || gcc -O2 -Wall -o m65io m65io.c'
 ExecStartPre=-/bin/mv -f /root/m65/m65io.log /root/m65/m65io.log.1
+# the stats file is rewritten twice a second: it lives in RAM, the old path is a link to it
+ExecStartPre=-/bin/ln -sfn /run/m65io.stats /root/m65/m65io.stats
 # extra arguments until the next reboot: m65d_restart.sh <args> (systemctl set-environment)
 ExecStart=/root/m65/m65io $M65IO_ARGS
 StandardOutput=append:/root/m65/m65io.log

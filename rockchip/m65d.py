@@ -329,6 +329,12 @@ class Daemon:
             # (2026-11-07 boot: set the MEGA65 to March) -- try again shortly
             self.rtc_due = time.time() + 20
             return
+        if not immediate and abs(time.time() - t) > 1.0:
+            # the due second was computed on a clock that has been stepped since (NTP's first
+            # sync after a cold boot: +40 s on the Radxa CM3, 2026-11-10 -- it wrote the stale
+            # second): write the current time now and an aligned copy 2 s later
+            t = time.time()
+            self.rtc_schedule(2.0)
         lt = time.localtime(t)
         bcd = lambda v: (v // 10) << 4 | v % 10
         regs = [bcd(lt.tm_sec), bcd(lt.tm_min), bcd(lt.tm_hour) | 0x80, bcd(lt.tm_mday),
@@ -632,6 +638,10 @@ class Daemon:
             if c is not None and c != self.core:
                 self.core = c
                 if c == 1:
+                    # picture = keyboard focus: the VIDEO register survives an m65d restart or a
+                    # Rockchip reboot (the FPGA is not reconfigured), m65d starts with the keyboard
+                    # on the MEGA65 -- a Linux picture left on would show Linux to a MEGA65 keyboard
+                    self.br.set_video((1 if self.inp.linux_focus else 0) | getattr(self, "vid_edge", 0))
                     self.rtc_write(immediate=True)    # MEGA65 (re)configured: its RTC is unset;
                     self.rtc_schedule(2.0)            # write now, aligned again in 2 s and 5 s
                     self.rtc_repeat = True            # later (BASIC's banner reads the RTC once,
@@ -696,7 +706,7 @@ def main():
     ap.add_argument("--hz", type=int, default=10000000)
     ap.add_argument("--ctl-port", type=int, default=4511)
     ap.add_argument("--mon-port", type=int, default=4510, help="m65io monitor pipe (for temps)")
-    ap.add_argument("--stats", default="/root/m65/m65io.stats")
+    ap.add_argument("--stats", default="/run/m65io.stats")   # m65io writes it twice a second: RAM
     ap.add_argument("--plug-host", default=os.environ.get("M65_PLUG_HOST", ""),
                     help="plugd (scripts/plugd.py) on the PC with the smart plug; '' = none")
     Daemon(ap.parse_args()).loop()

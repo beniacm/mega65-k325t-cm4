@@ -17,7 +17,9 @@
  *               the module itself cannot talk directly).  FCS: checked/stripped
  *               towards the LAN, computed/appended towards the MEGA65.
  *   * Stats:    rd/wr/... counters written to a small text file twice a second
- *               (read by m65d.py's "status" command).
+ *               (read by m65d.py's "status" command).  In /run (RAM): a file
+ *               rewritten twice a second must not wear the module's flash;
+ *               setup_rockchip.sh links /root/m65/m65io.stats to it.
  *
  * The control side (typing, keys, joysticks, reset) stays in m65d.py; both
  * processes share /dev/spidev3.0 -- every ioctl is one complete CS transaction
@@ -26,9 +28,11 @@
  * Build:  gcc -O2 -Wall -o m65io m65io.c
  * Run:    m65io [-d /dev/spidev3.0] [-s hz] [-i card.img] [-p 4510] [-S stats]
  *               [-e eth0|none] [-v]
+ * Without -e: eth0, or (Radxa CM3: predictable names, "end1") the first en* interface.
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/ethtool.h>
@@ -209,13 +213,51 @@ static uint32_t crc32_eth(const uint8_t *p, unsigned n)
 	return c ^ 0xFFFFFFFFu;
 }
 
+/* default wired interface: eth0 (Luckfox), else the first en* interface (Radxa CM3: end1) */
+static const char *eth_default(void)
+{
+	static char name[IFNAMSIZ];
+	if (if_nametoindex("eth0"))
+		return "eth0";
+	DIR *d = opendir("/sys/class/net");
+	struct dirent *e;
+	name[0] = 0;
+	while (d && (e = readdir(d)))
+		if (!strncmp(e->d_name, "en", 2) && strlen(e->d_name) < IFNAMSIZ &&
+		    (!name[0] || strcmp(e->d_name, name) < 0))
+			strcpy(name, e->d_name);
+	if (d)
+		closedir(d);
+	return name[0] ? name : "eth0";
+}
+
+/* GRO would hand us coalesced super-frames: switch it off (no ethtool binary on the Luckfox).
+ * The Radxa CM3's stmmac answers EBUSY while its link is still coming up at boot, so the main
+ * loop retries until it works. */
+static int gro_off_done;
+static void eth_gro_off(int s, const char *ifname)
+{
+	struct ifreq ifr;
+	struct ethtool_value ev = { .cmd = ETHTOOL_SGRO, .data = 0 };
+	memset(&ifr, 0, sizeof ifr);
+	memcpy(ifr.ifr_name, ifname, strnlen(ifname, IFNAMSIZ - 1));
+	ifr.ifr_data = (void *)&ev;
+	int ok = ioctl(s, SIOCETHTOOL, &ifr) == 0;
+	if (ok && gro_off_done < 0)
+		printf("m65io: %s GRO off\n", ifname);
+	else if (!ok && gro_off_done == 0)
+		printf("m65io: %s GRO off failed (%s), retrying\n", ifname, strerror(errno));
+	gro_off_done = ok ? 1 : -1;
+	fflush(stdout);
+}
+
 static int eth_open(const char *ifname, int *ifindex)
 {
 	int s = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
 	if (s < 0) { perror("AF_PACKET socket"); return -1; }
 	struct ifreq ifr;
 	memset(&ifr, 0, sizeof ifr);
-	strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+	memcpy(ifr.ifr_name, ifname, strnlen(ifname, IFNAMSIZ - 1));   /* ifr is zeroed */
 	if (ioctl(s, SIOCGIFINDEX, &ifr) < 0) { perror(ifname); close(s); return -1; }
 	*ifindex = ifr.ifr_ifindex;
 	struct sockaddr_ll sll = { .sll_family = AF_PACKET, .sll_protocol = htons(ETH_P_ALL),
@@ -223,12 +265,7 @@ static int eth_open(const char *ifname, int *ifindex)
 	if (bind(s, (struct sockaddr *)&sll, sizeof sll) < 0) { perror("bind"); close(s); return -1; }
 	struct packet_mreq mr = { .mr_ifindex = *ifindex, .mr_type = PACKET_MR_PROMISC };
 	setsockopt(s, SOL_PACKET, PACKET_ADD_MEMBERSHIP, &mr, sizeof mr);
-	/* GRO would hand us coalesced super-frames; best effort to switch it off
-	 * (no ethtool binary on the module). */
-	struct ethtool_value ev = { .cmd = ETHTOOL_SGRO, .data = 0 };
-	ifr.ifr_data = (void *)&ev;
-	if (ioctl(s, SIOCETHTOOL, &ifr) < 0)
-		perror("GRO off (ignored)");
+	eth_gro_off(s, ifname);
 	fcntl(s, F_SETFL, O_NONBLOCK);
 	return s;
 }
@@ -519,8 +556,8 @@ static void write_stats(const char *path, const struct bstat *b)
 int main(int argc, char **argv)
 {
 	const char *dev = "/dev/spidev3.0", *image = "/root/m65/card.img";
-	const char *stats = "/root/m65/m65io.stats";
-	const char *ethif = "eth0";
+	const char *stats = "/run/m65io.stats";   /* RAM: rewritten twice a second */
+	const char *ethif = NULL;
 	int port = 4510, opt;
 
 	while ((opt = getopt(argc, argv, "d:s:i:p:S:e:v")) != -1) {
@@ -538,6 +575,8 @@ int main(int argc, char **argv)
 		}
 	}
 	signal(SIGPIPE, SIG_IGN);
+	if (!ethif)
+		ethif = eth_default();
 
 	spi_fd = open(dev, O_RDWR);
 	if (spi_fd < 0) { perror(dev); return 1; }
@@ -613,6 +652,20 @@ int main(int argc, char **argv)
 			}
 			usleep(50000);
 			goto pace;
+		}
+		if (!was_ok && pf_on != (b.ver >= 4)) {
+			/* The bridge (re)appeared with another version than m65io decided on at its
+			 * start (e.g. m65io started under a design without the bridge, then a v4
+			 * bitstream was loaded): switch the read cache to match. */
+			pf_on = b.ver >= 4;
+			memset(pfs, 0, sizeof pfs);
+			pf_seen = 0xFFFFFFFFu;
+			if (pf_on) {
+				uint8_t tx[1] = { 0x15 }, rx[1];   /* SD_INVAL */
+				xfer(tx, rx, 1);
+			}
+			printf("m65io: bridge v%u, read cache %s\n", b.ver, pf_on ? "on" : "off");
+			fflush(stdout);
 		}
 		was_ok = 1;
 		if (spi_hz < spi_hz_want && now() >= next_up) {
@@ -705,6 +758,8 @@ pace:	;
 			img_dirty = 0;
 		}
 		if (t >= next_stats) {
+			if (pkt >= 0 && gro_off_done < 0)
+				eth_gro_off(pkt, ethif);
 			cache_stats();
 			write_stats(stats, &b);
 			next_stats = t + 0.5;
