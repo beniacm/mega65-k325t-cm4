@@ -5,6 +5,7 @@ core running on a **QMTech XC7K325T "CM4" carrier** with a **Luckfox Core3566** 
 module in its CM4 socket.  The Rockchip replaces the MEGA65's missing peripherals: it serves
 the SD card, the keyboard (USB), gamepads, the mouse, the serial monitor, Ethernet and the
 real-time clock over one SPI link, writes the FPGA's configuration flash and switches cores.
+A second carrier runs the same setup with a **Radxa CM3** module (see "Radxa CM3 variant").
 
 Not an official MEGA65 product and not affiliated with the MEGA e.V. or the C64MEGA65 authors.
 
@@ -36,9 +37,9 @@ git clone -b qmtech-k325t-cm4 https://github.com/beniacm/c64mega65-k325t-cm4.git
 ```
 (`mega65-core/` and `c64mega65/` are separate repos, git-ignored here.)
 
-**You need:** the QMTech XC7K325T CM4 carrier, a Luckfox Core3566, a Sipeed DVI Pmod on J11
-(HDMI out), a Xilinx JTAG cable for the first bitstream, Vivado (2025.2 used; the free edition
-covers the XC7K325T), and a Linux PC.  **Not included** (copyright): the MEGA65 ROM (build it
+**You need:** the QMTech XC7K325T CM4 carrier, a Luckfox Core3566 (or a Radxa CM3), a Sipeed
+DVI Pmod on J11 (HDMI out), a Xilinx JTAG cable for the first bitstream, Vivado (2025.2 used;
+the free edition covers the XC7K325T), and a Linux PC.  **Not included** (copyright): the MEGA65 ROM (build it
 with `scripts/make_rom.sh` from a C65 ROM you own, see "SD card and ROM"), C64/1541 ROMs beyond
 what the cores ship, and any games.  The MEGA65 core boots without a ROM (OpenROMs).
 
@@ -90,7 +91,7 @@ CPU reset ─────────────────────┘    
 | Connector | Use |
 |---|---|
 | **J11** (bank 15) | Sipeed DVI Pmod: TMDS 576p50 @ 27 MHz. Green + clock pairs inverted in RTL (board P/N swap) |
-| **CM4 BCM18/19/20/21** = B15/B9/A9/A8 | `rk_bridge` SPI slave: CS/MISO/MOSI/CLK; the Rockchip's `spi3-m1` is master |
+| **CM4 BCM18/19/20/21** = B15/B9/A9/A8 | `rk_bridge` SPI slave: CS/MISO/MOSI/CLK; the Rockchip's `spi3-m1` is master (Radxa CM3: BCM8-11, see "Radxa CM3 variant") |
 | J12 (bank 14) | optional physical SD Pmod (Digilent order), selected with `sd phys` |
 | J13 (bank 14) | optional Sipeed DS2x2 Pmod: pad 1 → port 2, pad 2 → port 1 (OR'd with the Rockchip joysticks) |
 | SW3 / SW2 | CPU reset / RESTORE |
@@ -259,6 +260,11 @@ behind pinctrl still shows "bt1120hd" in debugfs (read the GRF iomux registers).
 are kept off the console (`/etc/sysctl.d/90-m65-console.conf`, level 4).  `sim/tb_linux_fb.vhdl`
 tests placement, cropping, the RGB332 expansion and the switch (GHDL, `sim/unisim_iddr_sim.vhdl`
 models the IDDR).
+
+On the **Radxa CM3** the picture arrives as 8-bit BT.656 instead (`bt656_video.v`, a DT overlay on
+the module): see "Radxa CM3 variant" and `rockchip/cm3/README.md`.  m65d writes its view state into
+VIDEO whenever the MEGA65 core appears (the register survives an m65d restart or a Rockchip
+reboot: a Linux picture left on would otherwise face a keyboard given to the MEGA65).
 
 ## Cross-development on the Rockchip
 
@@ -461,7 +467,9 @@ NOW") and sends plugd UDP "halted" → plugd cuts the plug 2 s later.  Measured:
 (reading the VIC registers right after the red commands collided with their replies: empty
 green message), and the green one starts with two CRs (otherwise its first command, the
 border, merged with a half line left in the monitor).
-- `scripts/plugd.py` (port 4530, accepts only the Rockchip's address): cuts after "halted", or,
+- `scripts/plugd.py` (port 4530, accepts only the rig modules' addresses -- an allow-list, `ROCK_IP`
+  = "192.168.1.143 192.168.1.215" by default; "halted" and the liveness check come from the module
+  that asked): cuts after "halted", or,
   if that never comes, once the Rockchip's kernel has not answered a TCP connect at all for 15 s
   (a reset still counts as alive, so this means halted, not just "sshd stopped"); if the
   Rockchip still answers after 5 min it does NOT cut.  Install once on the PC (user service):
@@ -685,7 +693,8 @@ MEGA65 MAC ─RMII─ eth_vphy ═ rk_bridge ═ SPI ═ m65io ─AF_PACKET─ e
 
 `c64mega65/` = github.com/MJoergen/C64MEGA65 (tag V5.2-release), local branch
 **`qmtech-k325t-cm4`** (separate repo, not tracked here). Build: `c64mega65/K325T/build.sh`
-(~8 min) → `K325T/bin/c64_k325t_cm4.bit`. The QNICE firmware needs the assembler built once
+(~8 min) → `K325T/bin/c64_k325t_cm4.bit` (`build.sh radxacm3` for the Radxa CM3, see "Radxa CM3
+variant"). The QNICE firmware needs the assembler built once
 (`M2M/QNICE/assembler/qasm*`) and `dist_kit/sysdef.asm` (from `M2M/QNICE/monitor`).
 
 | piece | role |
@@ -787,6 +796,175 @@ check` compares a board with this list (read-only) and passed on the current boa
 6. **FPGA flash**: slot 0 / slot 1 with `m65flash.py write` ("Standalone" above). Back up the
    original flash contents first (`m65flash.py backup`).
 7. `rockchip/deploy/setup_rockchip.sh check` → `== root@192.168.1.143 matches the repo`.
+
+On both modules `install` keeps the journal in RAM (`journald.conf.d/m65-volatile.conf`) and
+`m65io` writes its twice-a-second stats to `/run/m65io.stats` (`/root/m65/m65io.stats` is a link
+to it): nothing writes to the module's flash continuously.  (Installed and checked on the Radxa
+CM3; the Luckfox has not been re-installed since.)
+
+On a **Radxa CM3** the same script sets the module up differently (overlays instead of
+`config.txt` and a boot image): see "Radxa CM3 variant" below.
+
+On both boards `install` writes `M65_PLUG_HOST=192.168.1.133:4530` (override with `M65_PLUG_HOST=`,
+empty = no plugd) into `/root/m65/m65d.env` (other lines there are kept) and `check` compares it.
+
+## Radxa CM3 variant (second carrier)
+
+A second QMTech XC7K325T CM4 carrier runs with a **Radxa CM3** (RK3566, board revision V1.3x) in
+the CM4 socket instead of the Luckfox Core3566.  Same deployment, daemons, card image, demos and
+tools; what differs is which RK3566 pads the module puts on the 28 CM4 lines, so the FPGA cores
+and the module's device-tree setup differ.  Everything in this section was set up and measured
+on 2026-11-10/11 (module at `192.168.1.215`; the PC scripts take `M65_HOST=192.168.1.215`).
+
+### The 28 CM4 lines on both modules
+
+| BCM | FPGA | Luckfox pad | Luckfox use | Radxa CM3 pad | Radxa CM3 use |
+|---:|---|---|---|---|---|
+| 0 | C12 | GPIO3_B6 | video data 12 | GPIO4_B4 | video clock |
+| 1 | B11 | GPIO3_B5 | video data 11 | GPIO4_B5 | free |
+| 2 | C18 | GPIO3_B4 | video data 10 | GPIO0_B6 | free |
+| 3 | D18 | GPIO3_B3 | video data 9 | GPIO0_B5 | free |
+| 4 | E18 | GPIO3_B7 | free | GPIO3_D5 | video data 7 |
+| 5 | C11 | GPIO3_C0 | free | GPIO4_B1 | free |
+| 6 | D10 | GPIO4_C4 | free | GPIO0_C5 | free |
+| 7 | B12 | GPIO3_A5 | video data 4 | GPIO4_C5 | free |
+| 8 | A12 | GPIO3_A4 | video data 3 | GPIO4_A6 | **SPI CS** |
+| 9 | D14 | GPIO3_C2 | video data 14 | GPIO4_B0 | **SPI MISO** |
+| 10 | C13 | GPIO3_C1 | video data 13 | GPIO4_B2 | **SPI MOSI** |
+| 11 | D13 | GPIO3_C3 | video data 15 | GPIO4_B3 | **SPI CLK** |
+| 12 | A10 | GPIO3_B2 | video data 8 | GPIO4_C0 | free |
+| 13 | E10 | GPIO3_B1 | video data 7 | GPIO0_C6 | free |
+| 14 | C17 | GPIO0_D1 | debug console TX | GPIO0_D1 | debug console TX |
+| 15 | A15 | GPIO0_D0 | debug console RX | GPIO0_D0 | debug console RX |
+| 16 | B10 | GPIO3_A6 | video clock | GPIO4_A7 | free |
+| 17 | D16 | GPIO3_B0 | video data 6 | GPIO0_C7 | free |
+| 18 | B15 | GPIO4_C6 | **SPI CS** | GPIO3_C7 | video data 1 |
+| 19 | B9 | GPIO4_C5 | **SPI MISO** | GPIO3_D0 | video data 2 |
+| 20 | A9 | GPIO4_C3 | **SPI MOSI** | GPIO3_D2 | video data 4 |
+| 21 | A8 | GPIO4_C2 | **SPI CLK** | GPIO3_D1 | video data 3 |
+| 22 | C14 | GPIO3_C5 | free | GPIO0_C3 | free |
+| 23 | A14 | GPIO3_A1 | video data 0 | GPIO3_D4 | video data 6 |
+| 24 | B14 | GPIO3_A2 | video data 1 | GPIO3_D3 | video data 5 |
+| 25 | A13 | GPIO3_A3 | video data 2 | GPIO3_C6 | video data 0 |
+| 26 | C9 | GPIO3_A7 | video data 5 | GPIO0_C2 | free |
+| 27 | D15 | GPIO3_C4 | free | GPIO0_B7 | free |
+
+- **SPI**: Luckfox `spi3` M1 on BCM18-21, Radxa `spi3` M0 on BCM8-11; both are `/dev/spidev3.0`.
+- **Video** (the Linux picture into `linux_fb`): Luckfox 16-bit BT1120 (17 lines), Radxa 8-bit
+  **BT.656** on BCM0 (clock) and BCM25/18/19/21/20/24/23/4 (D0..D7).  On the CM3 the Luckfox's
+  BT1120 pads drive the module's own Ethernet PHY; VOP_BT656_M1 is the only video output that
+  reaches the FPGA.
+- **BCM7** = GPIO4_C5, an ordinary 3.3 V pad, although Radxa's pinout sheet says SARADC_VIN3
+  (schematic V1.31A: CM4 pin 37 = net 4G_DISABLE = GPIO4_C5; VIN3 only reaches the module's third
+  connector).  BCM14/15 are the module's debug console on both modules: the FPGA never drives them.
+- All Radxa pads on the 28 lines are 3.3 V.  **Do not load one module's bitstream with the other
+  module fitted**: each drives its SPI MISO on a line that is a module output on the other.
+
+### Pin test (JTAG)
+
+The private lab repository has a pin test for any module in the socket: a small FPGA design
+(`gpio_jtag_test.v`) leaves all 28 pads as inputs with a weak pull-down and lets JTAG read them
+and set output enable + value per pad; `cm_pin_test.py --map radxa-cm3 --host root@HOST` drives
+every line 1,0,1,0 from the FPGA and reads all pads on the module (GPIO registers via `/dev/mem`),
+then drives it from the module (sysfs) and reads it over JTAG, reports any other line that moves
+(shorts), and never drives a pad the module's kernel owns.  Result (three runs, PASS): 26 lines
+both ways, no crosstalk; BCM14 module → FPGA (console bytes); BCM15 idle level only; BCM7 module
+→ FPGA only (the FPGA was not allowed to drive it while it was thought analogue).
+
+### Module OS and flashing
+
+Radxa's Debian 12 image **`radxa-cm3-rpi-cm4-io_bookworm_kde_r2`** (`…output_512.img.xz`,
+unpacked; check it against Radxa's `r2.sha512sum`), kernel 6.1.84-18-rk2410-nocsf, written to the
+eMMC from the PC with **rkdeveloptool**, the module in maskrom on the carrier's mini-USB port
+(USB 2207:350a):
+```
+rkdeveloptool db rk356x_spl_loader_ddr1056_v1.10.111.bin
+rkdeveloptool wl 0 radxa-cm3-rpi-cm4-io_bookworm_kde_r2.output_512.img
+rkdeveloptool rd
+```
+Downloads, schematic (`RADXA_CM3_V1.31A_SCH_20221010.pdf`) and pinout sheet are kept in
+`ext/radxa-cm3/` (git-ignored).  Default users `radxa`/`radxa` and `rock`/`rock` (change them);
+install the PC's key for `root`.  The default target stays multi-user (no desktop); wired
+interface `end1` (DHCP); Wi-Fi and Bluetooth are switched off (rfkill, `nmcli radio wifi off`,
+bluetooth + wpa_supplicant disabled).
+
+### Install
+
+`rockchip/deploy/setup_rockchip.sh install root@HOST`, then reboot, then `check root@HOST`.  The
+script detects the module from `/proc/device-tree/model`.  On the CM3 there is no
+`/boot/config.txt` and no boot partition image; instead `install`:
+- enables Radxa's overlay `rk3568-spi3-m0-cs0-spidev` (renames the `.dtbo.disabled`,
+  `u-boot-update`) → `/dev/spidev3.0`;
+- compiles the BT.656 picture overlay `rockchip/cm3/bt656-576p50.dts` with `dtc` on the PC and
+  installs it to `/boot/dtbo` (`M65_BT656=bt656-576i50` for the interlaced fallback); it turns the
+  module's own HDMI off (see `rockchip/cm3/README.md`);
+- `apt`-installs `python3-spidev`/`python3-dev` and `kbd` (m65d's `loadkeys`) if missing;
+- disables the image's desktop-era units that a headless bridge box does not need (cups,
+  samba-ad-dc, avahi, rknpu2, rkaiq_3A, udisks2, upower, accounts, rtkit, the Chromium helper,
+  fwupd/apt-daily/man-db timers -- the daily jobs rewrote tens of MB on the eMMC -- and
+  radxa-adbd, which restart-looped every 5 s); the mDNS name is gone with avahi: use the address.
+
+`check` also verifies that spi3 owns its four pads and the BT.656 encoder the nine video pads,
+that DPI-1 is live (VP2 720x576 BT.656, `dclk_vop2` 54 MHz), and warns about re-enabled units.
+By hand: `apt install evtest ethtool mtools xxd wget make libdrm-tests`, then
+`deploy/build_tools.sh` for cc65.  The card image is built as in "SD card and ROM".  On a fresh
+card HYPPO on this core skips ONBOARD ("K325T: NO CONFIG, USING DEFAULTS"); the config sector
+(PAL 50 Hz, enhanced, CRT emulation) was written to match the first board's card.
+
+### FPGA cores
+
+- MEGA65: `mega65-core` branch **`radxacm3`**, `make bin/qmtech-k325t-cm4-radxacm3.bit` (the
+  Makefile generates the project from the default one, replacing the CM bus section of the pin
+  file with `src/vhdl/qmtech-k325t-cm4-radxacm3-bus.xdc` and setting the top generic `bt656`;
+  receiver `src/verilog/bt656_video.v`).  Timing met, WNS 0.417 ns, 7,640,174 bytes.  The
+  receiver's test bench: `sim/bt656/tb_bt656_video.v` (Icarus Verilog, run line in its header;
+  progressive/interlaced, chroma-/luma-first) → `TB_BT656_PASS`.
+- C64: `c64mega65/K325T/build.sh radxacm3` → `K325T/bin/c64_k325t_cm4_radxacm3.bit` (bridge on
+  A12/D14/C13/D13).  WNS +0.258 ns, 6,214,257 bytes.
+- Flash as on the first board: MEGA65 in slot 0, C64 in slot 1 (`m65flash.py write 0|1`); the
+  board's original flash was backed up first (`flashbackup/`, git-ignored).
+
+### Measured on the CM3 board
+
+- Pin test: 26 lines both ways (above).
+- SPI link (`linktest.py`, 3000 pairs): 0 errors at 25, 33.4, 40 and 50 MHz requested.  The real
+  clock differs on this module: `clk_spi3` is 198 MHz with an even divider, so the steps are
+  24.75 / 33 / 49.5 MHz and the **"40 MHz" that m65io uses is really 33 MHz** (50 is capped by the
+  overlay's spi-max-frequency).  `sdlinktest.py`: 0 mismatches, 298/300 read-cache hits.  C64
+  core: 0 errors at 25/33.4/40 MHz requested.
+- Regression, figures equal to the first board: `smoke_test.sh` SMOKE PASS, B65 SELFTEST 14/14,
+  `board.py smoke` 34/34, `board_v3` 20/20, swarm2/bounce6/parallax6/jumper move; **GHZ** acts
+  1500/3, 1556/0, 1401/14 frames/late, 0 one-frame glitches in 105 s.
+- Cold start from the plug: HYPPO on HDMI after 1.5-2.5 s, MEGA65 menu at **~26 s** (first board:
+  ~30 s); services, RTC (after NTP) and the Linux picture come up by themselves.
+- Linux picture: BT.656 **576p50** locked (576 lines, 720 px, 50 fps, 54.1 MHz); a test pattern
+  arrives **pixel-exact** (150 identical frames); falling capture edge (default) has the margin;
+  Ctrl+Alt+Insert switches picture and keyboard.
+- C64 core from slot 1: C64 BASIC, `/c64` served, D64 `LOAD`/`RUN`; Ctrl+Alt+F1/F2/F12 switch
+  cores.
+- Safe power-off: Ctrl+Alt+End (injected) → red → green "ROCKCHIP HALTED" → plugd cut the plug
+  (`ROCK_IP` allow-list includes the CM3) → plug on → MEGA65 menu.
+- USB (PC mini-USB cable unplugged): carrier hub with keyboard, mouse and pad enumerated and
+  grabbed by m65d; `input_selftest.py` all PASS; injected keys/joystick reach the MEGA65.
+  Ethernet `end1` 1 Gb/s, internet and NTP ok.
+- Temperatures: FPGA 54-58 C (about 15 C warmer than on the first board; thermal pad); module SoC
+  57 C idle, **~81 C under a 4-core load, where it throttles** (1416 of 1800 MHz).
+
+### Not verified or different
+
+- **adb does not work** with this module on this carrier: the module's OTG VBUS sense is on its
+  third connector, which this carrier apparently does not feed.  Use ssh.  (The four USB-A ports still need
+  the PC's mini-USB cable unplugged, as with the Luckfox.)
+- Only **one HDMI**: the module's own HDMI is off while the BT.656 overlay is installed.
+- The cold-boot banner shows **NO-RTC-2000**: the CM3 has no battery clock, NTP syncs ~40 s after
+  boot, but `m65-bootreset` resets the core at ~12 s.  The RTC is right from the first NTP sync on.
+- **Real key presses not yet observed** (only injected input and the device grab); the 576i
+  overlay is untested; the C64 REU, cartridges and mouse are untested on this board; llvm-mos is
+  not installed; FPGA → module on BCM7 and BCM15 not proven.
+- The shared daemon and script changes made for this board (`m65io.c`, `m65d.py`, `m65io.service`,
+  `plugd.py`, `setup_rockchip.sh`) were verified on the Radxa board only; **the Luckfox board has
+  not been re-run with them**.  Neither has the default (Luckfox) MEGA65 or C64 bitstream been
+  rebuilt with the shared HDL/pin-file changes.
 
 ## Build status / hardware results
 
