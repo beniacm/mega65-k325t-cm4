@@ -151,7 +151,10 @@ static int link_select(uint32_t max_hz)      /* fastest clean rate <= max_hz */
 		if (hz > max_hz || (i && hz >= spi_hz_want))
 			continue;
 		spi_hz = hz;
-		if (link_ok(200)) {
+		/* One failed read must not demote a good rate for the whole session (2026-11-10: a
+		 * bitstream with 0 errors in 9000 raw pairs at 40 MHz started at 25 MHz because the
+		 * probe ran during the core's start-up).  A marginal link fails the second pass too. */
+		if (link_ok(200) || (usleep(50000), link_ok(200))) {
 			if (hz != old || hz != spi_hz_want)
 				printf("m65io: SPI link at %u Hz%s\n", hz,
 				       hz != spi_hz_want ? " (requested rate unreliable with this bitstream)" : "");
