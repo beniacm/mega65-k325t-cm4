@@ -1,0 +1,179 @@
+// bt656-576i50.dts -- FALLBACK of bt656-576p50.dts (use one of the two, never both): interlaced PAL.
+// Radxa CM3 (RK3566) on the QMTech K325T CM4 carrier: the Linux picture
+// (DRM connector DPI-1, fbcon, /dev/fb0) as 8-bit BT.656 on the VOP_BT656_M1 pads, which are
+// wired to the FPGA:
+//   clock GPIO4_B4 (BCM0, FPGA C12); D0..D7 = GPIO3_C6 C7 D0 D1 D2 D3 D4 D5
+//   (BCM25 A13, BCM18 B15, BCM19 B9, BCM21 A8, BCM20 A9, BCM24 B14, BCM23 A14, BCM4 E18).
+// Mode: 720x576 interlaced, 50 fields/s (ITU-R BT.656 625-line: 13.5 MHz pixel clock, 864 x 625);
+// the VOP doubles the clock for BT.656, so the pad clock is 27 MHz, one byte per clock.
+//
+// Kernel: Radxa 6.1.84-18-rk2410-nocsf (github.com/radxa/kernel, linux-6.1-stan-rkr4.1).
+// Base DT: rk3566-radxa-cm3-rpi-cm4-io.dtb.  How it works and how to install: README.md here.
+//
+// Build:   dtc -@ -I dts -O dtb -o bt656-576i50.dtbo bt656-576i50.dts
+// Install: rm -f /boot/dtbo/bt656-576p50.dtbo; cp bt656-576i50.dtbo /boot/dtbo/ && u-boot-update && reboot
+//
+// The overlay
+//  1. adds a pin group = the vendor's bt656m1-pins (mux 5) with drive level 3 instead of the
+//     reset default (the Luckfox's BT1120 link was dead above ~25 MHz without the drive bump);
+//  2. adds a "simple-panel" with bus-format MEDIA_BUS_FMT_UYVY8_2X8 (0x2006): rockchip_rgb.c maps
+//     the four *_2X8 YUV formats to VOP_OUTPUT_IF_BT656; UYVY = no yc swap = Cb Y Cr Y order;
+//  3. enables the rk3568-rgb encoder (under the SYS_GRF syscon) with that pin group, port@1 ->
+//     panel, and its only VOP input rgb_in_vp2 (the DT wires RGB/BT656/BT1120 to VP2 only);
+//  4. disables the module's HDMI (hdmi, hdmi_in_vp0, hdmi sound, logo route) -- the same thing
+//     Radxa's own display overlays do -- so that VP2 gets all real (non-mirror) RK3566 windows:
+//     vp0 plane-mask 0, vp2 plane-mask 0x3f with Smart0 as primary (= the driver's own
+//     one-display default; Cluster1/Esmart1/Smart1 are RK3566 "mirror" windows that are skipped).
+/dts-v1/;
+/plugin/;
+
+/ {
+	metadata {
+		title = "MEGA65 K325T: Linux picture as BT.656 720x576i50 (VOP_BT656_M1)";
+		compatible = "radxa,cm3-rpi-cm4-io";
+		category = "display";
+		description = "DPI-1 as 8-bit BT.656 on GPIO4_B4 (clock) + GPIO3_C6..D5, 720x576i50, 27 MHz byte clock. Disables the module's HDMI.";
+	};
+
+	// 1. pins: GPIO4_B4 = bank 4 pin 12, GPIO3_C6..D5 = bank 3 pins 22..29, function 5
+	fragment@0 {
+		target = <&pinctrl>;
+		__overlay__ {
+			m65-bt656 {
+				m65_bt656m1_pins: m65-bt656m1-pins {
+					rockchip,pins =
+						<4 12 5 &pcfg_pull_none_drv_level_3>,	// GPIO4_B4 bt656_clk_m1
+						<3 22 5 &pcfg_pull_none_drv_level_3>,	// GPIO3_C6 bt656_d0_m1
+						<3 23 5 &pcfg_pull_none_drv_level_3>,	// GPIO3_C7 bt656_d1_m1
+						<3 24 5 &pcfg_pull_none_drv_level_3>,	// GPIO3_D0 bt656_d2_m1
+						<3 25 5 &pcfg_pull_none_drv_level_3>,	// GPIO3_D1 bt656_d3_m1
+						<3 26 5 &pcfg_pull_none_drv_level_3>,	// GPIO3_D2 bt656_d4_m1
+						<3 27 5 &pcfg_pull_none_drv_level_3>,	// GPIO3_D3 bt656_d5_m1
+						<3 28 5 &pcfg_pull_none_drv_level_3>,	// GPIO3_D4 bt656_d6_m1
+						<3 29 5 &pcfg_pull_none_drv_level_3>;	// GPIO3_D5 bt656_d7_m1
+				};
+			};
+		};
+	};
+
+	// 2. the "panel": bus format + the one mode it offers
+	fragment@1 {
+		target-path = "/";
+		__overlay__ {
+			bt656-panel {
+				compatible = "simple-panel";
+				bus-format = <0x2006>;		// MEDIA_BUS_FMT_UYVY8_2X8 (BT.656, Cb Y Cr Y)
+				connector-type = <17>;		// DRM_MODE_CONNECTOR_DPI
+				status = "okay";
+
+				port {
+					m65_panel_in_rgb: endpoint {
+						remote-endpoint = <&m65_rgb_out_panel>;
+					};
+				};
+
+				display-timings {
+					native-mode = <&m65_timing_576i50>;
+
+					// CEA-861 VIC 21 (1440x576i, pixel-doubled) at its native 720 pixels:
+					// 864 x 625 total per frame; DRM halves the vertical values per field
+					m65_timing_576i50: timing0 {
+						clock-frequency = <13500000>;	// pixel clock; pads run at 2x = 27 MHz
+						hactive = <720>;
+						vactive = <576>;
+						hfront-porch = <12>;
+						hsync-len = <63>;
+						hback-porch = <69>;
+						vfront-porch = <4>;
+						vsync-len = <6>;
+						vback-porch = <39>;
+						interlaced;
+						hsync-active = <0>;
+						vsync-active = <0>;
+						de-active = <1>;
+						// 0 = DRM_BUS_FLAG_PIXDATA_DRIVE_NEGEDGE; the VOP2 BT.656 path then
+						// writes grf_bt656_clk_inv = 0 and bt656_dclk_pol = 0 (vop2 enable code
+						// inverts the flag for BT.656/BT.1120).  Flip to 1 to invert the clock.
+						pixelclk-active = <0>;
+					};
+				};
+			};
+		};
+	};
+
+	// 3. the rgb encoder (rockchip_rgb.c, "rockchip,rk3568-rgb")
+	fragment@2 {
+		target = <&rgb>;
+		__overlay__ {
+			status = "okay";
+			pinctrl-names = "default";
+			pinctrl-0 = <&m65_bt656m1_pins>;
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@1 {
+					reg = <1>;
+
+					m65_rgb_out_panel: endpoint {
+						remote-endpoint = <&m65_panel_in_rgb>;
+					};
+				};
+			};
+		};
+	};
+
+	fragment@3 {
+		target = <&rgb_in_vp2>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	// 4. module HDMI off; VOP2 windows all to VP2
+	fragment@5 {
+		target = <&hdmi>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@6 {
+		target = <&hdmi_in_vp0>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@7 {
+		target = <&hdmi_sound>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@8 {
+		target = <&route_hdmi>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@9 {
+		target = <&vp0>;
+		__overlay__ {
+			rockchip,plane-mask = <0>;
+		};
+	};
+
+	fragment@10 {
+		target = <&vp2>;
+		__overlay__ {
+			// Cluster0|Cluster1|Esmart0|Esmart1|Smart0|Smart1: vop2_plane_mask_check() wants
+			// every window assigned exactly once, else it falls back to the default policy
+			rockchip,plane-mask = <0x3f>;
+			rockchip,primary-plane = <4>;	// ROCKCHIP_VOP2_SMART0
+		};
+	};
+};
