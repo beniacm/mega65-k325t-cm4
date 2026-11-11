@@ -28,6 +28,8 @@
 # from /var/lib/m65-nm (m65-nm-ram.service + m65-nm-ram.sh; secret_key, NetworkManager.state and the
 # lease stay persistent there, changed files are copied back only at shutdown).  The Luckfox's network
 # stack is left as it is.
+# Radxa CM3: /tmp in RAM (tmp-m65.mount -> /etc/systemd/system/tmp.mount, 256 MB); the Luckfox keeps
+# its /tmp.
 # card.img is not created either (README "SD card image").  install does not restart anything;
 # reboot afterwards.
 set -u
@@ -83,6 +85,8 @@ PLUG_HOST=${M65_PLUG_HOST-192.168.1.133:4530}
 # Radxa CM3: NetworkManager state in RAM (unit, script -> installed path)
 RADXA_NMRAM_UNIT=m65-nm-ram.service
 RADXA_NMRAM_SH=/usr/local/sbin/m65-nm-ram
+# Radxa CM3: /tmp in RAM
+RADXA_TMP_UNIT=tmp-m65.mount
 # Radxa CM3: units of the (KDE) image that a headless bridge box does not need -- install disables
 # them, check warns.  Daily apt/man-db jobs rewrite tens of MB on the eMMC (apt by hand still works);
 # radxa-adbd restart-loops every 5 s while the OTG port is in host mode (adb never worked on this
@@ -114,7 +118,7 @@ board() {
 check() {
   local bad=0 out f B; B=$(board); echo "board $B"
   out=$(rsh "cd $DEST 2>/dev/null; md5sum $(echo $FILES) 2>/dev/null; echo CFG \$(cat /boot/config.txt 2>/dev/null | md5sum | cut -d' ' -f1);
-    for u in $UNITS; do echo UNIT \$u \$(md5sum < /etc/systemd/system/\$u 2>/dev/null | cut -d' ' -f1) \$(stat -c %a /etc/systemd/system/\$u 2>/dev/null) \$(systemctl is-enabled \$u 2>/dev/null) \$(systemctl is-active \$u 2>/dev/null); done;
+    for u in $UNITS; do echo UNIT \$u \$(md5sum 2>/dev/null < /etc/systemd/system/\$u | cut -d' ' -f1) \$(stat -c %a /etc/systemd/system/\$u 2>/dev/null) \$(systemctl is-enabled \$u 2>/dev/null) \$(systemctl is-active \$u 2>/dev/null); done;
     echo GOV \$(cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor);
     if [ -e /dev/block/by-name/boot ]; then echo BOOT \$(head -c $BOOT_LEN /dev/block/by-name/boot | sha256sum | cut -d' ' -f1);
     echo FACT \$(sha256sum < /dev/block/by-name/boot | cut -d' ' -f1); fi;
@@ -133,12 +137,13 @@ check() {
     echo DEFTGT \$(systemctl get-default);
     echo SPIDEV \$(ls /dev/spidev3.0 2>/dev/null) \$(python3 -c 'import spidev; print(\"py-ok\")' 2>/dev/null);
     echo GCC \$(command -v gcc);
-    for f in $(for e in $IDE; do printf '%s ' ${e#*:}; done); do echo IDE \$(md5sum < \$f 2>/dev/null | cut -d' ' -f1) \$f; done;
+    for f in $(for e in $IDE; do printf '%s ' ${e#*:}; done); do echo IDE \$(md5sum 2>/dev/null < \$f | cut -d' ' -f1) \$f; done;
     echo CA65 \$(ca65 --version 2>&1 | head -1);
     echo LLVMMOS \$(/opt/llvm-mos/bin/clang --version 2>/dev/null | head -1);
     echo TZ \$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone);
     echo CAD \$(systemctl is-enabled ctrl-alt-del.target 2>/dev/null);
-    echo NMRAM \$(md5sum < /etc/systemd/system/$RADXA_NMRAM_UNIT 2>/dev/null | cut -d' ' -f1) \$(md5sum < $RADXA_NMRAM_SH 2>/dev/null | cut -d' ' -f1) \$(systemctl is-enabled $RADXA_NMRAM_UNIT 2>/dev/null) \$(systemctl is-active $RADXA_NMRAM_UNIT 2>/dev/null) \$(findmnt -n -o FSTYPE /var/lib/NetworkManager) \$(cmp -s /var/lib/NetworkManager/secret_key /var/lib/m65-nm/secret_key && echo key-same);
+    echo NMRAM \$(md5sum 2>/dev/null < /etc/systemd/system/$RADXA_NMRAM_UNIT | cut -d' ' -f1) \$(md5sum 2>/dev/null < $RADXA_NMRAM_SH | cut -d' ' -f1) \$(systemctl is-enabled $RADXA_NMRAM_UNIT 2>/dev/null) \$(systemctl is-active $RADXA_NMRAM_UNIT 2>/dev/null) \$(findmnt -n -o FSTYPE /var/lib/NetworkManager) \$(cmp -s /var/lib/NetworkManager/secret_key /var/lib/m65-nm/secret_key && echo key-same);
+    echo TMPFS \$(md5sum 2>/dev/null < /etc/systemd/system/tmp.mount | cut -d' ' -f1) \$(systemctl is-enabled tmp.mount 2>/dev/null) \$(findmnt -n -o FSTYPE /tmp);
     echo CARD \$(stat -c %s $DEST/card.img 2>/dev/null)") || { echo "cannot reach $HOST"; exit 2; }
   for f in $FILES; do
     if echo "$out" | grep -q "^$(md5l "$HERE/$f")  $f\$"; then echo "ok    $DEST/$f"; else echo "DIFF  $DEST/$f"; bad=1; fi
@@ -203,6 +208,10 @@ check() {
        && [ "${3:-}" = enabled ] && [ "${4:-}" = active ] && [ "${5:-}" = tmpfs ] && [ "${6:-}" = key-same ]; then
       echo "ok    /var/lib/NetworkManager in RAM ($RADXA_NMRAM_UNIT), secret_key = /var/lib/m65-nm/secret_key"
     else echo "DIFF  NetworkManager state in RAM: unit/script/enabled/active/fstype/key '$*' (install, then reboot)"; bad=1; fi
+    set -- $(echo "$out" | awk '$1=="TMPFS" {print $2, $3, $4}')
+    if [ "${1:-}" = "$(md5l "$HERE/$RADXA_TMP_UNIT")" ] && [ "${2:-}" = enabled ] && [ "${3:-}" = tmpfs ]; then
+      echo "ok    /tmp in RAM (tmp.mount = $RADXA_TMP_UNIT)"
+    else echo "DIFF  /tmp in RAM: unit/enabled/fstype '$*' (install, then reboot)"; bad=1; fi
   fi
   echo "$out" | grep -q "^SPIDEV /dev/spidev3.0 py-ok" && echo "ok    /dev/spidev3.0 + python3 spidev" \
     || { echo "DIFF  spidev missing (SPI3 enabled? python3-spidev? reboot after install)"; bad=1; }
@@ -261,7 +270,8 @@ install() {
          install -m 755 m65-nm-ram.sh $RADXA_NMRAM_SH && install -m 644 $RADXA_NMRAM_UNIT /etc/systemd/system/$RADXA_NMRAM_UNIT &&
          { mountpoint -q /var/lib/NetworkManager || [ -d /var/lib/m65-nm ] ||
            { mkdir -m 700 /var/lib/m65-nm && cp -a /var/lib/NetworkManager/. /var/lib/m65-nm/ && echo 'NetworkManager state seeded to /var/lib/m65-nm (tmpfs after the reboot)'; }; } &&
-         systemctl daemon-reload && systemctl enable -q $RADXA_NMRAM_UNIT &&
+         install -m 644 $RADXA_TMP_UNIT /etc/systemd/system/tmp.mount &&
+         systemctl daemon-reload && systemctl enable -q $RADXA_NMRAM_UNIT tmp.mount &&
          u-boot-update >/dev/null 2>&1 &&
          grep -q '/$RADXA_SPI_OVL.dtbo' /boot/extlinux/extlinux.conf && grep -q '/$RADXA_VIDEO_OVL.dtbo' /boot/extlinux/extlinux.conf &&
          { systemctl disable --now $(echo $RADXA_OFF) >/dev/null 2>&1; true; }"
@@ -269,12 +279,12 @@ install() {
   # m65d.env: only the M65_PLUG_HOST line is ours
   local penv="{ grep -v '^M65_PLUG_HOST=' m65d.env 2>/dev/null; [ -z '$PLUG_HOST' ] || echo 'M65_PLUG_HOST=$PLUG_HOST'; } > m65d.env.new && mv m65d.env.new m65d.env && { [ -s m65d.env ] || rm m65d.env; }"
   echo "copying to $HOST:$DEST"
-  tar -C "$HERE" -cf - $FILES $UNITS deploy/config.txt ide m65-safe.shutdown journald-m65.conf tmpfiles-m65.conf timesyncd-m65.conf m65-nm-ram.sh $RADXA_NMRAM_UNIT $vtar | \
+  tar -C "$HERE" -cf - $FILES $UNITS deploy/config.txt ide m65-safe.shutdown journald-m65.conf tmpfiles-m65.conf timesyncd-m65.conf m65-nm-ram.sh $RADXA_NMRAM_UNIT $RADXA_TMP_UNIT $vtar | \
     rsh "mkdir -p $DEST && tar -C $DEST -xf - && cd $DEST && chmod 644 $(echo $FILES) && rm -f /usr/local/bin/m65run && install -m 755 m65run /usr/local/bin/m65run && rm -f m65io &&
          for u in $UNITS; do install -m 644 \$u /etc/systemd/system/\$u && rm \$u || exit 1; done &&
          $spi && $penv &&
          rm -r deploy && gcc -O2 -Wall -o m65io m65io.c &&
-         for e in $(echo $IDE); do install -D -m \$(case \${e#*:} in /usr/local/bin/*|*.shutdown) echo 755;; *) echo 644;; esac) \${e%%:*} \${e#*:} || exit 1; done && rm -r ide m65-safe.shutdown journald-m65.conf tmpfiles-m65.conf timesyncd-m65.conf m65-nm-ram.sh $RADXA_NMRAM_UNIT &&
+         for e in $(echo $IDE); do install -D -m \$(case \${e#*:} in /usr/local/bin/*|*.shutdown) echo 755;; *) echo 644;; esac) \${e%%:*} \${e#*:} || exit 1; done && rm -r ide m65-safe.shutdown journald-m65.conf tmpfiles-m65.conf timesyncd-m65.conf m65-nm-ram.sh $RADXA_NMRAM_UNIT $RADXA_TMP_UNIT &&
          { systemctl try-restart systemd-timesyncd 2>/dev/null; true; } &&
          systemctl restart systemd-journald && rm -rf /var/log/journal/* &&
          systemd-tmpfiles --create /etc/tmpfiles.d/m65-run.conf &&

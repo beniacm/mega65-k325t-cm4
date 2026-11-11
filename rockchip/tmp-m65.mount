@@ -1,0 +1,21 @@
+# /etc/systemd/system/tmp.mount (rockchip/deploy/setup_rockchip.sh, Radxa CM3): /tmp in RAM.
+# Debian 12's /tmp lives on the root file system (the eMMC); everything that writes there (e.g. the
+# PrivateTmp directories of systemd services) was an eMMC write.  As /usr/share/systemd/tmp.mount,
+# with a fixed size limit instead of 50 % of the RAM.
+[Unit]
+Description=Temporary Directory /tmp (RAM, m65)
+Documentation=man:file-hierarchy(7)
+ConditionPathIsSymbolicLink=!/tmp
+DefaultDependencies=no
+Conflicts=umount.target
+Before=local-fs.target umount.target
+After=swap.target
+
+[Mount]
+What=tmpfs
+Where=/tmp
+Type=tmpfs
+Options=mode=1777,strictatime,nosuid,nodev,size=256M,nr_inodes=64k
+
+[Install]
+WantedBy=local-fs.target

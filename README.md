@@ -959,6 +959,17 @@ script detects the module from `/proc/device-tree/model`.  On the CM3 there is n
   Still written, not periodic: `/etc/resolv.conf` when the link goes down/up (DNS changes), and
   systemd-timesyncd's clock-file stamp at each NTP synchronisation (left: it keeps the clock from
   going backwards at boot on a board without RTC; systemd 252 cannot restrict it to shutdown).
+- puts `/tmp` in RAM: `rockchip/tmp-m65.mount` -> `/etc/systemd/system/tmp.mount` (tmpfs, 256 MB,
+  64 k inodes; Debian 12's own unit would allow half the RAM).  On the image `/tmp` was a directory
+  of the root file system, so every service with `PrivateTmp=` (logind, timesyncd, haveged,
+  timedated ...) created and removed directories on the eMMC when it started and stopped.
+  `/var/tmp` stays persistent (by definition).  m65d no longer runs `timedatectl` to learn whether
+  the clock is synchronised (it reads `/run/systemd/timesync/synchronized`): each call started
+  systemd-timedated, whose PrivateTmp directories in `/var/tmp` were created on the eMMC and
+  removed again 30 s later.  Measured with ftrace after the change: an m65d stop + start dirties
+  no inode and commits no journal transaction (`aexp4_iotrace.sh`-style trace of
+  `ext4_mark_inode_dirty` / `block_rq_issue`; the only write in the window, 8 sectors, was the
+  checkpoint of an older transaction).  The Luckfox (Debian 10) is not changed by this.
 
 `check` also verifies that spi3 owns its four pads and the BT.656 encoder the nine video pads,
 that DPI-1 is live (VP2 720x576 BT.656, `dclk_vop2` 54 MHz), and warns about re-enabled units.

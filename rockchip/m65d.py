@@ -55,7 +55,12 @@ import m65input
 
 
 def ntp_synced():
-    """True once systemd-timesyncd (or another NTP client) has set the clock"""
+    """True once systemd-timesyncd (or another NTP client) has set the clock.  systemd-timesyncd
+    (>= 239) keeps /run/systemd/timesync/synchronized while it is synchronised: read that, so that
+    no systemd-timedated is started (timedatectl did: its PrivateTmp directories in /var/tmp are
+    written to the module's flash each time)."""
+    if os.path.isdir("/run/systemd/timesync"):
+        return os.path.exists("/run/systemd/timesync/synchronized")
     try:
         r = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
                            capture_output=True, text=True, timeout=5)
