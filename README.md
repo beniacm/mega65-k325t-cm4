@@ -947,6 +947,18 @@ script detects the module from `/proc/device-tree/model`.  On the CM3 there is n
   samba-ad-dc, avahi, rknpu2, rkaiq_3A, udisks2, upower, accounts, rtkit, the Chromium helper,
   fwupd/apt-daily/man-db timers -- the daily jobs rewrote tens of MB on the eMMC -- and
   radxa-adbd, which restart-looped every 5 s); the mDNS name is gone with avahi: use the address.
+- puts NetworkManager's state directory in RAM: NetworkManager rewrote its DHCP lease file
+  `/var/lib/NetworkManager/internal-*.lease` at every renewal (every 15 min with this router, ~250
+  eMMC sectors each, a new file + rename).  `m65-nm-ram.service` (before NetworkManager) mounts a
+  tmpfs over the directory and seeds it from the persistent copy `/var/lib/m65-nm` (made by
+  `install` from the live directory): `secret_key`, `NetworkManager.state` (Wi-Fi off) and the
+  last lease survive reboots, so the module asks for the same address (INIT-REBOOT, DHCP client-id
+  `01:<MAC>` before and after, checked with tcpdump) and keeps 192.168.1.215.  At shutdown files
+  whose content changed are copied back (normally none).  Measured: renewals now write nothing
+  (ftrace: no NetworkManager inode on the eMMC; `/proc/diskstats` unchanged across the renewal).
+  Still written, not periodic: `/etc/resolv.conf` when the link goes down/up (DNS changes), and
+  systemd-timesyncd's clock-file stamp at each NTP synchronisation (left: it keeps the clock from
+  going backwards at boot on a board without RTC; systemd 252 cannot restrict it to shutdown).
 
 `check` also verifies that spi3 owns its four pads and the BT.656 encoder the nine video pads,
 that DPI-1 is live (VP2 720x576 BT.656, `dclk_vop2` 54 MHz), and warns about re-enabled units.

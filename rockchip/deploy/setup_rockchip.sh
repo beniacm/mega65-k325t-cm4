@@ -24,6 +24,10 @@
 # m65d.log are links to them.  install removes old log files from $DEST and the persistent journal
 # files of the image's first boots (/var/log/journal; journald is volatile, journald-m65.conf);
 # timesyncd-m65.conf stops timesyncd's 60 s clock-file stamp.
+# Radxa CM3: NetworkManager's state directory (DHCP lease rewritten at every renewal) is a tmpfs seeded
+# from /var/lib/m65-nm (m65-nm-ram.service + m65-nm-ram.sh; secret_key, NetworkManager.state and the
+# lease stay persistent there, changed files are copied back only at shutdown).  The Luckfox's network
+# stack is left as it is.
 # card.img is not created either (README "SD card image").  install does not restart anything;
 # reboot afterwards.
 set -u
@@ -76,6 +80,9 @@ RADXA_VIDEO_OVL=${M65_BT656:-bt656-576p50}
 case "$RADXA_VIDEO_OVL" in bt656-576i50) RADXA_DCLK=27000000;; *) RADXA_DCLK=54000000;; esac
 # Ctrl+Alt+End power-off: plugd on the PC with the smart plug (README "Real-time clock and safe power-off")
 PLUG_HOST=${M65_PLUG_HOST-192.168.1.133:4530}
+# Radxa CM3: NetworkManager state in RAM (unit, script -> installed path)
+RADXA_NMRAM_UNIT=m65-nm-ram.service
+RADXA_NMRAM_SH=/usr/local/sbin/m65-nm-ram
 # Radxa CM3: units of the (KDE) image that a headless bridge box does not need -- install disables
 # them, check warns.  Daily apt/man-db jobs rewrite tens of MB on the eMMC (apt by hand still works);
 # radxa-adbd restart-loops every 5 s while the OTG port is in host mode (adb never worked on this
@@ -131,6 +138,7 @@ check() {
     echo LLVMMOS \$(/opt/llvm-mos/bin/clang --version 2>/dev/null | head -1);
     echo TZ \$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone);
     echo CAD \$(systemctl is-enabled ctrl-alt-del.target 2>/dev/null);
+    echo NMRAM \$(md5sum < /etc/systemd/system/$RADXA_NMRAM_UNIT 2>/dev/null | cut -d' ' -f1) \$(md5sum < $RADXA_NMRAM_SH 2>/dev/null | cut -d' ' -f1) \$(systemctl is-enabled $RADXA_NMRAM_UNIT 2>/dev/null) \$(systemctl is-active $RADXA_NMRAM_UNIT 2>/dev/null) \$(findmnt -n -o FSTYPE /var/lib/NetworkManager) \$(cmp -s /var/lib/NetworkManager/secret_key /var/lib/m65-nm/secret_key && echo key-same);
     echo CARD \$(stat -c %s $DEST/card.img 2>/dev/null)") || { echo "cannot reach $HOST"; exit 2; }
   for f in $FILES; do
     if echo "$out" | grep -q "^$(md5l "$HERE/$f")  $f\$"; then echo "ok    $DEST/$f"; else echo "DIFF  $DEST/$f"; bad=1; fi
@@ -190,6 +198,11 @@ check() {
     [ $vbad = 0 ] && echo "ok    video pads (GPIO4_B4, GPIO3_C6..D5) owned by the BT.656 encoder"
     local on; on=$(echo "$out" | awk '$1=="ON" {printf "%s ", $2}')
     [ -z "$on" ] && echo "ok    image services not needed here are disabled" || echo "WARN  enabled, not needed: $on(install disables them)"
+    set -- $(echo "$out" | awk '$1=="NMRAM" {print $2, $3, $4, $5, $6, $7}')
+    if [ "${1:-}" = "$(md5l "$HERE/$RADXA_NMRAM_UNIT")" ] && [ "${2:-}" = "$(md5l "$HERE/m65-nm-ram.sh")" ] \
+       && [ "${3:-}" = enabled ] && [ "${4:-}" = active ] && [ "${5:-}" = tmpfs ] && [ "${6:-}" = key-same ]; then
+      echo "ok    /var/lib/NetworkManager in RAM ($RADXA_NMRAM_UNIT), secret_key = /var/lib/m65-nm/secret_key"
+    else echo "DIFF  NetworkManager state in RAM: unit/script/enabled/active/fstype/key '$*' (install, then reboot)"; bad=1; fi
   fi
   echo "$out" | grep -q "^SPIDEV /dev/spidev3.0 py-ok" && echo "ok    /dev/spidev3.0 + python3 spidev" \
     || { echo "DIFF  spidev missing (SPI3 enabled? python3-spidev? reboot after install)"; bad=1; }
@@ -245,6 +258,10 @@ install() {
          { cmp -s $RADXA_VIDEO_OVL.dtbo /boot/dtbo/$RADXA_VIDEO_OVL.dtbo || echo 'BT.656 overlay $RADXA_VIDEO_OVL installed (reboot; the module HDMI goes off)'; } &&
          for f in /boot/dtbo/bt656*.dtbo; do [ \$f = /boot/dtbo/$RADXA_VIDEO_OVL.dtbo ] || rm -f \$f; done &&
          install -m 644 $RADXA_VIDEO_OVL.dtbo /boot/dtbo/$RADXA_VIDEO_OVL.dtbo && rm $RADXA_VIDEO_OVL.dtbo &&
+         install -m 755 m65-nm-ram.sh $RADXA_NMRAM_SH && install -m 644 $RADXA_NMRAM_UNIT /etc/systemd/system/$RADXA_NMRAM_UNIT &&
+         { mountpoint -q /var/lib/NetworkManager || [ -d /var/lib/m65-nm ] ||
+           { mkdir -m 700 /var/lib/m65-nm && cp -a /var/lib/NetworkManager/. /var/lib/m65-nm/ && echo 'NetworkManager state seeded to /var/lib/m65-nm (tmpfs after the reboot)'; }; } &&
+         systemctl daemon-reload && systemctl enable -q $RADXA_NMRAM_UNIT &&
          u-boot-update >/dev/null 2>&1 &&
          grep -q '/$RADXA_SPI_OVL.dtbo' /boot/extlinux/extlinux.conf && grep -q '/$RADXA_VIDEO_OVL.dtbo' /boot/extlinux/extlinux.conf &&
          { systemctl disable --now $(echo $RADXA_OFF) >/dev/null 2>&1; true; }"
@@ -252,12 +269,12 @@ install() {
   # m65d.env: only the M65_PLUG_HOST line is ours
   local penv="{ grep -v '^M65_PLUG_HOST=' m65d.env 2>/dev/null; [ -z '$PLUG_HOST' ] || echo 'M65_PLUG_HOST=$PLUG_HOST'; } > m65d.env.new && mv m65d.env.new m65d.env && { [ -s m65d.env ] || rm m65d.env; }"
   echo "copying to $HOST:$DEST"
-  tar -C "$HERE" -cf - $FILES $UNITS deploy/config.txt ide m65-safe.shutdown journald-m65.conf tmpfiles-m65.conf timesyncd-m65.conf $vtar | \
+  tar -C "$HERE" -cf - $FILES $UNITS deploy/config.txt ide m65-safe.shutdown journald-m65.conf tmpfiles-m65.conf timesyncd-m65.conf m65-nm-ram.sh $RADXA_NMRAM_UNIT $vtar | \
     rsh "mkdir -p $DEST && tar -C $DEST -xf - && cd $DEST && chmod 644 $(echo $FILES) && rm -f /usr/local/bin/m65run && install -m 755 m65run /usr/local/bin/m65run && rm -f m65io &&
          for u in $UNITS; do install -m 644 \$u /etc/systemd/system/\$u && rm \$u || exit 1; done &&
          $spi && $penv &&
          rm -r deploy && gcc -O2 -Wall -o m65io m65io.c &&
-         for e in $(echo $IDE); do install -D -m \$(case \${e#*:} in /usr/local/bin/*|*.shutdown) echo 755;; *) echo 644;; esac) \${e%%:*} \${e#*:} || exit 1; done && rm -r ide m65-safe.shutdown journald-m65.conf tmpfiles-m65.conf timesyncd-m65.conf &&
+         for e in $(echo $IDE); do install -D -m \$(case \${e#*:} in /usr/local/bin/*|*.shutdown) echo 755;; *) echo 644;; esac) \${e%%:*} \${e#*:} || exit 1; done && rm -r ide m65-safe.shutdown journald-m65.conf tmpfiles-m65.conf timesyncd-m65.conf m65-nm-ram.sh $RADXA_NMRAM_UNIT &&
          { systemctl try-restart systemd-timesyncd 2>/dev/null; true; } &&
          systemctl restart systemd-journald && rm -rf /var/log/journal/* &&
          systemd-tmpfiles --create /etc/tmpfiles.d/m65-run.conf &&
