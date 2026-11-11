@@ -10,7 +10,9 @@ set_param labtools.enable_cs_server false
 open_hw_manager
 connect_hw_server -allow_non_jtag
 set dev ""
-foreach tgt [get_hw_targets] {
+source [file join [file dirname [info script]] targets.tcl]
+foreach tgt [m65_hw_targets] {
+    puts "JTAG_TARGET=$tgt"
     catch { close_hw_target }
     if {[catch { open_hw_target $tgt }]} { catch { close_hw_target }; continue }
     if {[catch { get_hw_devices } devs] || [llength $devs] == 0} { catch { close_hw_target }; continue }

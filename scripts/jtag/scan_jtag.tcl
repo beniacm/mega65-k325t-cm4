@@ -11,7 +11,8 @@ open_hw_manager
 connect_hw_server -allow_non_jtag
 
 set found 0
-foreach tgt [get_hw_targets] {
+source [file join [file dirname [info script]] targets.tcl]
+foreach tgt [m65_hw_targets 0] {
     puts "TARGET=$tgt"
     catch { close_hw_target }
     if { [catch { open_hw_target $tgt } err] } {
