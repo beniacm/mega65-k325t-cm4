@@ -731,6 +731,7 @@ pace:	;
 		/* LAN frames wake us too (only to forward; the loop above reads them) */
 		p[ncli + 1].fd = pkt; p[ncli + 1].events = POLLIN;
 		struct timespec ts = { 0, sleep_us * 1000 };
+		int npolled = ncli;   /* the clients in p[1..]: a client accepted below has no entry */
 		if (ppoll(p, ncli + (pkt >= 0 ? 2 : 1), &ts, NULL) > 0) {
 			if (p[0].revents & POLLIN) {
 				int c = accept(srv, NULL, NULL), one = 1;
@@ -740,7 +741,7 @@ pace:	;
 				} else if (c >= 0)
 					close(c);
 			}
-			for (int i = ncli - 1; i >= 0; i--) {
+			for (int i = npolled - 1; i >= 0; i--) {
 				if (!(p[i + 1].revents & (POLLIN | POLLHUP | POLLERR)))
 					continue;
 				ssize_t n = recv(cli[i], txq + txq_len, sizeof txq - txq_len, 0);
