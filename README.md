@@ -749,6 +749,19 @@ FPGA 51-52 C; Kickstart 1.3 boot, ADF read and write-back, keyboard (keyboard.de
 mouse and joystick ports, and the demos State of the Art, Enigma, Arte, Eon and Batman Rises
 (two-disk demos with the disk swap) run from flash slot 1.
 
+**Phase 2** (2026-11-11, `aexp/K325T/PORTING.md` "Phase 2", commits 656ca38, 3fc2dec, 11bf756):
+the K325T's room adds, in the menu "RAM: ..." (Amiga Hardware): Kickstart **512 KB** (2.04,
+3.1 A500/A600 as `/amiga/kick.rom`; size detected from the image), **ECS** chipset, **1 MB chip**
+RAM, and **2/4/8 MB Zorro II fast RAM** in DDR3 (16 KB LUT-RAM cache; an expansion card, not
+cycle-equivalent).  Defaults = the A500 above (unchanged chip-bus timing; SysInfo and demo
+regression checked).  Its settings live in `/amiga/aexpk325.cfg`; `/amiga/aexp-V1.cfg` stays for
+V1.  Flash slot 1 holds the phase-2 core since 2026-11-11; the V1 bitstream is kept as
+`/root/m65/bit/aexp_v1_k325t_cm4_radxacm3.bit` (the way back:
+`m65flash.py write 1 /root/m65/bit/aexp_v1_k325t_cm4_radxacm3.bit`).  The card also holds the
+user's Kickstarts `/amiga/kick13.rom`, `kick204.rom`, `kick31.rom` (copy one to `kick.rom`) and
+`sysinfo.adf` (`aexp/K325T/tools/mk_sysinfo_adf.py`: Kickstart version, chipset ids, memory list,
+CPU timing, fast RAM test; `--decode` reads a capture).
+
 ## Standalone: both cores in flash, switched from the Rockchip
 
 No PC or JTAG is needed in normal use:
