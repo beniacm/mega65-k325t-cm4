@@ -755,7 +755,9 @@ the K325T's room adds, in the menu "RAM: ..." (Amiga Hardware): Kickstart **512 
 RAM, and **2/4/8 MB Zorro II fast RAM** in DDR3 (16 KB LUT-RAM cache; an expansion card, not
 cycle-equivalent).  Defaults = the A500 above (unchanged chip-bus timing; SysInfo and demo
 regression checked).  Its settings live in `/amiga/aexpk325.cfg`; `/amiga/aexp-V1.cfg` stays for
-V1.  Flash slot 1 holds the phase-2 core since 2026-11-11; the V1 bitstream is kept as
+V1.  Flash slot 1 holds the phase-2 core since 2026-11-11, since 23:00 the build with the two reset
+fixes (`qmtech-k325t-cm4` aaf096b, `/root/m65/bit/aexp_k325t_cm4_radxacm3.bit`, md5 9a1a0c3e...; the
+build before them is kept as `aexp_p2_11bf756_k325t_cm4_radxacm3.bit`); the V1 bitstream is kept as
 `/root/m65/bit/aexp_v1_k325t_cm4_radxacm3.bit` (the way back:
 `m65flash.py write 1 /root/m65/bit/aexp_v1_k325t_cm4_radxacm3.bit`).  The card also holds the
 user's Kickstarts `/amiga/kick13.rom`, `kick204.rom`, `kick31.rom` (copy one to `kick.rom`) and
