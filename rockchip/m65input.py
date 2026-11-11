@@ -20,7 +20,7 @@ Gamepad: first pad -> joystick port 2 (most C64 games), second pad -> port 1; a 
     D-pad / hat / left stick = directions; A/B/X/Y, shoulders, triggers = fire;
     Start = SPACE, Select = RETURN, Mode/Home = RUN/STOP.
 System keys (never passed to the core), Ctrl + Alt + ...:
-    Del = reset the core     F1 = MEGA65     F2 = C64     F12 = toggle MEGA65 <-> C64
+    Del = reset the core     F1 = MEGA65     F2 = the slot 1 core (C64 or Amiga)     F12 = toggle
     J = swap joystick ports 1 <-> 2 (pads and mouse)
     Insert = HDMI picture + keyboard: Linux (the Rockchip's own display, linux_fb) <-> MEGA65
     End = shut the Rockchip down safely; the MEGA65 screen says when it is safe to switch off
@@ -29,6 +29,12 @@ Mouse: Commodore 1351 in proportional mode on port 2 (all mice summed): the SID 
     MOUSE_SCALE divides PC mouse counts (modern mice report far more counts than a 1351).
     The POT values change at most MOUSE_RATE counts/s (burst MOUSE_BURST): a 1351 driver reads
     the position once per frame and takes a change of more than 31 counts as the other direction.
+Amiga core (AExp, core id 3; InputHub.set_core): the keyboard is mapped for AExp's "Amiga"
+    (positional) keyboard mode, so a US PC keyboard types what its caps say (AMIGA_KEYMAP:
+    Win = Left Amiga, Menu/Right Win = Right Amiga, Alt = Left Alt, AltGr = Right Alt, PrtSc =
+    Help, Backspace / Delete as on the Amiga, F1..F10 = Amiga F1..F10; no keypad codes: the keypad
+    types digits); the mouse is an Amiga quadrature mouse on port 1 (bridge bytes 13..16 = X / Y
+    position counters, buttons active low, port: see pots()), pads: first pad -> port 2.
 Devices are classified by capability, one node can be several (keyboard + touchpad combos);
 events are dispatched by type.  Hot-plug: inotify on /dev/input (+ a 2 s rescan as fallback).
 After an evdev buffer overrun (SYN_DROPPED) and at plug-in the state is re-read from the kernel.
@@ -48,6 +54,11 @@ MOUSE_SCALE = 2.0                         # PC counts per 1351 count
 MOUSE_RATE = 1100.0                       # 1351 counts/s per axis the POTs may move, and ...
 MOUSE_BURST = 8.0                         # ... burst: <= 8 + 1100 * 20 ms = 30 counts per PAL frame
 MOUSE_BACKLOG = 40.0                      # movement queued beyond the rate; more is dropped
+# Amiga mouse (core 3): the FPGA chases 8-bit position counters (1 us per count); the Amiga reads
+# the counters once per frame and takes a change of more than 127 as the other direction
+AMIGA_MOUSE_RATE = 5000.0                 # counts/s per axis (100 per PAL frame)
+AMIGA_MOUSE_BURST = 40.0
+AMIGA_MOUSE_BACKLOG = 100.0
 SYN_REPORT, SYN_DROPPED = 0, 3
 EVENT_FMT = "llHHi"                      # struct input_event (timeval + type/code/value)
 EVENT_SIZE = struct.calcsize(EVENT_FMT)
@@ -159,6 +170,28 @@ for code, ch in zip([30, 31, 32, 33, 34, 35, 36, 37, 38], "ASDFGHJKL"):
     KEYMAP[code] = [ch]
 for code, ch in zip([44, 45, 46, 47, 48, 49, 50], "ZXCVBNM"):
     KEYMAP[code] = [ch]
+
+# Amiga core (AExp) in its "Amiga" keyboard mode (OSM: Keyboard > Amiga): every MEGA65 key sends
+# the Amiga key in its position (AExp doc/keyboard.md).  This map sends, for each PC key, the
+# MEGA65 key whose Amiga key sits where the PC key sits (US layouts), so the PC caps are right.
+# Lines, not matrix keys (see InputHub.ctrl_bits): F3 = MEGA65 CAPS LOCK (= Amiga F3 in that
+# mode), AltGr = RESTORE (= Right Alt).  CapsLock / PgUp / PgDn / Home / End / Insert: nothing
+# (the MEGA65 keyboard has no key for Amiga Caps Lock in that mode).
+AMIGA_KEYMAP = {code: names for code, names in KEYMAP.items()
+                if names and names[0] in "1234567890QWERTYUIOPASDFGHJKLZXCVBNM" + ",./" or
+                code in (15, 28, 96, 57, 42, 54, 29, 97, 103, 105, 108, 106)}
+AMIGA_KEYMAP.update({
+    1: ["RUNSTOP"],                                         # Esc
+    59: ["ESC"], 60: ["ALT"], 61: [], 62: ["NOSCRL"],       # F1 F2 (F3 = CAPS line) F4
+    63: ["F1"], 64: ["F3"], 65: ["F5"], 66: ["F7"], 67: ["F9"], 68: ["F11"],   # F5..F10
+    41: ["LEFTARROW"], 12: ["+"], 13: ["-"], 26: ["@"], 27: ["*"], 43: ["POUND"],  # ` - = [ ] \
+    39: [":"], 40: [";"],                                   # ; '
+    14: ["HOME"], 111: ["INST"],                            # Backspace, Delete
+    56: ["F13"], 100: [],                                   # Left Alt; AltGr = RESTORE line
+    125: ["MEGA"], 126: ["="], 127: ["="],                  # Left Amiga, Right Amiga (Win / Menu)
+    99: ["HELP"],                                           # PrtSc = Help
+    55: [S, "8"], 74: ["+"], 78: [S, "-"], 98: ["/"], 83: ["."],   # keypad * - + / .
+})
 KEY_CAPSLOCK, KEY_PAGEUP = 58, 104       # handled as lines, not matrix keys
 MOD_NAMES = {"LSHIFT", "RSHIFT", "CTRL", "MEGA", "ALT"}
 CURSOR_UP_LEFT = (103, 105)              # also sent as dedicated keys (ctrl_bits)
@@ -171,7 +204,7 @@ MOD_LEAD = 0.04
 # tap (the KERNAL scans every 16-20 ms; a 60 ms tap left ~20 ms of SHIFT+key)
 MOD_HOLD = 0.10
 CTRL_KEYS, ALT_KEYS = {29, 97}, {56, 100}
-SYSTEM_KEYS = {111: "reset", 59: "core mega65", 60: "core c64", 88: "core toggle",  # Del F1 F2 F12
+SYSTEM_KEYS = {111: "reset", 59: "core mega65", 60: "core slot1", 88: "core toggle",  # Del F1 F2 F12
                36: "joyswap", 107: "poweroff",                                     # J (local), End
                110: "view toggle"}                                                  # Insert
 # (The view hotkey is not an F key: with the keyboard released to Linux, Ctrl+Alt+Fn also
@@ -281,15 +314,16 @@ class Axis:
     def __init__(self):
         self.target = 0.0                 # where the mouse is
         self.out = 0.0                    # what the POTs show
-        self.tokens = MOUSE_BURST
+        self.rate, self.burst, self.backlog = MOUSE_RATE, MOUSE_BURST, MOUSE_BACKLOG
+        self.tokens = self.burst
 
     def add(self, d, cap=True):
         self.target += d
         if cap:                           # too fast for a 1351: drop the excess
-            self.target = max(self.out - MOUSE_BACKLOG, min(self.out + MOUSE_BACKLOG, self.target))
+            self.target = max(self.out - self.backlog, min(self.out + self.backlog, self.target))
 
     def tick(self, dt):
-        self.tokens = min(MOUSE_BURST, self.tokens + MOUSE_RATE * dt)
+        self.tokens = min(self.burst, self.tokens + self.rate * dt)
         d = self.target - self.out
         step = max(-self.tokens, min(self.tokens, d))
         self.out += step
@@ -312,6 +346,7 @@ class InputHub:
         self.restore = False
         self.joy_swap = False
         self.matrix_cursor = True           # cursor up/left also as RSHIFT + cursor in the matrix
+        self.amiga = False                  # Amiga core: AMIGA_KEYMAP, quadrature mouse (set_core)
         self.actions = []                   # system-key actions for m65d (reset / core switch)
         self.linux_focus = False            # keyboards released to Linux (view linux)
         self.lead = {}                      # keycode -> press time (modifier-first combos)
@@ -544,10 +579,10 @@ class InputHub:
             if code in CTRL_KEYS or code in ALT_KEYS:
                 (dev.keys.add if val else dev.keys.discard)(code)
         elif code == KEY_CAPSLOCK:
-            if val == 1:
+            if val == 1 and not self.amiga:
                 self.caps = not self.caps       # latching key, like the real one
         elif code == KEY_PAGEUP:
-            self.restore = val != 0
+            self.restore = val != 0 and not self.amiga
         elif self._sys_combo(code, val):
             if val == 1:
                 if SYSTEM_KEYS[code] == "joyswap":
@@ -639,10 +674,25 @@ class InputHub:
 
     def _names(self, code):
         if code in CURSOR_UP_LEFT and not self.matrix_cursor:
-            return []                     # dedicated key only (C64 core)
-        return KEYMAP.get(code, [])
+            return []                     # dedicated key only (C64 / Amiga core)
+        return (AMIGA_KEYMAP if self.amiga else KEYMAP).get(code, [])
+
+    def set_core(self, core_id):
+        """the running core (rk_bridge core id): 2 C64 and 3 Amiga read the cursor up/left keys
+        as dedicated keys only; 3 = Amiga: AMIGA_KEYMAP + quadrature mouse"""
+        self.matrix_cursor = core_id not in (2, 3)
+        amiga = core_id == 3
+        if amiga != self.amiga:
+            self.amiga = amiga
+            self.caps = self.restore = False
+            for a in (self.ax, self.ay):
+                a.rate, a.burst, a.backlog = ((AMIGA_MOUSE_RATE, AMIGA_MOUSE_BURST, AMIGA_MOUSE_BACKLOG)
+                                              if amiga else (MOUSE_RATE, MOUSE_BURST, MOUSE_BACKLOG))
 
     def _mouse_port(self):
+        # C64: 1351 on port 2; Amiga: mouse on port 1, joystick on port 2 (like an A500)
+        if self.amiga:
+            return 2 if self.joy_swap else 1
         return 1 if self.joy_swap else 2
 
     def joysticks(self):
@@ -651,6 +701,8 @@ class InputHub:
         j = {1: 0, 2: 0}
         for p in self.pads:
             j[(3 - p.port) if self.joy_swap else p.port] |= p.joy()
+        if self.amiga:                      # Amiga: buttons travel with the counters (pots())
+            return j[1], j[2]
         btn = set().union(*(m.buttons for m in self.mice)) if self.mice else set()
         mb = (0x10 if BTN_LEFT in btn or self.script_buttons & 1 else 0) | \
              (0x01 if BTN_RIGHT in btn or self.script_buttons & 2 else 0)
@@ -667,7 +719,16 @@ class InputHub:
 
     def pots(self):
         """SID values (pot1 x, pot1 y, pot2 x, pot2 y); $FF = nothing connected.
-        1351 proportional mode: bits 6..1 = position mod 64, bit 0 = noise (0 here)."""
+        1351 proportional mode: bits 6..1 = position mod 64, bit 0 = noise (0 here).
+        Amiga core: X position, Y position (increasing = down), buttons active low (b0 left,
+        b1 right, b2 middle), $01 = mouse on port 2 / $00 = port 1 (AExp K325T amiga_mouse.vhd)."""
+        if self.amiga:
+            btn = set().union(*(m.buttons for m in self.mice)) if self.mice else set()
+            b = ((1 if BTN_LEFT in btn or self.script_buttons & 1 else 0) |
+                 (2 if BTN_RIGHT in btn or self.script_buttons & 2 else 0) |
+                 (4 if BTN_MIDDLE in btn or self.script_buttons & 4 else 0))
+            return (int(self.ax.out) & 0xFF, -int(self.ay.out) & 0xFF, ~b & 0xFF,
+                    1 if self._mouse_port() == 2 else 0)
         if not self.mouse_active():
             return (0xFF, 0xFF, 0xFF, 0xFF)
         m = ((int(self.ax.out) & 63) << 1, (int(self.ay.out) & 63) << 1)
@@ -677,5 +738,9 @@ class InputHub:
         # b1 RESTORE, b2 CAPS LOCK, b4 / b5 cursor up / left: the MEGA65 keyboard's dedicated
         # keys (MEGA65 core keyup/keyleft, C64 core keyboard keys 73/74); the matrix gets
         # RIGHT SHIFT + DOWN / RIGHT as well (KEYMAP), as from a real MEGA65 keyboard
-        return ((2 if self.restore else 0) | (4 if self.caps else 0) |
+        if self.amiga:                      # AltGr = RESTORE (Right Alt), F3 = CAPS LOCK (F3)
+            restore, caps = 100 in self.kbd_keys, 61 in self.kbd_keys
+        else:
+            restore, caps = self.restore, self.caps
+        return ((2 if restore else 0) | (4 if caps else 0) |
                 (0x10 if 103 in self.kbd_keys else 0) | (0x20 if 105 in self.kbd_keys else 0))

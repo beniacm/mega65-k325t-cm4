@@ -724,6 +724,31 @@ DDR3 bridge bugs found on the way (both in `avm_mig.vhd`, simulated with `sim/tb
   C64 ran on), and the CRT parser read garbage ("Wrong CRT/CHIP header"). Afterwards 20/20
   cartridge loads OK.
 
+## Amiga core (AExp port)
+
+`aexp/` = github.com/sy2002/AExp (Amiga 500 OCS/PAL, MiSTer Minimig on M2M; V1), local branch
+**`qmtech-k325t-cm4`** with the port in `aexp/K325T/` (separate repo, git-ignored here; recipe =
+the C64 port: DDR3 for the HyperRAM, bridge, keyboard emulator, SD emulator).  Build:
+`aexp/K325T/build.sh radxacm3` → `K325T/bin/aexp_k325t_cm4_radxacm3.bit` (`build.sh` alone = Luckfox
+pins).  Chip/slow RAM and Kickstart stay in block RAM as upstream, so the Amiga is cycle-for-cycle
+the upstream core (`K325T/PORTING.md`).  Bridge core id **3**; m65d then maps a PC keyboard for
+AExp's "Amiga" keyboard mode and sends the USB mouse as position counters that `amiga_mouse.vhd`
+turns into quadrature on port 1 (pads: first pad on port 2).  Flash slot 1 holds either the C64 or
+the Amiga core: `M65_SLOT1=amiga|c64` in `/root/m65/m65d.env` tells m65d which (Ctrl+Alt+F2 /
+`m65ctl core slot1`); both bitstreams are kept in `/root/m65/bit/`.  On the Radxa CM3 board slot 1
+holds the Amiga core since 2026-11-11 (`M65_SLOT1=amiga`); back to the C64:
+`m65flash.py write 1 /root/m65/bit/c64_k325t_cm4_radxacm3.bit` and `M65_SLOT1=c64`.
+
+Card: **`/amiga/kick.rom`** = your Kickstart 1.3 (262,144 bytes, raw, no byte swap; not in git),
+ADF images in `/amiga`, settings in `/amiga/aexp-V1.cfg`.  Help opens the menu, "ADF:" + Space
+the file browser.  Test tools in `aexp/K325T/tools/`: `aexp_demo_test.py` (mounts demo ADFs and
+records the HDMI output), `mk_writetest_adf.py` / `mk_inputtest_adf.py` / `mk_kbdtest_adf.py`
+(boot-block test floppies for disk writing, joystick/mouse ports and keyboard.device).
+Measured on the Radxa CM3 board (2026-11-11): timing met (WNS +0.114 ns), 380.5/445 RAMB36,
+FPGA 51-52 C; Kickstart 1.3 boot, ADF read and write-back, keyboard (keyboard.device matrix),
+mouse and joystick ports, and the demos State of the Art, Enigma, Arte, Eon and Batman Rises
+(two-disk demos with the disk swap) run from flash slot 1.
+
 ## Standalone: both cores in flash, switched from the Rockchip
 
 No PC or JTAG is needed in normal use:
@@ -736,8 +761,8 @@ No PC or JTAG is needed in normal use:
 
 | USB keyboard (not passed to the core) | `m65ctl` | |
 |---|---|---|
-| Ctrl+Alt+F12 | `core toggle` | MEGA65 ⇄ C64 |
-| Ctrl+Alt+F1 / F2 | `core mega65` / `core c64` | |
+| Ctrl+Alt+F12 | `core toggle` | MEGA65 ⇄ the slot 1 core (C64 or Amiga) |
+| Ctrl+Alt+F1 / F2 | `core mega65` / `core slot1` | (`core c64` / `core amiga` name it; `M65_SLOT1` in m65d.env says which is there) |
 | Ctrl+Alt+Del | `reset` | reset the running core |
 | Ctrl+Alt+End | `poweroff` | shut the Rockchip down safely, then plugd cuts the smart plug (see below) |
 
@@ -747,7 +772,7 @@ runs (16 MB read 15 s, a 6 MB core about 1 min including verify):
 | slot | address | content |
 |---|---|---|
 | 0 | `0x000000` | MEGA65 core (boots at power-on) |
-| 1 | `0x800000` | 4 KB `$FF`, then the C64 core |
+| 1 | `0x800000` | 4 KB `$FF`, then the C64 core or the Amiga core (Radxa CM3 board since 2026-11-11: Amiga) |
 
 - The 4 KB `$FF` in front make HYPPO's flash check see slot 1 as *empty*. A valid `.cor` there
   would be auto-started at power-on; anything else gives "slot 1 messed up". The FPGA skips the

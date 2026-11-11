@@ -23,9 +23,11 @@ Control: TCP port 4511, one text command per line, reply "ok ..."/"err ...":
     key <NAME> [ms]            tap one key (RETURN, SPACE, F1, RUNSTOP, ...)
     keys <c0> .. <c8>          raw matrix state, 9 hex bytes (bit = row, 1 = down)
     joy <a> <b>                joystick bits (b0 up b1 down b2 left b3 right b4 fire)
-    core [mega65|c64|toggle]   show / switch the FPGA core (flash slot 0 / 1); USB keyboard:
-                               Ctrl+Alt+F1 / F2 / F12, Ctrl+Alt+Del = reset
-    mouse <dx> <dy> [btn]      move the 1351 mouse on port 2 (counts, dy>0 = up; btn b0 L b1 R)
+    core [mega65|slot1|c64|amiga|toggle]   show / switch the FPGA core (flash slot 0 / 1; slot 1
+                               holds the C64 or the Amiga core: M65_SLOT1=c64|amiga in m65d.env,
+                               default c64); USB keyboard: Ctrl+Alt+F1 / F2 / F12, Ctrl+Alt+Del = reset
+    mouse <dx> <dy> [btn]      move the mouse (1351 on port 2 / Amiga mouse on port 1; counts,
+                               dy>0 = up; btn b0 L b1 R b2 M)
     mouse off                  no mouse (POTs read $FF)
     pots <p1x> <p1y> <p2x> <p2y>   raw SID POT values in hex (paddles); "pots off" = back to mouse
     restore 0|1  capslock 0|1  sd emu|phys
@@ -117,7 +119,7 @@ class Bridge:
         }
 
     def core_id(self):
-        """STATUS byte 52: 1 = MEGA65, 2 = C64 (0 = older MEGA65 bitstream)"""
+        """STATUS byte 52: 1 = MEGA65, 2 = C64, 3 = Amiga (0 = older MEGA65 bitstream)"""
         r = self.spi.xfer2([0x01, 0] + [0] * 53)[2:]
         if bytes(r[0:2]) != b"Me":
             return None
@@ -272,8 +274,15 @@ class Daemon:
             out.append("fpga=n/a(%s)" % type(e).__name__)
         return " ".join(out)
 
-    # ---- cores (flash slots: 0 = MEGA65 at 0x000000, 1 = C64 at 0x800000)
-    CORES = {"mega65": (1, 0x000000), "c64": (2, 0x800000)}
+    # ---- cores (flash slots: 0 = MEGA65 at 0x000000, 1 = C64 or Amiga at 0x800000)
+    CORE_IDS = {"mega65": 1, "c64": 2, "amiga": 3}
+    CORE_NAMES = {1: "mega65", 2: "c64", 3: "amiga"}
+
+    @property
+    def slot1(self):
+        """name of the core in flash slot 1 (M65_SLOT1 in m65d.env)"""
+        n = os.environ.get("M65_SLOT1", "c64").strip().lower()
+        return n if n in ("c64", "amiga") else "c64"
 
     def monitor(self, line, wait=True):
         with socket.create_connection(("127.0.0.1", self.args.mon_port), timeout=2) as s:
@@ -423,12 +432,16 @@ class Daemon:
         cur = self.br.core_id()
         if cur is None:
             return "err no bridge answer"
-        names = {1: "mega65", 2: "c64"}
+        names = self.CORE_NAMES
         if target == "toggle":
-            target = "c64" if cur == 1 else "mega65"
-        if target not in self.CORES:
-            return "err core mega65|c64|toggle"
-        want, addr = self.CORES[target]
+            target = "slot1" if cur == 1 else "mega65"
+        if target == "slot1":
+            target = self.slot1
+        if target not in self.CORE_IDS:
+            return "err core mega65|slot1|c64|amiga|toggle"
+        if target != "mega65" and target != self.slot1:
+            return "err flash slot 1 holds the %s core (M65_SLOT1 in m65d.env)" % self.slot1
+        want, addr = self.CORE_IDS[target], (0x000000 if target == "mega65" else 0x800000)
         if want == cur:
             return "ok already %s" % target
         print("m65d: core %s -> %s (flash 0x%06x)" % (names.get(cur, cur), target, addr), flush=True)
@@ -543,7 +556,7 @@ class Daemon:
         if cmd == "core":
             if not a:
                 c = self.br.core_id()
-                return "ok core=%s" % {1: "mega65", 2: "c64"}.get(c, c)
+                return "ok core=%s slot1=%s" % (self.CORE_NAMES.get(c, c), self.slot1)
             return self.switch_core(a[0].lower())
         if cmd == "hold_reset":
             self.ctrl = (self.ctrl | 1) if a and a[0] == "1" else (self.ctrl & ~1)
@@ -568,10 +581,11 @@ class Daemon:
             self.input_dirty = True
             return "ok"
         if cmd == "mouse":
-            # mouse <dx> <dy> [buttons]: 1351 counts (dy > 0 = up), buttons b0 left b1 right;
+            # mouse <dx> <dy> [buttons]: counts (dy > 0 = up), buttons b0 left b1 right b2 middle;
             # "mouse off" = no mouse (pots read $FF again)
             if a and a[0] == "off":
-                self.inp.ax, self.inp.ay = m65input.Axis(), m65input.Axis()
+                for ax in (self.inp.ax, self.inp.ay):   # in place: keeps the core's rate
+                    ax.target = ax.out = 0.0
                 self.inp.script_buttons = 0
             else:
                 self.inp.move_mouse(int(a[0]), int(a[1]))
@@ -646,12 +660,13 @@ class Daemon:
                     self.rtc_schedule(2.0)            # write now, aligned again in 2 s and 5 s
                     self.rtc_repeat = True            # later (BASIC's banner reads the RTC once,
                                                       # ~4 s after the reconfiguration)
-                self.inp.matrix_cursor = c != 2
-                self.input_dirty = True
-                print("m65d: core %s, cursor up/left %s" % (
-                    {1: "mega65", 2: "c64"}.get(c, c),
-                    "as dedicated keys + RSHIFT/cursor matrix" if c != 2 else "as dedicated keys only"),
-                    flush=True)
+                self.inp.set_core(c)        # C64 / Amiga: cursor up/left dedicated keys only;
+                self.input_dirty = True     # Amiga: its key map and quadrature mouse
+                print("m65d: core %s, cursor up/left %s%s" % (
+                    self.CORE_NAMES.get(c, c),
+                    "as dedicated keys + RSHIFT/cursor matrix" if self.inp.matrix_cursor
+                    else "as dedicated keys only",
+                    ", Amiga key map + mouse" if self.inp.amiga else ""), flush=True)
         if self.rtc_due and time.time() >= self.rtc_due:
             self.rtc_write()
         changed, wait = self.inp.maintain(time.monotonic())   # hot-plug, mouse rate limit

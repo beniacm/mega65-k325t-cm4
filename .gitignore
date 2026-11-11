@@ -20,6 +20,7 @@ __pycache__/
 /sim/uart_tx_simcopy.vhdl
 # C64 core (its own git repo, branch qmtech-k325t-cm4) and downloaded third-party games
 /c64mega65/
+/aexp/
 /c64games/
 /c64test/*.d64
 # GHDL work dirs / generated sim copies of upstream files / test data derived from games
