@@ -20,6 +20,10 @@
 # Both: /root/m65/m65d.env gets M65_PLUG_HOST=$M65_PLUG_HOST (default 192.168.1.133:4530, the PC
 # that runs scripts/plugd.py; M65_PLUG_HOST= (empty) = no plugd, the line is removed); other lines
 # in m65d.env are kept.
+# Event logs: m65io / m65d write to /run/m65 (RAM, tmpfiles-m65.conf); /root/m65/m65io.log and
+# m65d.log are links to them.  install removes old log files from $DEST and the persistent journal
+# files of the image's first boots (/var/log/journal; journald is volatile, journald-m65.conf);
+# timesyncd-m65.conf stops timesyncd's 60 s clock-file stamp.
 # card.img is not created either (README "SD card image").  install does not restart anything;
 # reboot afterwards.
 set -u
@@ -51,7 +55,9 @@ IDE="ide/vim/syntax/ca65.vim:/usr/share/vim/vimfiles/syntax/ca65.vim
      ide/sysctl-console.conf:/etc/sysctl.d/90-m65-console.conf
      ide/ssh-runtime-preserve.conf:/etc/systemd/system/ssh@.service.d/m65-preserve.conf
      m65-safe.shutdown:/lib/systemd/system-shutdown/m65-safe.shutdown
-     journald-m65.conf:/etc/systemd/journald.conf.d/m65-volatile.conf"
+     journald-m65.conf:/etc/systemd/journald.conf.d/m65-volatile.conf
+     tmpfiles-m65.conf:/etc/tmpfiles.d/m65-run.conf
+     timesyncd-m65.conf:/etc/systemd/timesyncd.conf.d/m65.conf"
 # sha256 of the deployed boot image (rockchip/boot_dtb/boot_sd.img.xz unpacked, 24863744 bytes: BT1120
 # 720x576@50 for linux_fb), of its 720p60 predecessor (boot_sd_720p.img.xz) and
 # of the factory p3 dump (rockchip/boot_dtb/p3_boot_backup.img.xz)
@@ -115,6 +121,8 @@ check() {
     for u in $(echo $RADXA_OFF); do [ \"\$(systemctl is-enabled \$u 2>/dev/null)\" = enabled ] && echo ON \$u; done;
     for p in $RADXA_SPI_PINS $RADXA_VIDEO_PINS; do echo PIN \$(grep \"^pin \$p \" /sys/kernel/debug/pinctrl/pinctrl-rockchip-pinctrl/pinmux-pins 2>/dev/null); done;
     echo STATS \$(readlink $DEST/m65io.stats);
+    echo LOGS \$(readlink $DEST/m65io.log) \$(readlink $DEST/m65d.log) \$(ls $DEST/*.log.1 2>/dev/null);
+    echo PJOURNAL \$(find /var/log/journal -type f 2>/dev/null | wc -l) \$(journalctl --header 2>/dev/null | grep -c 'File path: /var/log');
     echo DEFTGT \$(systemctl get-default);
     echo SPIDEV \$(ls /dev/spidev3.0 2>/dev/null) \$(python3 -c 'import spidev; print(\"py-ok\")' 2>/dev/null);
     echo GCC \$(command -v gcc);
@@ -187,6 +195,11 @@ check() {
     || { echo "DIFF  spidev missing (SPI3 enabled? python3-spidev? reboot after install)"; bad=1; }
   [ "$(echo "$out" | awk '/^STATS/{print $2}')" = /run/m65io.stats ] && echo "ok    $DEST/m65io.stats -> /run/m65io.stats (RAM)" \
     || { echo "DIFF  $DEST/m65io.stats is not a link to /run/m65io.stats"; bad=1; }
+  [ "$(echo "$out" | sed -n 's/^LOGS *//p')" = "/run/m65/m65io.log /run/m65/m65d.log" ] \
+    && echo "ok    $DEST/m65io.log, m65d.log -> /run/m65 (RAM), no old log files" \
+    || { echo "DIFF  logs: '$(echo "$out" | sed -n 's/^LOGS *//p')' (want links to /run/m65/m65io.log, m65d.log only)"; bad=1; }
+  [ "$(echo "$out" | sed -n 's/^PJOURNAL *//p')" = "0 0" ] && echo "ok    no persistent journal files (/var/log/journal)" \
+    || { echo "DIFF  persistent journal: files, open: $(echo "$out" | sed -n 's/^PJOURNAL *//p') (want 0 0)"; bad=1; }
   case "$(echo "$out" | awk '/^DEFTGT/{print $2}')" in graphical.target) echo "WARN  default target graphical (desktop)";; esac
   echo "$out" | grep -q "^GCC /" && echo "ok    gcc" || { echo "DIFF  gcc missing (apt install gcc)"; bad=1; }
   # m65d voids Ctrl+Alt+Insert in the console keymap with loadkeys when the picture goes to Linux
@@ -239,13 +252,16 @@ install() {
   # m65d.env: only the M65_PLUG_HOST line is ours
   local penv="{ grep -v '^M65_PLUG_HOST=' m65d.env 2>/dev/null; [ -z '$PLUG_HOST' ] || echo 'M65_PLUG_HOST=$PLUG_HOST'; } > m65d.env.new && mv m65d.env.new m65d.env && { [ -s m65d.env ] || rm m65d.env; }"
   echo "copying to $HOST:$DEST"
-  tar -C "$HERE" -cf - $FILES $UNITS deploy/config.txt ide m65-safe.shutdown journald-m65.conf $vtar | \
+  tar -C "$HERE" -cf - $FILES $UNITS deploy/config.txt ide m65-safe.shutdown journald-m65.conf tmpfiles-m65.conf timesyncd-m65.conf $vtar | \
     rsh "mkdir -p $DEST && tar -C $DEST -xf - && cd $DEST && chmod 644 $(echo $FILES) && rm -f /usr/local/bin/m65run && install -m 755 m65run /usr/local/bin/m65run && rm -f m65io &&
          for u in $UNITS; do install -m 644 \$u /etc/systemd/system/\$u && rm \$u || exit 1; done &&
          $spi && $penv &&
          rm -r deploy && gcc -O2 -Wall -o m65io m65io.c &&
-         for e in $(echo $IDE); do install -D -m \$(case \${e#*:} in /usr/local/bin/*|*.shutdown) echo 755;; *) echo 644;; esac) \${e%%:*} \${e#*:} || exit 1; done && rm -r ide m65-safe.shutdown journald-m65.conf &&
-         systemctl restart systemd-journald &&
+         for e in $(echo $IDE); do install -D -m \$(case \${e#*:} in /usr/local/bin/*|*.shutdown) echo 755;; *) echo 644;; esac) \${e%%:*} \${e#*:} || exit 1; done && rm -r ide m65-safe.shutdown journald-m65.conf tmpfiles-m65.conf timesyncd-m65.conf &&
+         { systemctl try-restart systemd-timesyncd 2>/dev/null; true; } &&
+         systemctl restart systemd-journald && rm -rf /var/log/journal/* &&
+         systemd-tmpfiles --create /etc/tmpfiles.d/m65-run.conf &&
+         for l in m65io m65d; do [ -L \$l.log ] || { [ -f \$l.log ] && cat \$l.log >> /run/m65/\$l.log; }; rm -f \$l.log \$l.log.1 && ln -s /run/m65/\$l.log \$l.log || exit 1; done &&
          rm -f m65io.stats m65io.stats.tmp && ln -s /run/m65io.stats m65io.stats &&
          for u in $GONE_UNITS; do systemctl disable --now \$u 2>/dev/null; rm -f /etc/systemd/system/\$u; done;
          rm -f $GONE_FILES && sysctl -q -p /etc/sysctl.d/90-m65-console.conf &&

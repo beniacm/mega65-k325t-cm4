@@ -822,10 +822,16 @@ check` compares a board with this list (read-only) and passed on the current boa
    original flash contents first (`m65flash.py backup`).
 7. `rockchip/deploy/setup_rockchip.sh check` → `== root@192.168.1.143 matches the repo`.
 
-On both modules `install` keeps the journal in RAM (`journald.conf.d/m65-volatile.conf`) and
+On both modules `install` keeps the journal in RAM (`journald.conf.d/m65-volatile.conf`, and
+removes the persistent journal files of the image's first boots from `/var/log/journal`),
 `m65io` writes its twice-a-second stats to `/run/m65io.stats` (`/root/m65/m65io.stats` is a link
-to it): nothing writes to the module's flash continuously.  (Installed and checked on the Radxa
-CM3; the Luckfox has not been re-installed since.)
+to it), and the event logs of `m65io` and `m65d` go to RAM as well: `/run/m65/m65io.log`,
+`/run/m65/m65d.log` (the previous run's as `.log.1`; `/run/m65` comes from
+`/etc/tmpfiles.d/m65-run.conf`; `/root/m65/m65io.log` and `m65d.log` are links).  They are lost
+at power-off: stream them to the PC when a crash has to be caught
+(`ssh root@<module> tail -F /run/m65/m65d.log > m65d.log`).  Nothing writes to the module's flash
+continuously.  (Installed and checked on the Radxa CM3; the Luckfox has not been re-installed
+since: its logs still go to `/root/m65` until `install` is run there.)
 
 On a **Radxa CM3** the same script sets the module up differently (overlays instead of
 `config.txt` and a boot image): see "Radxa CM3 variant" below.

@@ -13,11 +13,12 @@ WorkingDirectory=/root/m65
 # input latency: event -> SPI p50 0.44 ms with 'performance' vs 0.86 ms with 'ondemand' (no
 # measurable temperature difference, the SoC stays ~57 C); SCHED_FIFO removes the multi-ms spikes
 ExecStartPre=-/bin/sh -c 'for g in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor; do echo performance > $$g; done'
-ExecStartPre=-/bin/mv -f /root/m65/m65d.log /root/m65/m65d.log.1
+# event log in RAM like m65io's (/run/m65, /root/m65/m65d.log is a link); previous one as .1
+ExecStartPre=-/bin/mv -f /run/m65/m65d.log /run/m65/m65d.log.1
 # optional local settings, e.g. M65_PLUG_HOST=<PC running scripts/plugd.py>:4530
 EnvironmentFile=-/root/m65/m65d.env
 ExecStart=/usr/bin/python3 -u /root/m65/m65d.py
-StandardOutput=append:/root/m65/m65d.log
+StandardOutput=append:/run/m65/m65d.log
 StandardError=inherit
 CPUSchedulingPolicy=fifo
 CPUSchedulingPriority=50

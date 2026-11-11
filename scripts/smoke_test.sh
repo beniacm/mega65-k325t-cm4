@@ -30,6 +30,12 @@ else
   RK_NAME="adb"
 fi
 rk_ok || fail "Rockchip not reachable over $RK_NAME"
+# no bitstream given: the module's own variant (the Luckfox one has another CM-bus pin map and must
+# not be loaded with a Radxa CM3 fitted)
+if [ -z "${1:-}" ] && rk_sh "tr -d '\\000' < /proc/device-tree/model" 2>/dev/null | grep -q "Radxa CM3"; then
+  BIT="$ROOT/mega65-core/bin/qmtech-k325t-cm4-radxacm3.bit"
+fi
+echo "bitstream: $BIT"
 "$ROOT/scripts/program.sh" "$BIT" | grep -q "PROGRAMMED=" || fail "JTAG programming"
 
 rk_push "$ROOT"/rockchip/{m65io.c,m65d.py,m65input.py,m65d_restart.sh,m65d_stop.sh} >/dev/null
