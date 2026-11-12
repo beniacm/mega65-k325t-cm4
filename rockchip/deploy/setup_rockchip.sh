@@ -78,6 +78,10 @@ FACTORY_SHA=bc8d2529492bab7dbf18632f6b1653acfbcc5e8632fb3da702e6c17fb9ea9531
 # Radxa CM3: SPI3 M0 CS0 overlay (pads GPIO4_A6 CS, B0 MISO, B2 MOSI, B3 CLK = BCM8..11)
 RADXA_SPI_OVL=rk3568-spi3-m0-cs0-spidev
 RADXA_SPI_PINS="134 136 138 139"
+# Radxa CM3, AExp A1200 hard disk (opt-in: M65_HDD=1 install): the second SPI, spi0-m0 CS0 (pads GPIO0_B5
+# CLK, B6 MOSI, C5 MISO, C6 CS = BCM3, 2, 6, 13) for hddsrv; the attention line BCM7 = GPIO4_C5 is a plain
+# GPIO (gpiochip4 line 21).  Revert: mv the .dtbo back to .dtbo.disabled, u-boot-update, reboot.
+RADXA_HDD_OVL=rk3568-spi0-m0-cs0-spidev
 # pads that carry the Linux picture to the FPGA (BT.656: GPIO4_B4 clock, GPIO3_C6..D5 data): no
 # other function may own them (only the video encoder, once the BT.656 overlay is in)
 RADXA_VIDEO_PINS="140 118 119 120 121 122 123 124 125"
@@ -178,6 +182,8 @@ check() {
     local ovl p own; ovl=$(echo "$out" | sed -n 's/^OVL *//p')
     case "$ovl" in *"/$RADXA_SPI_OVL.dtbo"*) echo "ok    overlay $RADXA_SPI_OVL in extlinux.conf";;
       *) echo "DIFF  overlay $RADXA_SPI_OVL not in extlinux.conf ($ovl)"; bad=1;; esac
+    case "$ovl" in *"/$RADXA_HDD_OVL.dtbo"*) echo "ok    overlay $RADXA_HDD_OVL in extlinux.conf (AExp hard disk SPI, opt-in)";;
+      *) echo "ok    overlay $RADXA_HDD_OVL off (AExp hard disk SPI; M65_HDD=1 install enables it)";; esac
     # the Linux picture: overlay file = the repo's, enabled, and the display pipeline live
     local dt
     dtbo_build
@@ -268,6 +274,8 @@ install() {
     spi="{ python3 -c 'import spidev' 2>/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends python3-spidev python3-dev gcc libc6-dev make >/dev/null; } &&
          { command -v loadkeys >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends kbd >/dev/null; } &&
          { [ -f /boot/dtbo/$RADXA_SPI_OVL.dtbo ] || mv /boot/dtbo/$RADXA_SPI_OVL.dtbo.disabled /boot/dtbo/$RADXA_SPI_OVL.dtbo; } &&
+         { [ '${M65_HDD:-0}' != 1 ] || [ -f /boot/dtbo/$RADXA_HDD_OVL.dtbo ] ||
+           { mv /boot/dtbo/$RADXA_HDD_OVL.dtbo.disabled /boot/dtbo/$RADXA_HDD_OVL.dtbo && echo 'hard disk SPI overlay $RADXA_HDD_OVL enabled (reboot)'; }; } &&
          { cmp -s $RADXA_VIDEO_OVL.dtbo /boot/dtbo/$RADXA_VIDEO_OVL.dtbo || echo 'BT.656 overlay $RADXA_VIDEO_OVL installed (reboot; the module HDMI goes off)'; } &&
          for f in /boot/dtbo/bt656*.dtbo; do [ \$f = /boot/dtbo/$RADXA_VIDEO_OVL.dtbo ] || rm -f \$f; done &&
          install -m 644 $RADXA_VIDEO_OVL.dtbo /boot/dtbo/$RADXA_VIDEO_OVL.dtbo && rm $RADXA_VIDEO_OVL.dtbo &&
