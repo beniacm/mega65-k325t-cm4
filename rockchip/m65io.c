@@ -553,6 +553,12 @@ static void write_stats(const char *path, const struct bstat *b)
 	rename(tmp, path);
 }
 
+/* SIGUSR1 (2026-11-12): the card image was changed from the module side (loop mount, mtools):
+ * drop the bridge's read cache, else the core may read stale copies of the sectors it read last
+ * (the FAT, a directory, a settings file) -- e.g. kill -USR1 $(pidof m65io) after the umount. */
+static volatile sig_atomic_t inval_req;
+static void on_usr1(int sig) { (void)sig; inval_req = 1; }
+
 int main(int argc, char **argv)
 {
 	const char *dev = "/dev/spidev3.0", *image = "/root/m65/card.img";
@@ -575,6 +581,7 @@ int main(int argc, char **argv)
 		}
 	}
 	signal(SIGPIPE, SIG_IGN);
+	signal(SIGUSR1, on_usr1);
 	if (!ethif)
 		ethif = eth_default();
 
@@ -622,6 +629,17 @@ int main(int argc, char **argv)
 	double next_up = now() + 5.0, up_every = 5.0;  /* link_upgrade() schedule, backs off on dropouts */
 
 	for (;;) {
+		if (inval_req) {
+			inval_req = 0;
+			if (pf_on) {
+				uint8_t tx[1] = { 0x15 }, rx[1];   /* SD_INVAL */
+				xfer(tx, rx, 1);
+				memset(pfs, 0, sizeof pfs);
+				pf_seen = 0xFFFFFFFFu;
+			}
+			printf("m65io: read cache dropped (SIGUSR1: card image changed)\n");
+			fflush(stdout);
+		}
 		int busy = 0;
 		bridge_status(&b);
 		st.polls++;
