@@ -647,7 +647,11 @@ int main(int argc, char **argv)
 			if ((t - down_since > 0.5 || next_probe == 0) && t >= next_probe) {
 				link_select(probe_max);
 				probe_max = spi_hz_want;         /* next outage (core switch): try all */
-				next_probe = t + 2.0;
+				/* 2026-11-12: every 0.1 s for the first 10 s of an outage, then every 2 s.
+				 * A freshly loaded core (JTAG, core switch) reads its SD card early: the
+				 * AExp core's QNICE reads its settings file 2 s after its start, once.  With
+				 * a 2-s probe the card came back too late about every other time. */
+				next_probe = t + (t - down_since < 10.0 ? 0.1 : 2.0);
 				next_up = t + up_every;
 			}
 			usleep(50000);
@@ -665,6 +669,10 @@ int main(int argc, char **argv)
 				xfer(tx, rx, 1);
 			}
 			printf("m65io: bridge v%u, read cache %s\n", b.ver, pf_on ? "on" : "off");
+			fflush(stdout);
+		}
+		if (!was_ok && down_since > 0) {
+			printf("m65io: bridge back after %.1f s\n", now() - down_since);
 			fflush(stdout);
 		}
 		was_ok = 1;
