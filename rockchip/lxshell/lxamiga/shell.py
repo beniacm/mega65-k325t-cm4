@@ -1,4 +1,4 @@
-"""shell.py -- the Amiga core's M2M shell on the Linux module (replaces the QNICE firmware).
+"""lxamiga/shell.py -- the Amiga core's M2M shell on the Linux module (replaces the QNICE firmware).
 
 AmigaShell runs inside m65d (no service of its own).  m65d calls:
     shell.poll(now)             often (every loop); returns the seconds until it wants the next call
@@ -20,9 +20,14 @@ import os
 import time
 import zlib
 
-import hostbus as hb
-import settings as st
-import ui
+from lxcore import settings as st
+from lxcore.browser import Browser
+from lxcore.display import FC_HE_LEFT, FC_HE_RIGHT, LD_PROGRESS
+from lxcore.keys import KEY, KEY_SPACE, KEY_HELP, KEY_RUNSTOP
+from lxcore.menu import Menu, CLOSE
+from lxcore.pages import show_pages, message
+from lxcore.runner import Runner
+from lxamiga import m2m as hb
 
 TRACK = 5632
 ADF_MIN, ADF_MAX = 160 * TRACK, 166 * TRACK
@@ -59,30 +64,19 @@ def bcd(v):
     return (v // 10) << 4 | v % 10
 
 
-class AmigaShell:
+class AmigaShell(Runner):
     def __init__(self, bus, menu_path, amiga_dir, card_img=None, state_path='/run/m65/amiga.state',
                  log=print, mono=time.monotonic, wall=time.time, localtime=time.localtime):
-        self.bus = bus
+        Runner.__init__(self, bus, hb.Overlay(bus), log, mono)
         self.menu_path = menu_path
         self.dir = amiga_dir
         self.card_img = card_img
         self.state_path = state_path
-        self.log = log
-        self.mono, self.wall, self.localtime = mono, wall, localtime
-        self.scr = ui.Screen()
-        self.scan = ui.KeyScanner()
-        self.task = None                # the foreground generator
-        self.task_kind = None           # 'start' | 'menu'
-        self.osm_req = None
-        self.want = None                # what it waits for: ui.KEY, a wake-up time, or None
-        self.keyq = []
-        self.menu_open = False
-        self.kbd_to_core = False        # keyboard forwarded (menu closed and connected)
+        self.wall, self.localtime = wall, localtime
         self.holding = False            # the shell itself holds the core
         self.mdef = None
         self.menu = None
         self.menu_id = None
-        self.osm_key = (67, 67, False)
         self.adf = None                 # path of the mounted ADF, or None
         self.adf_fd = None
         self.adf_ro = False
@@ -93,7 +87,6 @@ class AmigaShell:
         self.values = {}                # the stored settings (amiga.settings), by name
         self.saved_values = None
         self.next_bg = self.next_scr = self.next_rtc = 0.0
-        self.started = False
 
     # ------------------------------------------------------------------ files
     def path(self, name):
@@ -104,7 +97,7 @@ class AmigaShell:
         if not self.card_img or not os.path.exists(self.card_img):
             return None
         try:
-            import fatimg
+            from lxcore import fatimg
             img = fatimg.FatImage(self.card_img)
             try:
                 return img.read(name)
@@ -130,8 +123,8 @@ class AmigaShell:
                 continue
             if zlib.crc32(raw) & 0xFFFFFFFF == self.menu_id:
                 self.log('lxshell: menu data %s (id %08X)' % (p, self.menu_id))
-                return ui.MenuDef(json.loads(raw.decode('ascii')),
-                                  shell_section=getattr(self, 'shell_section', True)), None
+                return hb.menu_from_m2m(json.loads(raw.decode('ascii')),
+                                        getattr(self, 'shell_section', True), self.scr.dx), None
         return None, 'no menu data for this core (id %08X)' % self.menu_id
 
     def kickstart(self):
@@ -156,7 +149,7 @@ class AmigaShell:
             return v, 'settings loaded'
         raw = self.read_card(self.mdef.data['cfg_file']) if self.mdef else None
         if raw is not None:
-            v = st.import_legacy(self.mdef, raw)
+            v = hb.import_legacy(self.mdef, raw)
             if v is not None:
                 return v, 'settings imported from the card image (%d bytes)' % len(raw)
             return {}, 'card image settings unusable (%d bytes): factory defaults' % len(raw)
@@ -189,7 +182,7 @@ class AmigaShell:
             self.log('lxshell: ' + err)
         self.menu_err = err
         if self.mdef:
-            self.menu = ui.Menu(self.mdef, self.scr)
+            self.menu = Menu(self.mdef, self.scr)
         marker = b.rd(hb.START_MARKER)
         csr = b.rd(hb.CSR)
         if marker and not csr & hb.CSR_RESET:
@@ -205,88 +198,8 @@ class AmigaShell:
         self.started = False
         self.menu_open = self.kbd_to_core = self.holding = False
 
-    def filter_input(self, cols, ctrl):
-        if not self.started:
-            return cols, ctrl
-        if not self.kbd_to_core:
-            return [0] * len(cols), ctrl & ~0x30
-        a, b, combo = self.osm_key
-        cols = list(cols)
-        if combo:
-            if cols[a // 8] >> (a % 8) & 1:       # MEGA held: Run/Stop is the combo's part
-                cols[b // 8] &= ~(1 << (b % 8))
-        elif a not in (73, 74):
-            cols[a // 8] &= ~(1 << (a % 8))
-        return cols, ctrl
-
-    def keys(self, cols, ctrl, now):
-        if not self.started:
-            return
-        a, b, combo = self.osm_key
-        self.scan.scan(ui.m2m_keys(cols, ctrl, a, b, combo), now)
-        while True:
-            k = self.scan.getkey()
-            if not k:
-                break
-            if self.task is not None and self.want == ui.KEY:
-                self.keyq.append(k)
-            elif self.task is None and k == ui.KEY_HELP:
-                self.run_task(self.menu_session(), 'menu')
-            # other keys with the menu closed are consumed, like the firmware's main loop
-
-    def poll(self, now):
-        if not self.started:
-            return 0.5
-        self.step_task(now)
-        if self.task is None or self.want == ui.KEY:
-            self.background(now)
-            self.bus.flush()
-        if self.task is not None and self.want is None:
-            return 0.0
-        nxt = min(self.next_bg, self.next_scr, self.next_rtc or 1e18)
-        if self.task is not None and isinstance(self.want, float):
-            nxt = min(nxt, self.want)
-        return max(0.0, min(0.05, nxt - now))
-
-    # ------------------------------------------------------------------ task driver
-    def run_task(self, gen, kind):
-        self.task, self.task_kind, self.want = gen, kind, None
-        self.keyq.clear()
-        self.step_task(self.mono())
-
-    def step_task(self, now):
-        """resume the foreground generator while it can run; after a plain 'yield None' (between
-        two bus chunks) return to m65d's loop, so input is served before the next chunk"""
-        for _ in range(64):
-            if self.task is None:
-                break
-            if self.want == ui.KEY:
-                if not self.keyq:
-                    break
-                send = self.keyq.pop(0)
-            elif isinstance(self.want, float):
-                if now < self.want:
-                    break
-                send = None
-            else:
-                send = None
-            try:
-                req = self.task.send(send)
-            except StopIteration:
-                req = 'done'
-            self.scr.flush(self.bus)
-            self.apply_osm()
-            self.bus.flush()                # queued writes leave now, not with the next read
-            if req == 'done':
-                self.task = self.task_kind = self.want = None
-                break
-            now = self.mono()
-            if isinstance(req, tuple) and req[0] == 'sleep':
-                self.want = now + req[1]
-            else:
-                self.want = req
-            if req is None:
-                break
+    def next_wakeup(self):
+        return min(self.next_bg, self.next_scr, self.next_rtc or 1e18)
 
     @staticmethod
     def sleep(s):
@@ -298,7 +211,7 @@ class AmigaShell:
         self.log('lxshell: %s' % why)
         # a QNICE restart started the menu and the file browser afresh (OPTM_INIT, FB_INIT)
         if self.mdef:
-            self.menu = ui.Menu(self.mdef, self.scr)
+            self.menu = Menu(self.mdef, self.scr)
         self.__dict__.pop('browser', None)
         self.holding = True
         self.kbd_to_core = False
@@ -308,7 +221,7 @@ class AmigaShell:
         if self.mdef:
             self.values, how = self.load_values()
             sel = st.selection_from_values(self.mdef, self.values)
-            words = st.cfm_words(self.mdef, sel)
+            words = hb.cfm_words(self.mdef, sel)
             self.log('lxshell: ' + how)
         else:
             words = b.cfm_defaults()
@@ -316,7 +229,7 @@ class AmigaShell:
             self.log('lxshell: no menu data: the core starts with its factory defaults')
         b.cfm_write(words)
         self.cfm = words
-        self.update_osm_key()
+        self.update_open_key()
         # Kickstart: wait for it with the core held
         shown = False
         while True:
@@ -325,12 +238,12 @@ class AmigaShell:
                 break
             if not shown:
                 self.log('lxshell: ' + info.replace('\\n', ' '))
-                ui.message(self.scr, '\\n ' + info + '\\n\\n The core starts as soon as the file is there.')
-                self.osm_full(True)
+                message(self.scr, '\\n ' + info + '\\n\\n The core starts as soon as the file is there.')
+                self.show_full()
                 shown = True
             yield ('sleep', 1.0)
         if shown:
-            self.osm_off()
+            self.hide()
         t0 = self.mono()
         for _ in b.write_bytes_iter(hb.DEV_KICK, 0, data):
             yield None
@@ -363,7 +276,7 @@ class AmigaShell:
         b = self.bus
         self.log('lxshell: adopting the running Amiga (start marker set)')
         self.cfm = b.cfm_read()
-        self.update_osm_key()
+        self.update_open_key()
         if self.mdef:
             v = st.load(self.path('amiga.settings'))
             self.saved_values = dict(v) if v is not None else None
@@ -383,68 +296,37 @@ class AmigaShell:
             b.wr(hb.CSR, (csr & ~hb.CSR_OSM) | CSR_RUN_IO)
             self.kbd_to_core = True
 
-    def update_osm_key(self):
+    def update_open_key(self):
         c = self.mdef.data['c_menu'] if self.mdef else {}
 
         def on(name):
             n = c.get(name)
             return n is not None and self.cfm[n // 16] >> (n % 16) & 1
         if on('OSMKEY_F11'):
-            self.osm_key = (69, 67, False)
+            self.open_key = (69, 67, False)
         elif on('OSMKEY_F13'):
-            self.osm_key = (70, 67, False)
+            self.open_key = (70, 67, False)
         elif on('OSMKEY_COMBO'):
-            self.osm_key = (61, 63, True)
+            self.open_key = (61, 63, True)
         else:
-            self.osm_key = (67, 67, False)
+            self.open_key = (67, 67, False)
 
-    # ------------------------------------------------------------------ overlay windows
-    # A window change is a request, carried out after the next VRAM flush, so a window never
-    # shows the content of the previous one (the firmware drew with the overlay off or the same
-    # window).  'off' is immediate.
-    def osm_full(self, on=True):
-        self.osm_req = 'full' if on else 'off'
-        if not on:
-            self.apply_osm()
-
-    def osm_menu(self):
-        self.osm_req = 'menu'
-
-    def osm_off(self):
-        self.osm_req = 'off'
-        self.apply_osm()
-
-    def apply_osm(self):
-        req, self.osm_req = getattr(self, 'osm_req', None), None
-        if req is None:
-            return
-        b = self.bus
-        csr = b.rd(hb.CSR)
-        if req == 'off':
-            b.wr(hb.CSR, csr & ~hb.CSR_OSM)
-            return
-        self.scr.flush(b)
-        if req == 'full':
-            b.wr(hb.OSM_XY, 0)
-            b.wr(hb.OSM_DXDY, ui.DX << 8 | ui.DY)
-        else:
-            d = self.mdef
-            b.wr(hb.OSM_XY, d.x << 8 | d.y)
-            b.wr(hb.OSM_DXDY, d.dx << 8 | d.dy)
-        b.wr(hb.CSR, csr | hb.CSR_OSM)
+    def show_menu_window(self):
+        d = self.mdef
+        self.show_window(d.x, d.y, d.dx, d.dy)
 
     # ------------------------------------------------------------------ the menu
     def menu_session(self):
         b = self.bus
         if not self.mdef:
-            ui.message(self.scr, '\\n ' + (self.menu_err or 'no menu data') +
+            message(self.scr, '\\n ' + (self.menu_err or 'no menu data') +
                        '\\n\\n The core runs with its factory\\n defaults.\\n\\n ' + STR_SPACE)
             self.menu_open = True
             self.kbd_to_core = False
-            self.osm_full(True)
-            while (yield ui.KEY) not in (ui.KEY_SPACE, ui.KEY_HELP, ui.KEY_RUNSTOP):
+            self.show_full()
+            while (yield KEY) not in (KEY_SPACE, KEY_HELP, KEY_RUNSTOP):
                 pass
-            self.osm_off()
+            self.hide()
             yield from self.close_menu()
             return
         m = self.menu
@@ -456,18 +338,18 @@ class AmigaShell:
         b.wr(hb.CSR, csr)
         self.kbd_to_core = False
         self.menu_open = True
-        m.stdsel = st.selection_from_cfm(self.mdef, self.cfm, self.values)
+        m.stdsel = hb.selection_from_cfm(self.mdef, self.cfm, self.values)
         adf_n = self.adf_index()
         m.stdsel[adf_n] = self.adf is not None
         m.labels[adf_n] = os.path.basename(self.adf) if self.adf else None
         m.on_space = self.space_eject
         before = st.values_from_selection(self.mdef, m.stdsel)     # ROSM_REM_OLD
         m.show()
-        self.osm_menu()
+        self.show_menu_window()
         end = yield from m.run(m.selected, self.on_select)
-        self.osm_off()
+        self.hide()
         self.save_settings(before)
-        m.selected = m.d.start if m.d.items[end].word == ui.OPTM_CLOSE else end
+        m.selected = m.d.start if m.d.items[end].word == CLOSE else end
         yield from self.close_menu()
 
     def close_menu(self):
@@ -478,31 +360,30 @@ class AmigaShell:
         self.kbd_to_core = True
 
     def adf_index(self):
-        return next(n for n, it in enumerate(self.mdef.items) if it.crtrom)
+        return next(n for n, it in enumerate(self.mdef.items) if it.file)
 
     def on_select(self, n, word, r9, key):
         """OPTM_CB_SEL + our OSM_SEL_PRE / OSM_SEL_POST"""
         m, d = self.menu, self.mdef
         it = d.items[n]
-        if it.help:
-            idx = sum(1 for k in range(n) if d.items[k].help) + 1
-            self.osm_off()
-            pages = ui.show_pages(self.scr, d.help_sets[idx])
+        if it.help is not None:
+            self.hide()
+            pages = show_pages(self.scr, d.help_sets[it.help])
             req = next(pages)                   # first page drawn ...
-            self.osm_full(True)                 # ... shown after the flush
+            self.show_full()                    # ... shown after the flush
             while True:
                 k = yield req
                 try:
                     req = pages.send(k)
                 except StopIteration:
                     break
-            self.osm_off()
+            self.hide()
             m.show()
-            self.osm_menu()
+            self.show_menu_window()
             m.set_item(n, False)
-        elif it.crtrom:
+        elif it.file:
             yield from self.mount_dialog(n)
-        if it.g == ui.OPTM_CLOSE:
+        if it.g == CLOSE:
             return
         if it.shell:
             self.values[it.key] = int(m.stdsel[n])
@@ -516,19 +397,19 @@ class AmigaShell:
         elif name == 'SCRRELOAD':
             row = m.row_of(n)
             self.scr.printxy('<Loading Screen Config>', d.x + 1, d.y + 1 + row)
-            self.scr.flush(self.bus)
+            self.scr.flush(self.port)
             yield ('sleep', 0.5)
             self.load_screen_offsets()
             m.stdsel[n] = False
             yield from self.apply_cfm()
             m.show()
         elif name == 'OSMKEY':
-            self.update_osm_key()
+            self.update_open_key()
 
     def apply_cfm(self):
         """menu selection -> CFM; topology lines only with the core held (lead's rule)"""
         b, d = self.bus, self.mdef
-        new = st.cfm_words(d, self.menu.stdsel, self.cfm)
+        new = hb.cfm_words(d, self.menu.stdsel, self.cfm)
         changed = [w for w in range(16) if new[w] != self.cfm[w]]
         if not changed:
             return
@@ -576,35 +457,35 @@ class AmigaShell:
     # ------------------------------------------------------------------ floppy
     def mount_dialog(self, n):
         m, s = self.menu, self.scr
-        self.osm_off()
+        self.hide()
         s.frame_fullscr()
         s.gotoxy(1, 1)
-        self.osm_full(True)                     # after the next flush
+        self.show_full()                        # after the next flush
         if not hasattr(self, 'browser'):
             def hide(name, is_dir):
                 return not is_dir and not name.endswith('.ADF')
-            self.browser = ui.Browser(getattr(self, 'browse_root', None) or self.dir, s, hide,
+            self.browser = Browser(getattr(self, 'browse_root', None) or self.dir, s, hide,
                                       start=self.dir)
         while True:
             path = yield from self.browser.run()
             if path is None:                    # Run/Stop: back, the menu shows the old state
-                self.osm_off()
+                self.hide()
                 m.stdsel[n] = self.adf is not None
                 break
             err = yield from self.mount(path)
             if err is None:
-                self.osm_off()
+                self.hide()
                 m.labels[n] = os.path.basename(path)
                 m.set_item(n, True)
                 break
             s.clrinner()
             s.printstr(err + '\\n' + STR_SPACE)
-            while (yield ui.KEY) != ui.KEY_SPACE:
+            while (yield KEY) != KEY_SPACE:
                 pass
             s.clrinner()
         m.labels[n] = os.path.basename(self.adf) if self.adf else None
         m.show()
-        self.osm_menu()
+        self.show_menu_window()
 
     def mount(self, path):
         """LOAD_IMAGE + PREP_LOAD_IMAGE + HANDLE_CRTROM_M for the ADF device; None or an error"""
@@ -625,13 +506,13 @@ class AmigaShell:
                 return 'Error code: 0001\\n' + WRN_ADF_SIZE
             data = f.read()
         # progress bar on the bottom frame line, like LOAD_IMAGE
-        w = ui.DX - 6
-        s.printxy(chr(ui.FC_HE_LEFT) + ' ' * w + chr(ui.FC_HE_RIGHT), 2, ui.DY - 1)
+        w = s.dx - 6
+        s.printxy(chr(FC_HE_LEFT) + ' ' * w + chr(FC_HE_RIGHT), 2, s.dy - 1)
         steps, done = max(1, len(data) // w), 0
         for pos in b.write_bytes_iter(hb.DEV_ADF, 0, data):
             k = min(w, pos // steps)
             if k > done:
-                s.printxy(chr(ui.LD_PROGRESS) * (k - done), 3 + done, ui.DY - 1)
+                s.printxy(chr(LD_PROGRESS) * (k - done), 3 + done, s.dy - 1)
                 done = k
             yield None
         b.dev_wr(hb.DEV_ADF, CSR_WIN, 1, size & 0xFFFF)
@@ -680,7 +561,7 @@ class AmigaShell:
         """SPACE on the highlighted ADF line with a disk in df0 (issue #16): eject first (the
         Amiga sees df0 empty and stops writing), then flush the written tracks, then disarm.
         The menu label reverts to <Load> and the line's marker goes (CRTROM_MLST_GET)."""
-        if not self.mdef.items[n].crtrom or self.adf is None:
+        if not self.mdef.items[n].file or self.adf is None:
             return False
         b, m = self.bus, self.menu
         b.dev_wr(hb.DEV_ADF, CSR_WIN, 0, REQ_IDLE)

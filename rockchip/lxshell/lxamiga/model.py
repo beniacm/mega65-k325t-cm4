@@ -15,7 +15,7 @@ The model's time is explicit: tick(ms) advances the anti-thrash countdown.  amig
 data) plays the track engine (commits a track into the image and raises its dirty bit).
 """
 
-from hostbus import HostStatus, ST_LEN
+from lxcore.bus import HostStatus, ST_LEN
 
 TRACK = 5632
 DX, DY = 45, 36

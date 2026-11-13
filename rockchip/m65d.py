@@ -533,12 +533,13 @@ class Daemon:
             return
         self.lx_retry = time.time() + 2.0
         try:
-            import hostbus
-            import shell as lxshell
-            link = hostbus.SpiLink(self.br.spi)
+            from lxcore.bus import SpiLink
+            from lxamiga import m2m
+            from lxamiga.shell import AmigaShell
+            link = SpiLink(self.br.spi)
             if link.status().version == 0:
                 return                  # a QNICE bitstream: the firmware serves the menu
-            lx = lxshell.AmigaShell(hostbus.HostBus(link), self.args.amiga_menus, self.args.amiga_dir,
+            lx = AmigaShell(m2m.M2MBus(link), self.args.amiga_menus, self.args.amiga_dir,
                                     card_img=self.args.card, state_path=self.args.amiga_state,
                                     log=lambda m: print("m65d: " + m, flush=True))
             lx.attach()
@@ -576,7 +577,7 @@ class Daemon:
                 x.task_kind, x.menu_open, x.kbd_to_core, x.adf, x.rtc_on(),
                 ",".join("%s=%d" % kv for kv in x.bus.stats.items()))
         if arg == "import":
-            import fatimg
+            from lxcore import fatimg
             dst = self.args.amiga_dir
             os.makedirs(dst, exist_ok=True)
             img = fatimg.FatImage(self.args.card)

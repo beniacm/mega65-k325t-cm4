@@ -1,4 +1,5 @@
-"""hostbus.py -- the Linux shell's access to the Amiga core's host master (PROTOCOL.md v0).
+"""lxcore/bus.py -- the Linux shell's access to a core's host master (PROTOCOL.md: rk_bridge
+HOST_PUT / HOST_GET / HOST_RESET and the master's command stream).
 
 Two layers:
   * a *link* moves raw bytes: put(bytes) into the master's PUT FIFO, get(n) from its GET FIFO,
@@ -9,37 +10,11 @@ Two layers:
     between chunks (the *_iter methods) never holds the link longer than one chunk: the input path
     of m65d gets the bridge between two chunks (about 1.1 ms at 33 MHz).
 
-All addresses are QNICE addresses as the firmware used them (INVENTORY.md section 1).
+Addresses are the core's own (16-bit words, bursts into device windows); the register map
+belongs to the core adapter (lxamiga/m2m.py for the Amiga).
 """
 
 import time
-
-# ---- QNICE register map (unchanged from the firmware, PROTOCOL.md section 3)
-CSR = 0xFFE0
-OSM_XY = 0xFFE1
-OSM_DXDY = 0xFFE2
-ASCAL_MODE = 0xFFE3
-CFD_ADDR, CFD_DATA = 0xFFF0, 0xFFF1
-CFM_ADDR, CFM_DATA = 0xFFF2, 0xFFF3
-RAMROM_DEV, RAMROM_4KWIN = 0xFFF4, 0xFFF5
-RAMROM_DATA = 0x7000
-MASTER_VERSION = 0xFFF8
-MENU_ID_HI, MENU_ID_LO = 0xFFF9, 0xFFFA
-START_MARKER = 0xFFFB
-CFM_DEFAULTS = 0xFFC0                     # 0xFFC0..0xFFCF
-
-CSR_RESET, CSR_PAUSE, CSR_OSM = 0x0001, 0x0002, 0x0004
-CSR_KBD, CSR_JOY1, CSR_JOY2 = 0x0008, 0x0010, 0x0020
-CSR_ASCAL_AUTO = 0x0800
-CSR_POWERUP = 0x0839
-
-# ---- devices behind RAMROM_DEV
-DEV_VRAM_DATA, DEV_VRAM_ATTR = 0x0000, 0x0001
-DEV_ASCAL_PPHASE = 0x0003
-DEV_RTC = 0x0006
-DEV_SYS_INFO = 0x00FF
-DEV_KICK = 0x0100
-DEV_ADF = 0x0103
 
 # ---- bridge opcodes and STATUS layout
 OP_STATUS, OP_HOST_PUT, OP_HOST_GET, OP_HOST_RESET = 0x01, 0x80, 0x81, 0x82
@@ -174,27 +149,13 @@ class HostBus:
         a = self._collect(2)
         return a[0] << 8 | a[1]
 
-    def rd_many(self, addrs, dev=None, win=None):
-        """several reads in one round trip (optionally after selecting a device and window)"""
-        if dev is not None:
-            self.wr(RAMROM_DEV, dev)
-            self.wr(RAMROM_4KWIN, win)
+    def rd_many(self, addrs):
+        """several reads in one round trip"""
         for a in addrs:
             self.out += bytes([C_RD, a >> 8, a & 0xFF])
         self.expect += 2 * len(addrs)
         d = self._collect(2 * len(addrs))
         return [d[i] << 8 | d[i + 1] for i in range(0, len(d), 2)]
-
-    def dev_wr(self, dev, win, off, data):
-        """one write into a device (sets device and window first: bursts leave them changed)"""
-        self.wr(RAMROM_DEV, dev)
-        self.wr(RAMROM_4KWIN, win)
-        self.wr(RAMROM_DATA + off, data)
-
-    def dev_rd(self, dev, win, off):
-        self.wr(RAMROM_DEV, dev)
-        self.wr(RAMROM_4KWIN, win)
-        return self.rd(RAMROM_DATA + off)
 
     def sync(self):
         """MARK barrier: returns when everything sent before has completed"""
@@ -269,23 +230,3 @@ class HostBus:
         for _, d in self.read_bytes_iter(dev, addr, n):
             out += d
         return bytes(out)
-
-    # ---- CFM helpers
-    def cfm_write(self, words, only=None):
-        """write CFM windows (each WR to CFM_DATA is atomic per 16-bit window)"""
-        for w in range(16) if only is None else only:
-            self.wr(CFM_ADDR, w)
-            self.wr(CFM_DATA, words[w])
-
-    def cfm_read(self):
-        out = []
-        for w in range(16):
-            self.wr(CFM_ADDR, w)
-            out.append(self.rd(CFM_DATA))
-        return out
-
-    def menu_id(self):
-        return self.rd(MENU_ID_HI) << 16 | self.rd(MENU_ID_LO)
-
-    def cfm_defaults(self):
-        return [self.rd(CFM_DEFAULTS + i) for i in range(16)]

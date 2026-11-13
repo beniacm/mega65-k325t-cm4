@@ -16,7 +16,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
 
-import model as mdl            # noqa: E402
+from lxamiga import model as mdl         # noqa: E402
 import test_lxshell as T       # noqa: E402
 import m65d                    # noqa: E402
 

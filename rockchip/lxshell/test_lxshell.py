@@ -16,12 +16,12 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-import hostbus as hb           # noqa: E402
-import menu_gen                # noqa: E402
-import model as mdl            # noqa: E402
-import settings as st          # noqa: E402
-import shell as sh             # noqa: E402
-import ui                      # noqa: E402
+from lxamiga import m2m as hb            # noqa: E402
+from lxamiga import menu_gen             # noqa: E402
+from lxamiga import model as mdl         # noqa: E402
+from lxamiga import shell as sh          # noqa: E402
+from lxcore import settings as st        # noqa: E402
+from lxcore import display, keys         # noqa: E402
 
 AEXP = os.path.expanduser(os.environ.get('AEXP', '~/projects/mega65/aexp-aga'))
 VERBOSE = '-v' in sys.argv
@@ -61,7 +61,7 @@ class Rig:
             with open(os.path.join(self.dir, 'amiga.settings'), 'w') as f:
                 json.dump(settings, f)
         self.m = model or mdl.ModelMaster(menu_id=mid, defaults=defaults)
-        self.bus = hb.HostBus(self.m)
+        self.bus = hb.M2MBus(self.m)
         self.t = [1000.0]
         self.logs = []
         self.state = os.path.join(tmp, 'amiga.state')
@@ -184,8 +184,8 @@ def test_menu_draw_and_close():
         assert any('Linux Module' in row for row in rows)
         assert any('RAM: 512K+512K Slow' in row for row in rows)
         # headline colour, cursor on the ADF line (OPTM_G_START)
-        assert r.m.vram[1][1 * 45 + 21] == ui.SA_TTLE
-        assert r.m.vram[1][3 * 45 + 21] == ui.SA_STD_INV
+        assert r.m.vram[1][1 * 45 + 21] == display.SA_TTLE
+        assert r.m.vram[1][3 * 45 + 21] == display.SA_STD_INV
         r.key(r.HELP)
         r.run(0.5)
         assert not r.m.csr & hb.CSR_OSM and r.m.csr & hb.CSR_KBD
@@ -197,7 +197,7 @@ def nav_to(r, text):
     for _ in range(40):
         rows = r.screen()
         for y in range(36):
-            if r.m.vram[1][y * 45 + 21] == ui.SA_STD_INV:
+            if r.m.vram[1][y * 45 + 21] == display.SA_STD_INV:
                 if text in rows[y]:
                     return
         r.key(r.DOWN)
@@ -363,32 +363,32 @@ def test_menu_mismatch_boots_defaults():
 
 def test_legacy_import():
     data, mid, defaults = menu_data()
-    mdef = ui.MenuDef(json.loads(data))
+    mdef = hb.menu_from_m2m(json.loads(data))
     bits = [defaults[n // 16] >> (n % 16) & 1 for n in range(94)]
     c = mdef.data['c_menu']
     bits[c['FAST_NONE']], bits[c['FAST_4M']] = 0, 1
-    v = st.import_legacy(mdef, bytes(bits))
+    v = hb.import_legacy(mdef, bytes(bits))
     sel = st.selection_from_values(mdef, v)
-    assert st.cfm_words(mdef, sel) == st.cfm_words(mdef, [bool(bits[it.cfm_bit]) if it.cfm_bit is not None
+    assert hb.cfm_words(mdef, sel) == hb.cfm_words(mdef, [bool(bits[it.cfm_bit]) if it.cfm_bit is not None
                                                           else False for it in mdef.items])
     old = bytes(bits[:87] + bits[88:])               # a 93-byte file (no IDE line)
-    v93 = st.import_legacy(mdef, old)
+    v93 = hb.import_legacy(mdef, old)
     assert v93['FAST:4 MB Fast RAM'] == 1 and v93['IDE:IDE Hard Disk'] == 0
-    assert st.import_legacy(mdef, b'\xff' + bytes(93)) is None
-    assert st.import_legacy(mdef, bytes([2] * 94)) is None
-    assert st.import_legacy(mdef, bytes(50)) is None
+    assert hb.import_legacy(mdef, b'\xff' + bytes(93)) is None
+    assert hb.import_legacy(mdef, bytes([2] * 94)) is None
+    assert hb.import_legacy(mdef, bytes(50)) is None
 
 
 def test_key_word():
     cols = [0] * 9
     cols[8] |= 1 << 3                                 # Help (67)
-    assert ui.m2m_keys(cols, 0) == ui.KEY_HELP
-    assert ui.m2m_keys([0] * 9, 0x10) == ui.KEY_UP
+    assert keys.m65_keys(cols, 0) == keys.KEY_HELP
+    assert keys.m65_keys([0] * 9, 0x10) == keys.KEY_UP
     cols = [0] * 9
     cols[7] |= 1 << 5 | 1 << 7                        # MEGA + Run/Stop
-    assert ui.m2m_keys(cols, 0, 61, 63, True) == ui.KEY_HELP
+    assert keys.m65_keys(cols, 0, 61, 63, True) == keys.KEY_HELP
     cols[7] = 1 << 7
-    assert ui.m2m_keys(cols, 0, 61, 63, True) == ui.KEY_RUNSTOP
+    assert keys.m65_keys(cols, 0, 61, 63, True) == keys.KEY_RUNSTOP
 
 
 if __name__ == '__main__':
