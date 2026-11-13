@@ -256,6 +256,36 @@ def test_topology_change_holds_the_core():
         assert rel[c['FAST_2M'] // 16] >> (c['FAST_2M'] % 16) & 1
 
 
+def test_aga_memory_summary():
+    """with the AGA chipset the RAM summary shows what the core runs (2 MB chip, no slow RAM), not
+    the memory radio's choice; the choice itself stays stored; back to ECS: the choice again"""
+    with tmpdir() as tmp:
+        r = started(Rig(tmp))
+        r.key(r.HELP)
+        ram = [row for row in r.screen() if 'RAM:' in row]
+        assert ram and 'RAM: 512K+512K Slow' in ram[0], ram
+        nav_to(r, 'RAM:')
+        r.key(r.RETURN)
+        nav_to(r, 'AGA Chipset')
+        r.key(r.RETURN)
+        r.key(r.RUNSTOP)                        # back to the main menu
+        ram = [row for row in r.screen() if 'RAM:' in row]
+        assert ram and 'RAM: ' + sh.AGA_MEMORY in ram[0], ram
+        r.key(r.HELP)
+        r.run(0.5)
+        v = st.load(os.path.join(r.dir, 'amiga.settings'))
+        assert v['CHIPSET:AGA Chipset'] == 1 and v['MEM:512K+512K Slow'] == 1, v
+        r.key(r.HELP)                           # opened again (from the CFM): still in effect
+        assert any('RAM: ' + sh.AGA_MEMORY in row for row in r.screen()), r.screen()
+        nav_to(r, 'RAM:')
+        r.key(r.RETURN)
+        nav_to(r, 'ECS Chipset')
+        r.key(r.RETURN)
+        r.key(r.RUNSTOP)
+        ram = [row for row in r.screen() if 'RAM:' in row]
+        assert ram and 'RAM: 512K+512K Slow' in ram[0], ram
+
+
 def test_video_change_without_hold():
     with tmpdir() as tmp:
         r = started(Rig(tmp))

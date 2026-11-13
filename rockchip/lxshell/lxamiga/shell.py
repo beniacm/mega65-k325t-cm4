@@ -58,6 +58,8 @@ WRN_ADF_SIZE = ("\\n\\nThis is not a valid ADF disk image:\\n"
                 "dumps up to 934,912 bytes are accepted)."
                 "\\n\\nPress SPACE to continue.\\n")
 STR_SPACE = "Press Space to continue."
+# what the RAM submenu's summary shows with the AGA chipset chosen (summary_in_effect)
+AGA_MEMORY = "2M Chip (AGA)"
 
 
 def bcd(v):
@@ -189,7 +191,7 @@ class AmigaShell(Runner):
             self.log('lxshell: ' + err)
         self.menu_err = err
         if self.mdef:
-            self.menu = Menu(self.mdef, self.scr)
+            self.menu = self.new_menu()
         marker = b.rd(hb.START_MARKER)
         csr = b.rd(hb.CSR)
         if marker and not csr & hb.CSR_RESET:
@@ -281,7 +283,7 @@ class AmigaShell(Runner):
         self.log('lxshell: %s' % why)
         # a QNICE restart started the menu and the file browser afresh (OPTM_INIT, FB_INIT)
         if self.mdef:
-            self.menu = Menu(self.mdef, self.scr)
+            self.menu = self.new_menu()
         self.__dict__.pop('browser', None)
         self.holding = True
         self.kbd_to_core = False
@@ -344,6 +346,33 @@ class AmigaShell(Runner):
             self.open_key = (61, 63, True)
         else:
             self.open_key = (67, 67, False)
+
+    def new_menu(self):
+        m = Menu(self.mdef, self.scr)
+        m.summary_hook = self.summary_in_effect
+        return m
+
+    def summary_in_effect(self, n, text):
+        """the RAM submenu's summary shows the memory radio's choice ("512K+512K Slow"); with the
+        AGA chipset the core ignores that choice: AGA runs with 2 MB chip RAM (the cache's) and no
+        slow RAM (mega65.vhd: main_mem_chip2m, main_mem_slow), so the summary says so.  Only the
+        text shown changes: the menu file, the stored choice and the CFM bits stay as they are."""
+        d = self.mdef
+        c = d.data['c_menu']
+        aga, mem = c.get('CHIPSET_AGA'), d.data['core_groups'].get('MEM')
+        if aga is None or mem is None or not self.menu.stdsel[self.item_of_line(aga)]:
+            return text
+        for k in range(n + 1, len(d.items)):        # is this the submenu with the memory radio?
+            it = d.items[k]
+            if it.submenu:
+                return text
+            if it.g == mem and it.radio:
+                return AGA_MEMORY
+        return text
+
+    def item_of_line(self, line):
+        """menu item index of a config.vhd line (the shell section shifts the lines after it)"""
+        return next(n for n, it in enumerate(self.mdef.items) if it.cfm_bit == line)
 
     def show_menu_window(self):
         d = self.mdef

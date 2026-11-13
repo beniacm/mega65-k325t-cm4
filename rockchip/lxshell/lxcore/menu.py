@@ -140,6 +140,9 @@ class Menu:
         self.stdsel = [False] * mdef.size
         self.labels = {}                # item index -> replacement for "%s" (ADF file name, ...)
         self.on_space = None            # generator(n) -> True if it used the SPACE (ADF eject)
+        # (n, summary) -> the text shown for submenu n's "%s": the adapter may show what is in effect
+        # when the chosen item is not (None = the chosen item, as M2M does)
+        self.summary_hook = None
 
     # _OPTM_STRUCT: per item its (sub)menu number and whether it is visible at the current level
     def struct(self):
@@ -191,6 +194,8 @@ class Menu:
         it = self.d.items[n]
         if it.submenu:
             s = self.summary(n)
+            if self.summary_hook is not None:
+                s = self.summary_hook(n, s)
             return s if s is not None else ''
         if it.file:
             return self.labels.get(n) or self.d.strings.get('file', '<Load>')
