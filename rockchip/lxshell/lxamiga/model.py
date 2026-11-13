@@ -46,14 +46,17 @@ class ModelMaster:
     def configure(self):
         """a fresh FPGA configuration: everything at power-up, marker cleared"""
         self.marker = 0
+        self.reset_ms = 0
         self._registers_powerup()
         self.inbuf = bytearray()
         self.getbuf = bytearray()
         self.flags = 0
 
-    def long_press(self):
-        """the M2M reset: master registers to power-up values except the start marker"""
+    def long_press(self, held_ms=0):
+        """the M2M reset: master registers to power-up values except the start marker; for held_ms
+        (the press still going on) every register / device write is ignored"""
         self._registers_powerup()
+        self.reset_ms = held_ms
         self.events.append(('m2m_reset', None))
 
     def _registers_powerup(self):
@@ -80,6 +83,7 @@ class ModelMaster:
     # ---- the core side (test hooks)
     def tick(self, ms):
         self.wbc_cnt = max(0, self.wbc_cnt - ms)
+        self.reset_ms = max(0, self.reset_ms - ms)
 
     def amiga_writes(self, track, data=None):
         """the track engine commits a track the Amiga wrote and raises its dirty bit"""
@@ -190,6 +194,8 @@ class ModelMaster:
     # ---- QNICE address space
     def write(self, addr, v):
         self.writes += 1
+        if self.reset_ms:
+            return                          # held in the M2M reset
         if 0x7000 <= addr <= 0x7FFF:
             return self._dev_write(addr - 0x7000, v)
         if addr == 0xFFE0:

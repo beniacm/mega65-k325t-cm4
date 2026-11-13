@@ -342,6 +342,36 @@ def test_long_press_reloads():
         assert r.m.cfm == menu_data()[2]
 
 
+def test_long_press_held():
+    """the press lasts 3.5 s (registers held at power-up, writes ignored): exactly one reload, after
+    the press, with the settings and the whole Kickstart; and a press that comes back in the middle
+    of the reload's Kickstart is caught before the release"""
+    with tmpdir() as tmp:
+        r = started(Rig(tmp))
+        r.m.long_press(held_ms=3500)
+        r.run(6.0)
+        assert len([l for l in r.logs if 'reload after an M2M reset' in l]) == 1, r.logs
+        assert any('still held' in l for l in r.logs), r.logs
+        assert not r.m.held() and r.m.marker == 1 and r.m.cfm == menu_data()[2]
+        assert bytes(r.m.kick[:len(r.kick)]) == r.kick
+        assert [e for e in r.m.events if e[0] == 'release'][-1][1] == menu_data()[2]
+        # a second press while the reload writes the Kickstart
+        r.m.kick[:] = bytes(len(r.m.kick))
+        orig, target = r.m._dev_write, r.m.kick_writes + 1000
+        def hook(o, v):
+            orig(o, v)
+            if r.m.kick_writes == target:
+                r.m.long_press(held_ms=300)
+        r.m._dev_write = hook
+        n0 = len(r.logs)
+        r.m.long_press()
+        r.run(4.0)
+        log = r.logs[n0:]
+        assert any('came back during the start' in l for l in log), log
+        assert not r.m.held() and r.m.cfm == menu_data()[2]
+        assert bytes(r.m.kick[:len(r.kick)]) == r.kick
+
+
 def test_rtc_opt_in():
     with tmpdir() as tmp:
         r = started(Rig(tmp, settings={'format': 1, 'values': {'shell:rtc': 1}}))

@@ -208,15 +208,9 @@ class AmigaShell(Runner):
         yield ('sleep', s)
 
     # ------------------------------------------------------------------ start
-    def start_seq(self, why):
+    def load_held(self):
+        """the start's writes with the core held; returns the CFM words written"""
         b = self.bus
-        self.log('lxshell: %s' % why)
-        # a QNICE restart started the menu and the file browser afresh (OPTM_INIT, FB_INIT)
-        if self.mdef:
-            self.menu = Menu(self.mdef, self.scr)
-        self.__dict__.pop('browser', None)
-        self.holding = True
-        self.kbd_to_core = False
         csr = b.rd(hb.CSR)
         b.wr(hb.CSR, csr | hb.CSR_RESET)
         # settings
@@ -230,6 +224,18 @@ class AmigaShell(Runner):
             self.values = {}
             self.log('lxshell: no menu data: the core starts with its factory defaults')
         b.cfm_write(words)
+        if b.cfm_read() != words:
+            # the master ignores writes while the M2M reset is held (a long press still going on)
+            self.log('lxshell: the M2M reset is still held: waiting for its end')
+            for _ in range(300):                # 30 s: no press lasts that long
+                yield ('sleep', 0.1)
+                b.cfm_write(words)
+                if b.cfm_read() == words:
+                    break
+            else:
+                self.log('lxshell: CFM read-back still differs after 30 s: going on')
+            csr = b.rd(hb.CSR)
+            b.wr(hb.CSR, csr | hb.CSR_RESET)
         self.cfm = words
         self.update_open_key()
         # Kickstart: wait for it with the core held
@@ -261,6 +267,25 @@ class AmigaShell(Runner):
         self.write_state()
         if self.rtc_on():
             self.rtc_write()
+        return words
+
+    def start_seq(self, why):
+        b = self.bus
+        self.log('lxshell: %s' % why)
+        # a QNICE restart started the menu and the file browser afresh (OPTM_INIT, FB_INIT)
+        if self.mdef:
+            self.menu = Menu(self.mdef, self.scr)
+        self.__dict__.pop('browser', None)
+        self.holding = True
+        self.kbd_to_core = False
+        for _ in range(5):
+            words = yield from self.load_held()
+            # a long press (M2M reset, SW3 or m65d hold_reset) keeps the master's registers at
+            # their power-up values for as long as it lasts, and a new press may come in between:
+            # release only when the CFM words written before the Kickstart are still there
+            if b.cfm_read() == words:
+                break
+            self.log('lxshell: the M2M reset came back during the start: loading again')
         # release (RP_SYSTEM_START): keyboard and joysticks off, core running, ascal custom
         csr = b.rd(hb.CSR)
         b.wr(hb.CSR, csr & ~(hb.CSR_RESET | CSR_RUN_IO | hb.CSR_ASCAL_AUTO | hb.CSR_PAUSE))
