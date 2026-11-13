@@ -497,10 +497,24 @@ class Daemon:
         want, addr = self.CORE_IDS[target], (0x000000 if target == "mega65" else 0x800000)
         if want == cur:
             return "ok already %s" % target
-        print("m65d: core %s -> %s (flash 0x%06x)" % (names.get(cur, cur), target, addr), flush=True)
+        if cur == 1 or addr == 0:
+            print("m65d: core %s -> %s (flash 0x%06x)" % (names.get(cur, cur), target, addr), flush=True)
+        self.via_mega65 = None
         if self.inp.linux_focus:                # the reload resets the picture to the core's
             self.inp.set_linux_focus(False)
         self.lx_drop("core switch", flush=True)  # the Amiga's shell: before its bridge goes away
+        if cur != 1 and addr != 0:
+            # The bridge's IPROG (rk_iprog) to a slot other than 0 lands in slot 0 when the running
+            # bitstream was loaded over JTAG (2026-11-13, Radxa rig: JTAG-loaded C64 and Amiga ->
+            # slot 1 = the MEGA65, BOOTSTS "VALID IPROG", no fallback: the WBSTAR write is lost; the
+            # same IPROG from the flash-loaded Amiga reaches slot 1, and the MEGA65's own reconfig
+            # works after a JTAG load).  A core in slot 1 is the only one that can come from the
+            # flash without the MEGA65, so the other cores go there via the MEGA65: IPROG to slot 0,
+            # then the MEGA65's reconfig (via_mega65_step) once its monitor answers.
+            print("m65d: core %s -> %s via the MEGA65 (flash 0x000000, then 0x%06x)"
+                  % (names.get(cur, cur), target, addr), flush=True)
+            self.via_mega65 = (target, time.time() + 30.0)
+            addr = 0
         if cur == 1:
             # MEGA65: its own reconfig ($D6C8..$D6CB boot address, $D6CF <- $42 triggers)
             # WBSTAR takes the SPI address in 256-byte units ("shifted by 8 bits")
@@ -513,7 +527,35 @@ class Daemon:
         self.sent = None
         self.resend_at = time.time() + 3.0
         self.next_core_check = time.time() + 3.0   # re-read the core id once the new one runs
-        return "ok switching to %s" % target
+        return "ok switching to %s%s" % (target, " via the MEGA65" if self.via_mega65 else "")
+
+    def via_mega65_step(self, core, now):
+        """second half of a switch via the MEGA65 (switch_core): once the MEGA65 runs and has run for
+        a second (m65io's monitor pipe needs the bridge back), switch from there; given up after 30 s"""
+        v = getattr(self, "via_mega65", None)
+        if not v:
+            return
+        target, deadline = v
+        if now > deadline:
+            self.via_mega65 = None
+            print("m65d: core switch to %s via the MEGA65: the MEGA65 did not come up, given up" % target,
+                  flush=True)
+            return
+        if core != 1:
+            self.via_mega65_seen = None
+            return
+        if not getattr(self, "via_mega65_seen", None):
+            self.via_mega65_seen = now
+            return
+        if now - self.via_mega65_seen < 1.0:
+            return
+        self.via_mega65 = self.via_mega65_seen = None
+        try:
+            print("m65d: " + self.switch_core(target), flush=True)
+        except OSError as e:                # monitor not there yet: try again on the next check
+            self.via_mega65 = (target, deadline)
+            self.via_mega65_seen = now
+            print("m65d: core switch via the MEGA65: %s, retrying" % e, flush=True)
 
     def system_action(self, act):
         if act == "poweroff":
@@ -825,6 +867,7 @@ class Daemon:
             if down is not None:
                 self.last_down = down
             self.lx_check(c, reconf)
+            self.via_mega65_step(c, now)
             if c is not None and c != self.core:
                 self.core = c
                 if c == 1:

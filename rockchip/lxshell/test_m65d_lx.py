@@ -146,6 +146,7 @@ def main():
         follow_rate()
         other_cores(m)
         view_refused(m)
+        slot1_via_mega65(m)
 
 
 def follow_rate():
@@ -252,6 +253,49 @@ def view_refused(m):
     finally:
         m65d.subprocess.run = real_run
     print('PASS view linux refused on the C64 / Amiga / VIXEN-32 cores, unchanged on the MEGA65')
+
+
+def slot1_via_mega65(m):
+    """from a core other than the MEGA65, slot 1 is reached via the MEGA65 (the bridge's IPROG to a
+    slot other than 0 lands in slot 0 after a JTAG load): IPROG 0, then the MEGA65's reconfig once it
+    has run for a second; to the MEGA65 itself and from the MEGA65: one step as before"""
+    import contextlib
+    import io
+    with tempfile.TemporaryDirectory(dir=os.environ.get('LXSHELL_TMP')) as tmp:
+        d = daemon(m, 1, tmp)
+        d.inp.linux_focus = False
+        os.environ['M65_SLOT1'] = 'amiga'
+        cur = [2]
+        d.br.core_id = lambda: cur[0]
+        iprogs, mons = [], []
+        d.br.iprog = iprogs.append
+        d.monitor = lambda line, wait=True: mons.append(line)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            r = d.switch_core('amiga')
+            assert r == 'ok switching to amiga via the MEGA65' and iprogs == [0] and mons == [], (r, iprogs)
+            t = time.time()
+            d.via_mega65_step(2, t + 0.5)           # still the C64 (reconfiguring)
+            d.via_mega65_step(1, t + 3.0)           # the MEGA65 runs: wait a second for its monitor
+            assert mons == []
+            cur[0] = 1
+            d.via_mega65_step(1, t + 4.1)
+            assert mons == ['sffd36c8 00 80 00 00', 'sffd36cf 42'], mons
+            d.via_mega65_step(1, t + 6.0)           # done: nothing more
+            assert len(mons) == 2 and iprogs == [0]
+            # C64 -> MEGA65: one IPROG to 0; MEGA65 -> Amiga: the reconfig, no IPROG
+            cur[0] = 2
+            assert d.switch_core('mega65') == 'ok switching to mega65' and iprogs == [0, 0]
+            cur[0] = 1
+            assert d.switch_core('amiga') == 'ok switching to amiga' and len(mons) == 4 and iprogs == [0, 0]
+            # the MEGA65 never comes: given up after 30 s, one line
+            cur[0] = 2
+            d.switch_core('amiga')
+            d.via_mega65_step(2, time.time() + 31)
+            assert d.via_mega65 is None
+        assert 'via the MEGA65 (flash 0x000000, then 0x800000)' in out.getvalue(), out.getvalue()
+        assert out.getvalue().count('given up') == 1, out.getvalue()
+    print('PASS slot 1 from another core: via the MEGA65 (IPROG 0, then its reconfig)')
 
 
 def daemon(m, version, tmp):
