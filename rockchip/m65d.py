@@ -30,6 +30,9 @@ Control: TCP port 4511, one text command per line, reply "ok ..."/"err ...":
                                dy>0 = up; btn b0 L b1 R b2 M)
     mouse off                  no mouse (POTs read $FF)
     pots <p1x> <p1y> <p2x> <p2y>   raw SID POT values in hex (paddles); "pots off" = back to mouse
+    amiga [status|import]      the Amiga core's Linux shell (bitstreams with a host master: the
+                               M2M menu runs here instead of QNICE); import = copy kick.rom and
+                               the ADFs from card.img's /amiga to the module's Amiga directory
     restore 0|1  capslock 0|1  sd emu|phys
     rtc                        set the MEGA65's clock now (also on core start and hourly)
     poweroff                   shut the Rockchip down safely (USB keyboard: Ctrl+Alt+End)
@@ -52,6 +55,8 @@ import traceback
 
 
 import m65input
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lxshell"))
 
 
 def ntp_synced():
@@ -185,6 +190,9 @@ class Daemon:
         self.last_down = None
         self.sent = None
         self.lat = []           # (device kind, event -> SPI write seconds), last 4000
+        self.lx = None          # the Amiga core's Linux shell (lxshell/shell.py), when attached
+        self.lx_retry = 0.0
+        self.lx_kbd = None
         self.ctl_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.ctl_srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.ctl_srv.bind(("0.0.0.0", args.ctl_port))
@@ -196,8 +204,14 @@ class Daemon:
         if self.input_dirty:
             pcols = self.inp.matrix()
             pj1, pj2 = self.inp.joysticks()
-            state = (self.ctrl | self.inp.ctrl_bits(), self.ja | pj1, self.jb | pj2,
-                     tuple(a | b for a, b in zip(self.cols, pcols)),
+            ctrl = self.ctrl | self.inp.ctrl_bits()
+            cols = [a | b for a, b in zip(self.cols, pcols)]
+            if self.lx is not None:
+                # the Amiga menu owns the keyboard while it is open; the open key never reaches
+                # the core (mouse and joysticks: unchanged, the core's CSR gates port 2)
+                cols, kctrl = self.lx.filter_input(cols, ctrl)
+                ctrl = (ctrl & ~0x30) | (kctrl & 0x30)
+            state = (ctrl, self.ja | pj1, self.jb | pj2, tuple(cols),
                      self.pots_override or self.inp.pots())
             pend = self.inp.take_pending()
             if state != self.sent:
@@ -508,6 +522,82 @@ class Daemon:
         self.inp.set_linux_focus(target == "linux")
         return "ok view " + target
 
+    # ---- the Amiga core's Linux shell (host-master bitstreams; QNICE bitstreams: nothing changes)
+    def lx_check(self, core, reconfigured):
+        if self.lx is not None and (core != 3 or reconfigured):
+            self.lx.detach()
+            self.lx = None
+            print("m65d: lxshell detached (%s)" % ("FPGA reconfigured" if reconfigured else "other core"),
+                  flush=True)
+        if core != 3 or self.lx is not None or time.time() < self.lx_retry:
+            return
+        self.lx_retry = time.time() + 2.0
+        try:
+            import hostbus
+            import shell as lxshell
+            link = hostbus.SpiLink(self.br.spi)
+            if link.status().version == 0:
+                return                  # a QNICE bitstream: the firmware serves the menu
+            lx = lxshell.AmigaShell(hostbus.HostBus(link), self.args.amiga_menus, self.args.amiga_dir,
+                                    card_img=self.args.card, state_path=self.args.amiga_state,
+                                    log=lambda m: print("m65d: " + m, flush=True))
+            lx.attach()
+            self.lx = lx
+        except Exception:
+            traceback.print_exc()
+            sys.stdout.flush()
+
+    def lx_step(self):
+        # keys to the shell and its poll; returns the seconds it wants until the next call
+        if self.lx is None:
+            return 1.0
+        try:
+            cols = [a | b for a, b in zip(self.cols, self.inp.matrix())]
+            ctrl = self.ctrl | self.inp.ctrl_bits()
+            self.lx.keys(cols, ctrl, time.monotonic())
+            wait = self.lx.poll(time.monotonic())
+            if self.lx.kbd_to_core != self.lx_kbd:     # menu opened / closed: re-push the keyboard
+                self.lx_kbd = self.lx.kbd_to_core
+                self.input_dirty = True
+            return wait
+        except Exception:
+            traceback.print_exc()
+            sys.stdout.flush()
+            self.lx.detach()
+            self.lx = None
+            return 0.5
+
+    def amiga(self, arg):
+        if arg in ("", "status"):
+            if self.lx is None:
+                return "ok lxshell=off (core %s)" % self.CORE_NAMES.get(self.core, self.core)
+            x = self.lx
+            return "ok lxshell=on task=%s menu=%s kbd_to_core=%s adf=%s rtc=%s bus=%s" % (
+                x.task_kind, x.menu_open, x.kbd_to_core, x.adf, x.rtc_on(),
+                ",".join("%s=%d" % kv for kv in x.bus.stats.items()))
+        if arg == "import":
+            import fatimg
+            dst = self.args.amiga_dir
+            os.makedirs(dst, exist_ok=True)
+            img = fatimg.FatImage(self.args.card)
+            done = []
+            try:
+                for name, is_dir, size in img.list("/amiga"):
+                    low = name.lower()
+                    if is_dir or not (low.endswith(".adf") or low in ("kick.rom", "aexp_screen.cfg")):
+                        continue
+                    target = os.path.join(dst, name)
+                    if os.path.exists(target):
+                        continue          # never overwrite the module's own copy
+                    with open(target + ".tmp", "wb") as f:
+                        f.write(img.read("/amiga/" + name))
+                    os.replace(target + ".tmp", target)
+                    done.append(name)
+            finally:
+                img.close()
+            return "ok imported %d file(s): %s" % (len(done), " ".join(done) or "-")
+        return "err amiga [status|import]"
+
     # ---- control commands
     def command(self, line):
         p = line.strip().split(" ", 1)
@@ -521,6 +611,8 @@ class Daemon:
                     + " inputs=" + self.inp.describe())
         if cmd == "temps":
             return "ok " + self.temps()
+        if cmd == "amiga":
+            return self.amiga(rest.strip())
         if cmd == "latency":
             return self.latency(rest.strip())
         if cmd == "view":
@@ -652,8 +744,10 @@ class Daemon:
                 self.rtc_write(immediate=True)        # the FPGA was away (reconfigured): set it again
                 self.rtc_schedule(2.0)
                 self.rtc_repeat = True
+            reconf = down is not None and self.last_down is not None and down > self.last_down
             if down is not None:
                 self.last_down = down
+            self.lx_check(c, reconf)
             if c is not None and c != self.core:
                 self.core = c
                 if c == 1:
@@ -675,6 +769,7 @@ class Daemon:
         if self.rtc_due and time.time() >= self.rtc_due:
             self.rtc_write()
         changed, wait = self.inp.maintain(time.monotonic())   # hot-plug, mouse rate limit
+        wait = min(wait, self.lx_step())
         if self.rtc_due:
             wait = min(wait, max(0.0, self.rtc_due - time.time()))
         if changed:
@@ -727,6 +822,14 @@ def main():
     ap.add_argument("--ctl-port", type=int, default=4511)
     ap.add_argument("--mon-port", type=int, default=4510, help="m65io monitor pipe (for temps)")
     ap.add_argument("--stats", default="/run/m65io.stats")   # m65io writes it twice a second: RAM
+    ap.add_argument("--amiga-dir", default=os.environ.get("M65_AMIGA_DIR", "/root/m65/amiga"),
+                    help="the Amiga core's files: kick.rom, amiga.settings, ADFs")
+    ap.add_argument("--amiga-menus", default=os.environ.get("M65_AMIGA_MENUS", "/root/m65/menus"),
+                    help="directory of *.menu files (menu_gen.py); the one matching the FPGA's id is used")
+    ap.add_argument("--amiga-state", default="/run/m65/amiga.state",
+                    help="the mounted ADF across an m65d restart (RAM: /run)")
+    ap.add_argument("--card", default=os.environ.get("M65_CARD", "/root/m65/card.img"),
+                    help="card image read (never written) to take over kick.rom / settings / ADFs")
     ap.add_argument("--plug-host", default=os.environ.get("M65_PLUG_HOST", ""),
                     help="plugd (scripts/plugd.py) on the PC with the smart plug; '' = none")
     Daemon(ap.parse_args()).loop()

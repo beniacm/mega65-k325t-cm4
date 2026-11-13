@@ -355,7 +355,7 @@ def test_menu_mismatch_boots_defaults():
         r = started(Rig(tmp, menu_ok=False))
         assert not r.m.held() and r.m.cfm == menu_data()[2]
         r.key(r.HELP)
-        assert any('does not match' in row for row in r.screen())
+        assert any('no menu data' in row for row in r.screen())
         r.key(r.SPACE)
         r.run(0.5)
         assert not r.m.csr & hb.CSR_OSM and r.m.csr & hb.CSR_KBD

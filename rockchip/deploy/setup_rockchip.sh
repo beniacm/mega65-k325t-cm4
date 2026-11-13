@@ -41,7 +41,7 @@ DEST=/root/m65
 # files deployed to /root/m65 (everything the service and the PC-side tools call)
 FILES="m65d_restart.sh m65d_stop.sh m65_bootreset.py m65io.c m65d.py m65input.py m65flash.py
        uinput_test.py input_bench.py input_selftest.py linktest.py usbtest.sh
-       m65run"
+       m65run lxshell/hostbus.py lxshell/shell.py lxshell/ui.py lxshell/settings.py lxshell/fatimg.py"
 UNITS="m65d.service m65io.service m65-bootreset.service"
 ENABLE="m65d.service m65-bootreset.service"   # m65io.service comes with m65d (Wants)
 # removed from the deployment (install takes them off the board)

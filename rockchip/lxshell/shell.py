@@ -34,7 +34,11 @@ CSR_WIN, WBC_WIN = 0xFFFF, 0xFFFE
 REQ_IDLE, REQ_LDNG, REQ_ERR, REQ_OK = 0, 1, 2, 3
 PT_IDLE, PT_PRSNG, PT_OK, PT_ERR = 0, 1, 2, 3
 
-# screen adjustment (m2m-rom.asm SCR_*)
+# screen adjustment (m2m-rom.asm SCR_*).  Timing (the one place; DESIGN.md section 10): the
+# firmware read the mode every 256th main-loop pass (a few ms) and switched after 5 equal readings
+# (tens of ms); here one batched read every SCR_POLL_S, SCR_DEBOUNCE + 2 equal readings ->
+# about 5 x 25 ms = 125 ms from a mode change to the new crop / overscan / pan.
+SCR_POLL_S = 0.025
 SCR_LORES = (367, 388)
 SCR_HIRES = (744, 765)
 SCR_NOSIG = 200
@@ -108,14 +112,23 @@ class AmigaShell:
             return None
 
     def load_menu(self):
-        try:
-            with open(self.menu_path, 'rb') as f:
-                raw = f.read()
-        except OSError as e:
-            return None, 'menu data %s: %s' % (self.menu_path, e.strerror)
-        if zlib.crc32(raw) & 0xFFFFFFFF != self.menu_id:
-            return None, 'menu data %s does not match this core' % os.path.basename(self.menu_path)
-        return ui.MenuDef(json.loads(raw.decode('ascii'))), None
+        """the menu data file of the running bitstream: menu_path is the file, or a directory in
+        which the *.menu file whose CRC-32 equals the FPGA's menu id is used (m65d does not know
+        which bitstream is loaded: JTAG or flash)"""
+        paths = [self.menu_path]
+        if os.path.isdir(self.menu_path):
+            paths = sorted(os.path.join(self.menu_path, n) for n in os.listdir(self.menu_path)
+                           if n.endswith('.menu'))
+        for p in paths:
+            try:
+                with open(p, 'rb') as f:
+                    raw = f.read()
+            except OSError:
+                continue
+            if zlib.crc32(raw) & 0xFFFFFFFF == self.menu_id:
+                self.log('lxshell: menu data %s (id %08X)' % (p, self.menu_id))
+                return ui.MenuDef(json.loads(raw.decode('ascii'))), None
+        return None, 'no menu data for this core (id %08X)' % self.menu_id
 
     def kickstart(self):
         p = self.path('kick.rom')
@@ -809,7 +822,7 @@ class AmigaShell:
     def background(self, now):
         b = self.bus
         if now >= self.next_scr:
-            self.next_scr = now + 0.025
+            self.next_scr = now + SCR_POLL_S
             self.detect_screen_mode()
         if now >= self.next_bg:
             self.next_bg = now + 0.1
