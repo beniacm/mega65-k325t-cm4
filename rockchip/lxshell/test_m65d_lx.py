@@ -27,10 +27,13 @@ class FakeSpi:
         self.inputs = []
         self.ops = []                   # every transfer's opcode
         self.version = version
+        self.down = False               # bridge lost: every transfer answers zeros
 
     def xfer2(self, b):
         op = b[0]
         self.ops.append(op)
+        if self.down:
+            return [0] * len(b)
         if op == 0x01:
             st = bytearray(self.m.status().raw)
             st[72] = self.version
@@ -136,7 +139,41 @@ def main():
         assert not d.lx.menu_open and d.lx.kbd_to_core and m.csr & 8
         print(d.amiga('status'))
         print('PASS m65d + lxshell')
+        bridge_lost(d, m, spin)
         other_cores(m)
+
+
+def bridge_lost(d, m, spin):
+    """the bridge stops answering with the Amiga running: one log line (no traceback), the shell
+    detaches, and when the bridge is back it adopts the running machine (no reset, no Kickstart)"""
+    import contextlib
+    import io
+    err = io.StringIO()
+    out = io.StringIO()
+    with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+        d.br.spi.down = True
+        spin(0.3)
+        for _ in range(3):
+            d.lx_retry = d.lx_settle = 0.0
+            d.lx_check(3, False)
+        assert d.lx is None
+        d.br.spi.down = False
+        d.lx_retry = d.lx_settle = 0.0
+        d.lx_check(3, False)
+        spin(0.3)
+    assert 'Traceback' not in err.getvalue() + out.getvalue(), err.getvalue() + out.getvalue()
+    log = out.getvalue()
+    assert log.count('no bridge answer') == 1, log      # one line per outage (the detach)
+    assert 'adopting the running Amiga' in log and 'Kickstart' not in log, log
+    assert d.lx is not None and not m.held() and d.lx.kbd_to_core
+    # a core switch from m65d detaches the shell before the bridge goes away
+    d.br.iprog = lambda addr: None
+    d.br.core_id = lambda: 3
+    d.monitor = lambda *a, **k: None
+    with contextlib.redirect_stdout(out):
+        r = d.switch_core('mega65')
+    assert r.startswith('ok') and d.lx is None and 'detached (core switch)' in out.getvalue(), r
+    print('PASS bridge lost and back: one line, adopt; core switch detaches first')
 
 
 def daemon(m, version, tmp):

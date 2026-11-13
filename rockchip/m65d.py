@@ -470,6 +470,7 @@ class Daemon:
         print("m65d: core %s -> %s (flash 0x%06x)" % (names.get(cur, cur), target, addr), flush=True)
         if self.inp.linux_focus:                # the reload resets the picture to the core's
             self.inp.set_linux_focus(False)
+        self.lx_drop("core switch", flush=True)  # the Amiga's shell: before its bridge goes away
         if cur == 1:
             # MEGA65: its own reconfig ($D6C8..$D6CB boot address, $D6CF <- $42 triggers)
             # WBSTAR takes the SPI address in 256-byte units ("shifted by 8 bits")
@@ -536,10 +537,7 @@ class Daemon:
             self.lx_probed = False
             self.lx_settle = time.time() + 1.0   # m65io's reconfiguration count lags (0.5 s stats)
         if self.lx is not None and (core != 3 or reconfigured):
-            self.lx.detach()
-            self.lx = None
-            print("m65d: lxshell detached (%s)" % ("FPGA reconfigured" if reconfigured else "other core"),
-                  flush=True)
+            self.lx_drop("FPGA reconfigured" if reconfigured else "other core")
         if core != 3 or self.lx is not None or self.lx_probed or time.time() < self.lx_retry \
                 or time.time() < self.lx_settle:
             return
@@ -557,9 +555,29 @@ class Daemon:
                                     log=lambda m: print("m65d: " + m, flush=True))
             lx.attach()
             self.lx = lx
-        except Exception:
-            traceback.print_exc()
+            self.lx_lost = False
+        except Exception as e:
+            if type(e).__name__ != "BusError":
+                traceback.print_exc()
+            elif not getattr(self, "lx_lost", False):  # bridge away: one line per outage
+                print("m65d: lxshell: %s, retrying" % e, flush=True)
+                self.lx_lost = True
             sys.stdout.flush()
+
+    def lx_drop(self, why, flush=False):
+        """detach the shell; it attaches again (start or adopt, by the start marker) once the Amiga
+        answers.  flush: write the floppy's written tracks back first (before a core switch)"""
+        if self.lx is None:
+            return
+        if flush:
+            try:
+                for _ in self.lx.flush_all():
+                    pass
+            except Exception as e:
+                print("m65d: lxshell: write-back before the switch: %s" % e, flush=True)
+        self.lx.detach()
+        self.lx = None
+        print("m65d: lxshell detached (%s)" % why, flush=True)
 
     def lx_step(self):
         # keys to the shell and its poll; returns the seconds it wants until the next call
@@ -574,11 +592,14 @@ class Daemon:
                 self.lx_kbd = self.lx.kbd_to_core
                 self.input_dirty = True
             return wait
-        except Exception:
-            traceback.print_exc()
-            sys.stdout.flush()
-            self.lx.detach()
-            self.lx = None
+        except Exception as e:
+            if type(e).__name__ == "BusError":     # bridge lost (reconfiguration, link fault)
+                self.lx_lost = True
+                self.lx_drop("bridge lost: %s" % e)
+            else:
+                traceback.print_exc()
+                sys.stdout.flush()
+                self.lx_drop("fault")
             return 0.5
 
     def amiga(self, arg):
