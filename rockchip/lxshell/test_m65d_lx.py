@@ -72,6 +72,9 @@ class StubInput:
     def take_pending(self):
         return None
 
+    def set_linux_focus(self, on):
+        self.linux_focus = on
+
 
 class Args:
     pass
@@ -142,6 +145,7 @@ def main():
         bridge_lost(d, m, spin)
         follow_rate()
         other_cores(m)
+        view_refused(m)
 
 
 def follow_rate():
@@ -213,6 +217,41 @@ def bridge_lost(d, m, spin):
         r = d.switch_core('mega65')
     assert r.startswith('ok') and d.lx is None and 'detached (core switch)' in out.getvalue(), r
     print('PASS bridge lost and back: one line, adopt; core switch detaches first')
+
+
+def view_refused(m):
+    """view linux (command and the Ctrl+Alt+Insert action) is refused on cores without the Linux
+    picture: no VIDEO write, the keyboard stays with the core; on the MEGA65 it switches as before"""
+    import contextlib
+    import io
+    runs = []
+    real_run = m65d.subprocess.run
+    m65d.subprocess.run = lambda *a, **k: runs.append(a)      # loadkeys: never on the PC
+    try:
+        with tempfile.TemporaryDirectory(dir=os.environ.get('LXSHELL_TMP')) as tmp:
+            for core in (2, 3, 4):
+                d = daemon(m, 1, tmp)
+                d.core = core
+                d.br.core_id = lambda core=core: core
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    r = d.command('view linux')
+                    d.inp.actions.append('view toggle')
+                    d.system_action(d.inp.actions.pop(0))
+                assert r.startswith('err no Linux picture'), r
+                assert 0x70 not in d.br.spi.ops and not d.inp.linux_focus and runs == [], (core, d.br.spi.ops)
+                assert out.getvalue().count('view linux refused') == 2, out.getvalue()
+                assert d.command('view mega65') == 'ok view mega65'    # always allowed
+            d = daemon(m, 1, tmp)
+            d.core = 1
+            d.br.core_id = lambda: 1
+            with contextlib.redirect_stdout(io.StringIO()):
+                assert d.command('view linux') == 'ok view linux' and d.inp.linux_focus
+                assert d.command('view toggle') == 'ok view mega65' and not d.inp.linux_focus
+            assert d.br.spi.ops.count(0x70) == 2 and len(runs) == 1
+    finally:
+        m65d.subprocess.run = real_run
+    print('PASS view linux refused on the C64 / Amiga / VIXEN-32 cores, unchanged on the MEGA65')
 
 
 def daemon(m, version, tmp):

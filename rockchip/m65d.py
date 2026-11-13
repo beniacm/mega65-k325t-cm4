@@ -37,7 +37,8 @@ Control: TCP port 4511, one text command per line, reply "ok ..."/"err ...":
     restore 0|1  capslock 0|1  sd emu|phys
     rtc                        set the MEGA65's clock now (also on core start and hourly)
     poweroff                   shut the Rockchip down safely (USB keyboard: Ctrl+Alt+End)
-    view linux|mega65|toggle   HDMI picture + keyboard: Linux (linux_fb) or the MEGA65 (Ctrl+Alt+Insert)
+    view linux|mega65|toggle   HDMI picture + keyboard: Linux (linux_fb) or the MEGA65 (Ctrl+Alt+Insert);
+                               refused (err) on cores without the Linux picture (C64, Amiga, VIXEN-32)
     inputs                     live USB input state: joystick bits per port, POTs, keys, devices
     joyswap                    swap joystick ports 1 <-> 2 (pads and mouse; USB keyboard: Ctrl+Alt+J)
     latency [reset]            USB input event (kernel timestamp) -> INPUT register written:
@@ -304,6 +305,12 @@ class Daemon:
     # ---- cores (flash slots: 0 = MEGA65 at 0x000000, 1 = C64 or Amiga at 0x800000)
     CORE_IDS = {"mega65": 1, "c64": 2, "amiga": 3}
     CORE_NAMES = {1: "mega65", 2: "c64", 3: "amiga"}
+    # cores whose bitstream shows the Rockchip's picture (linux_fb behind the VIDEO register 0x70).
+    # The bridge reports no such capability: STATUS 59 echoes the VIDEO register in every build,
+    # and STATUS 60..71 carry other diagnostics in other cores (the Amiga's VIDEO register even
+    # selects a stall-monitor view).  So by core id: only the MEGA65 (1; 0 = an older MEGA65
+    # bitstream, read as 1) has it; the C64 (2), the Amiga (3) and VIXEN-32 (4) do not.
+    LINUX_PICTURE_CORES = {1}
 
     @property
     def slot1(self):
@@ -513,7 +520,9 @@ class Daemon:
             self.poweroff()
             return
         if act.startswith("view "):
-            print("m65d: " + self.view(act.split()[1]), flush=True)
+            r = self.view(act.split()[1])
+            if not r.startswith("err no Linux picture"):   # (that one is logged by view())
+                print("m65d: " + r, flush=True)
             return
         if act == "reset":
             self.command("reset")
@@ -539,6 +548,15 @@ class Daemon:
         if target not in ("linux", "mega65"):
             return "err view linux|mega65|toggle|rise|fall|diag"
         if target == "linux":
+            core = self.br.core_id()
+            core = self.core if core is None else core
+            if core not in self.LINUX_PICTURE_CORES:
+                # the keyboard would go to Linux while the HDMI output keeps the core's picture
+                # (the user sees a dead keyboard): refuse, picture and keyboard stay with the core
+                msg = "err no Linux picture in the %s core (only the MEGA65 bitstream has linux_fb); " \
+                      "keyboard stays with the core" % self.CORE_NAMES.get(core, core)
+                print("m65d: view linux refused: " + msg[4:], flush=True)
+                return msg
             # the keyboard is released: the console sees the hotkey too.  Ctrl+Alt+Insert
             # would type ESC [2~ there (vim: insert mode) -- void it in the console keymap
             try:
