@@ -37,6 +37,8 @@ clean:
 .PHONY: run clean
 S
 echo "m65new: C project $1 created -- cd $1 && vi main.c  (F5 = build + run on the MEGA65)"
+command -v mos-mega65-clang >/dev/null || [ -x /opt/llvm-mos/bin/mos-mega65-clang ] ||
+  echo "m65new: note: the C compiler (mos-mega65-clang, llvm-mos in /opt/llvm-mos) is not installed on this module (README: \"C: llvm-mos\")"
 exit 0
 fi
 cat > main.s <<'S'
