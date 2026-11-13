@@ -5,7 +5,7 @@ the shell's own section, CFM bits, the 94-byte settings file of the QNICE builds
 import os
 
 from lxcore import settings
-from lxcore.bus import HostBus
+from lxcore.bus import HostBus, C_RD
 from lxcore.menu import Item, MenuModel, items_from_description
 
 # ---- QNICE register map (unchanged from the firmware, PROTOCOL.md section 3)
@@ -65,11 +65,13 @@ class M2MBus(HostBus):
             self.wr(CFM_DATA, words[w])
 
     def cfm_read(self):
-        out = []
+        """the 16 CFM windows in one round trip (the stream keeps the order: select, read, ...)"""
         for w in range(16):
             self.wr(CFM_ADDR, w)
-            out.append(self.rd(CFM_DATA))
-        return out
+            self.out += bytes([C_RD, CFM_DATA >> 8, CFM_DATA & 0xFF])
+            self.expect += 2
+        d = self._collect(32)
+        return [d[i] << 8 | d[i + 1] for i in range(0, 32, 2)]
 
     def menu_id(self):
         return self.rd(MENU_ID_HI) << 16 | self.rd(MENU_ID_LO)
