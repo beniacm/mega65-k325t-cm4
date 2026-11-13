@@ -445,6 +445,43 @@ CMD17 -- the cache gives us the same.
 Audio recorded through the capture dongle: no gaps or repeated buffers in the music. The C64 core
 uses the same bridge and needs its own build to get the cache.
 
+## SD write guard in m65io (2026-11-14)
+
+A STATUS frame has no checksum.  On 2026-11-13 a VIXEN-32 bitstream on the Radxa rig, read at
+49.5 MHz where its MISO is marginal, delivered a frame with the magic intact but the flags 0x08
+(card initialised) sampled late as 0x0C (+ write captured): m65io read the freshly configured
+bridge's all-zero write buffer and wrote it to LBA 0, the partition table.  Since then `m65io`
+serves a write only if
+- the link is **verified**: >= 64 clean STATUS frames in a row at the current rate and >= 2 s since
+  the last bad frame, bridge outage (JTAG load, core switch), probe or rate change -- after an FPGA
+  configuration the first write can be served 2 s after the bridge answers again;
+- a **second STATUS read** (three on probation, i.e. within 10 s of such an event, or when the seq
+  is that of an idle bridge) shows the same flags, seq, lba, command count and last command, and the
+  last command was CMD24/25;
+- the block **read twice** with SD_GET is identical (SD_GET restarts at byte 0; the block cannot
+  change while the card is busy);
+- it is **plausible**: sector 0 and the first sector of every FAT partition listed there must carry
+  the boot signature 55 AA (an all-zero partition table is refused).
+Refused writes are not acknowledged: the bridge keeps a captured write until SD_WACK, so a write
+refused for a transient reason is served on a later poll.  sd_emu clears wr_req only on that ack, so
+a write the core gave up on stays flagged while lba/seq follow its next commands; m65io notices that
+(the request changed without its ack, "moved on" in the log) and then serves only a proven capture:
+the frame before showed the write command decoded and seq advanced by exactly one.  Every frame is
+also checked for the bits a bridge always sends as 0 (a late/early sampled frame usually breaks one);
+such a frame counts as a lost bridge.  Reads are confirmed by a second frame while on probation only,
+so the steady-state read path is unchanged (one STATUS poll per demand read).  SD_INVAL (start,
+SIGUSR1, new bitstream) is sent once the bridge answers and checked in the long STATUS.
+
+Log lines now carry the time; `m65io.stats` gained `st_insane` (frames with the magic but impossible
+bits), `wr_refused` (= `wr_wait` + `wr_unconf` + `wr_dmis` + `wr_implaus` + `wr_stale`), `rd_unconf`,
+`inval_retry`, `link_run`, `link_verified`.  PC test: `rockchip/iotest/run_tests.py` runs the
+unchanged m65io against a model of rk_bridge + sd_emu (LD_PRELOAD `fakespi.c`): good traffic,
+garbled frames of every kind (zeros, ones, random, shifted, late-sampled, frames that pass every bit
+check with a wrong write flag/lba/seq), the 2026-11-13 incident, a write captured during a link
+probe, protected sectors, abandoned writes, data mismatch, SIGUSR1 during an outage, polls per read.
+`--old <m65io.c>` runs an older m65io for comparison (c744556's writes zeros to LBA 0 in the
+incident scenario and damages hundreds of sectors under garbled frames).
+
 ## Real-time clock and safe power-off
 
 The board has no RTC chip and no battery.  **`soft_rtc.vhdl`** (MEGA65 core, `qmtechk325t` only)
