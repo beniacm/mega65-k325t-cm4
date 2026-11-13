@@ -58,6 +58,13 @@ WRN_ADF_SIZE = ("\\n\\nThis is not a valid ADF disk image:\\n"
                 "dumps up to 934,912 bytes are accepted)."
                 "\\n\\nPress SPACE to continue.\\n")
 STR_SPACE = "Press Space to continue."
+# screen offsets without a user file (aexp_screen.cfg in the Amiga directory, or on the card image):
+# the AExp project's two ready-made files (doc/screen_adjust.md), installed next to this module by
+# setup_rockchip.sh, chosen by the HDMI mode; 5:4 has none of its own and takes the 4:3 one (it pulls
+# the edges in)
+PRESET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'presets')
+HDMI_PRESETS = (('HDMI_16_9_50', 'aexp_screen.cfg_16_9'), ('HDMI_4_3_50', 'aexp_screen.cfg_4_3'),
+                ('HDMI_5_4_50', 'aexp_screen.cfg_4_3'))
 # what the RAM submenu's summary shows with the AGA chipset chosen (summary_in_effect)
 AGA_MEMORY = "2M Chip (AGA)"
 
@@ -89,6 +96,8 @@ class AmigaShell(Runner):
         self.values = {}                # the stored settings (amiga.settings), by name
         self.saved_values = None
         self.next_bg = self.next_scr = self.next_rtc = 0.0
+        self.preset_dir = PRESET_DIR
+        self.screen_src = None          # where the screen offsets came from (logged when it changes)
 
     # ------------------------------------------------------------------ files
     def path(self, name):
@@ -468,6 +477,8 @@ class AmigaShell(Runner):
             m.show()
         elif name == 'OSMKEY':
             self.update_open_key()
+        elif name == 'HDMI':
+            self.load_screen_offsets()          # without a user file: the new mode's preset
 
     def apply_cfm(self):
         """menu selection -> CFM; topology lines only with the core held (lead's rule)"""
@@ -728,13 +739,42 @@ class AmigaShell(Runner):
             b.write_words(hb.DEV_ASCAL_PPHASE, 0x000, d['filter_tables'][row['h']])
             b.write_words(hb.DEV_ASCAL_PPHASE, 0x100, d['filter_tables'][row['v']])
 
+    def screen_preset(self):
+        """the ready-made screen file for the HDMI mode in the CFM words, or None"""
+        c = self.mdef.data['c_menu'] if self.mdef else {}
+        for name, fname in HDMI_PRESETS:
+            n = c.get(name)
+            if n is not None and self.cfm[n // 16] >> (n % 16) & 1:
+                return os.path.join(self.preset_dir, fname)
+        return None
+
+    def screen_cfg(self):
+        """(bytes, source): the user's aexp_screen.cfg wins (Amiga directory, then the card image);
+        without one, the preset for the selected HDMI mode"""
+        p = self.path('aexp_screen.cfg')
+        try:
+            with open(p, 'rb') as f:
+                return f.read(256), p
+        except OSError:
+            pass
+        raw = self.read_card('/amiga/aexp_screen.cfg')
+        if raw is not None:
+            return raw, 'card image /amiga/aexp_screen.cfg'
+        pre = self.screen_preset()
+        if pre:
+            try:
+                with open(pre, 'rb') as f:
+                    return f.read(256), 'preset ' + pre
+            except OSError:
+                return b'', 'none (preset %s missing)' % pre
+        return b'', 'none'
+
     def load_screen_offsets(self, apply_now=True):
         tbl = [0] * 40
-        try:
-            with open(self.path('aexp_screen.cfg'), 'rb') as f:
-                raw = f.read(256)
-        except OSError:
-            raw = self.read_card('/amiga/aexp_screen.cfg') or b''
+        raw, src = self.screen_cfg()
+        if src != self.screen_src:
+            self.screen_src = src
+            self.log('lxshell: screen offsets: %s' % src)
         if len(raw) >= 4 and raw[0:2] == b'AX' and raw[2] in (3, 4) and raw[3] == 4:
             per = 20 if raw[2] == 4 else 16
             if len(raw) >= 4 + 4 * per:

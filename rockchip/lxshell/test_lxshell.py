@@ -286,6 +286,56 @@ def test_aga_memory_summary():
         assert ram and 'RAM: 512K+512K Slow' in ram[0], ram
 
 
+def screen_file(base):
+    """an aexp_screen.cfg v4: 4 modes x 10 words, every word base + mode * 10 + i"""
+    rows = b''.join(b''.join((base + r * 10 + i).to_bytes(2, 'big') for i in range(10)) for r in range(4))
+    return b'AX\x04\x04' + rows
+
+
+def cfd_row(m):
+    """the CFD words the screen detector wrote, in the file's order (shell.detect_screen_mode)"""
+    return [m.cfd[c] for c in (4, 5, 6, 7, 0, 1, 2, 3, 8, 9)]
+
+
+def test_screen_preset_follows_hdmi_mode():
+    """no aexp_screen.cfg: the preset for the HDMI mode is used (720p = 16:9, 576p 4:3 = 4:3) and a
+    change of the HDMI mode applies the other one; a user file wins and is used for every mode"""
+    with tmpdir() as tmp:
+        r = Rig(tmp)
+        pre = os.path.join(tmp, 'presets')
+        os.makedirs(pre)
+        for name, base in (('aexp_screen.cfg_16_9', 0x1600), ('aexp_screen.cfg_4_3', 0x4300)):
+            with open(os.path.join(pre, name), 'wb') as f:
+                f.write(screen_file(base))
+        r.sh.preset_dir = pre
+        started(r)
+        r.run(0.5)                              # the detector (lores PAL in the model = mode 0)
+        assert cfd_row(r.m) == [0x1600 + i for i in range(10)], cfd_row(r.m)
+        r.key(r.HELP)
+        nav_to(r, 'HDMI: 720p')
+        r.key(r.RETURN)
+        nav_to(r, '576p 50 Hz 4:3')
+        r.key(r.RETURN)
+        r.run(0.5)
+        assert cfd_row(r.m) == [0x4300 + i for i in range(10)], cfd_row(r.m)
+        assert any('preset' in l and 'cfg_4_3' in l for l in r.logs), r.logs
+        with open(os.path.join(r.dir, 'aexp_screen.cfg'), 'wb') as f:      # the user's own file
+            f.write(screen_file(0x7700))
+        nav_to(r, '720p 50 Hz 16:9')
+        r.key(r.RETURN)
+        r.run(0.5)
+        assert cfd_row(r.m) == [0x7700 + i for i in range(10)], cfd_row(r.m)
+        r.key(r.RUNSTOP)
+        r.key(r.HELP)
+        r.run(0.5)
+        # a restart with the user file: it is used from the start
+        r2 = Rig(tmp, model=mdl.ModelMaster(menu_id=menu_data()[1], defaults=menu_data()[2]))
+        r2.sh.preset_dir = pre
+        started(r2)
+        r2.run(0.5)
+        assert cfd_row(r2.m) == [0x7700 + i for i in range(10)], cfd_row(r2.m)
+
+
 def test_video_change_without_hold():
     with tmpdir() as tmp:
         r = started(Rig(tmp))
