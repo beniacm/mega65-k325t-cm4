@@ -116,10 +116,16 @@ class ModelMaster:
         self.inbuf += data
         self._run()
 
+    bad_gets = 0                            # test hook: the next n bulk GETs (>= 1 KB) carry one wrong byte
+
     def get(self, n):
-        out = bytes(self.getbuf[:n])
+        out = bytearray(self.getbuf[:n])
         del self.getbuf[:n]
-        return out + bytes(n - len(out))
+        out += bytes(n - len(out))
+        if self.bad_gets and n >= 1024:
+            self.bad_gets -= 1
+            out[n // 2] ^= 0x5A
+        return bytes(out)
 
     def reset(self):
         self.inbuf.clear()

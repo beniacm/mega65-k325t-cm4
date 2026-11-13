@@ -140,7 +140,46 @@ def main():
         print(d.amiga('status'))
         print('PASS m65d + lxshell')
         bridge_lost(d, m, spin)
+        follow_rate()
         other_cores(m)
+
+
+def follow_rate():
+    """m65d uses the SPI rate m65io publishes (its stats file), only while m65io sees the bridge;
+    --hz fixes it"""
+    import contextlib
+    import io
+    with tempfile.TemporaryDirectory(dir=os.environ.get('LXSHELL_TMP')) as tmp:
+        stats = os.path.join(tmp, 'm65io.stats')
+
+        class Spi:
+            max_speed_hz = 10000000
+        d = m65d.Daemon.__new__(m65d.Daemon)
+        d.args = Args()
+        d.args.stats, d.args.hz = stats, 0
+        d.br = m65d.Bridge.__new__(m65d.Bridge)
+        d.br.spi = Spi()
+        d.spi_hz, d.last_down = m65d.DEFAULT_HZ, 7
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            d.follow_rate(d.bridge_down())          # no stats file yet: keeps the default
+            assert d.br.spi.max_speed_hz == 10000000
+            open(stats, 'w').write('rd=1 bridge_down=9 polls=5 spi_hz=33333333 bridge_ver=4\n')
+            d.follow_rate(d.bridge_down())          # m65io's outage counter moved: not yet
+            assert d.br.spi.max_speed_hz == 10000000
+            d.last_down = 9
+            d.follow_rate(d.bridge_down())          # settled: taken
+            assert d.br.spi.max_speed_hz == 33333333 and d.spi_hz == 33333333
+            d.follow_rate(d.bridge_down())          # unchanged: no second line
+            open(stats, 'w').write('rd=1 bridge_down=9 polls=6 spi_hz=25000000 bridge_ver=4\n')
+            d.follow_rate(d.bridge_down())          # m65io stepped down: followed
+            assert d.br.spi.max_speed_hz == 25000000
+            d.args.hz = 10000000
+            open(stats, 'w').write('rd=1 bridge_down=9 polls=7 spi_hz=33333333 bridge_ver=4\n')
+            d.follow_rate(d.bridge_down())          # --hz: fixed
+            assert d.br.spi.max_speed_hz == 25000000
+        assert out.getvalue().count('SPI rate') == 2, out.getvalue()
+    print('PASS m65d follows m65io\'s SPI rate (only while the bridge is seen; --hz fixes it)')
 
 
 def bridge_lost(d, m, spin):

@@ -543,12 +543,22 @@ class AmigaShell(Runner):
         w = s.dx - 6
         s.printxy(chr(FC_HE_LEFT) + ' ' * w + chr(FC_HE_RIGHT), 2, s.dy - 1)
         steps, done = max(1, len(data) // w), 0
-        for pos in b.write_bytes_iter(hb.DEV_ADF, 0, data):
-            k = min(w, pos // steps)
-            if k > done:
-                s.printxy(chr(LD_PROGRESS) * (k - done), 3 + done, s.dy - 1)
-                done = k
-            yield None
+        for attempt in (1, 2):
+            for pos in b.write_bytes_iter(hb.DEV_ADF, 0, data):
+                k = min(w, pos // steps)
+                if k > done:
+                    s.printxy(chr(LD_PROGRESS) * (k - done), 3 + done, s.dy - 1)
+                    done = k
+                yield None
+            # safety net for the SPI link: read the image back and compare (~0.3 s at 33 MHz)
+            crc = 0
+            for _, chunk in b.read_bytes_iter(hb.DEV_ADF, 0, len(data)):
+                crc = zlib.crc32(chunk, crc)
+                yield None
+            if crc == zlib.crc32(data):
+                break
+            self.log('lxshell: %s read back differently from the core%s' % (
+                os.path.basename(path), ': sent again' if attempt == 1 else ' again: mounted unverified'))
         b.dev_wr(hb.DEV_ADF, CSR_WIN, 1, size & 0xFFFF)
         b.dev_wr(hb.DEV_ADF, CSR_WIN, 2, size >> 16)
         b.dev_wr(hb.DEV_ADF, CSR_WIN, 0, REQ_OK)
@@ -618,10 +628,15 @@ class AmigaShell(Runner):
         """clear the dirty bit first (a new write sets it again), then read and write the track"""
         b = self.bus
         b.dev_wr(hb.DEV_ADF, WBC_WIN, 0x10 + track // 16, 1 << (track % 16))
-        data = bytearray()
-        for _, chunk in b.read_bytes_iter(hb.DEV_ADF, track * TRACK, TRACK):
-            data += chunk
-            yield None
+        # safety net for the SPI link: what goes into the file is read twice and must agree; a third
+        # read decides (the Amiga may write the track in between: then the 2nd and 3rd agree)
+        data = yield from self.read_track(track)
+        again = yield from self.read_track(track)
+        if again != data:
+            data = yield from self.read_track(track)
+            if data != again:
+                self.log('lxshell: track %d read back three different ways: written as the last read'
+                         % track)
         try:
             os.pwrite(self.adf_fd, bytes(data), track * TRACK)
             self.flush_failed.discard(track)
@@ -629,6 +644,13 @@ class AmigaShell(Runner):
             if track not in self.flush_failed:
                 self.log('lxshell: write-back of track %d to %s failed: %s' % (track, self.adf, e))
             self.flush_failed.add(track)
+
+    def read_track(self, track):
+        data = bytearray()
+        for _, chunk in self.bus.read_bytes_iter(hb.DEV_ADF, track * TRACK, TRACK):
+            data += chunk
+            yield None
+        return data
 
     def flush_all(self):
         if self.adf_fd is None:

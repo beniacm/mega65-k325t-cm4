@@ -394,6 +394,59 @@ def test_long_press_held():
         assert bytes(r.m.kick[:len(r.kick)]) == r.kick
 
 
+def mount_first_adf(r):
+    r.key(r.HELP)
+    r.key(r.RETURN)                             # ADF line -> browser
+    r.key(r.RETURN)                             # the first file
+    r.run(0.5)
+
+
+def test_adf_read_back_check():
+    """a wrong byte coming back from the core during the ADF's read-back: one log line, the image
+    is sent again and checked again, the Amiga gets the right disk"""
+    with tmpdir() as tmp:
+        r = started(Rig(tmp))
+        r.m.bad_gets = 1
+        mount_first_adf(r)
+        lines = [l for l in r.logs if 'read back differently' in l]
+        assert len(lines) == 1 and 'sent again' in lines[0], r.logs
+        assert bytes(r.m.adf[:901120]) == r.adfs['Workbench.adf'] and r.m.adf_mounted
+
+
+def test_track_read_twice():
+    """write-back reads every track twice: one wrong byte on the way back costs a third read, the
+    file gets exactly what the Amiga wrote, no log line; the Amiga writing the track between the
+    reads gives the newer data"""
+    with tmpdir() as tmp:
+        r = started(Rig(tmp))
+        mount_first_adf(r)
+        r.key(r.HELP)
+        new = bytes([0xC3]) * 5632
+        r.m.amiga_writes(9, new)
+        r.m.bad_gets = 1
+        r.run(3.5)
+        with open(os.path.join(r.dir, 'Workbench.adf'), 'rb') as f:
+            f.seek(9 * 5632)
+            assert f.read(5632) == new
+        assert not any('three different' in l for l in r.logs), r.logs
+        first, second = bytes([0x11]) * 5632, bytes([0x22]) * 5632
+        r.m.amiga_writes(4, first)
+        orig, calls = r.sh.read_track, []
+
+        def read_track(track):
+            data = yield from orig(track)
+            calls.append(track)
+            if len(calls) == 1:
+                r.m.adf[4 * 5632:5 * 5632] = second        # the Amiga writes while the shell reads
+            return data
+        r.sh.read_track = read_track
+        r.run(3.5)
+        assert len(calls) == 3, calls
+        with open(os.path.join(r.dir, 'Workbench.adf'), 'rb') as f:
+            f.seek(4 * 5632)
+            assert f.read(5632) == second
+
+
 def test_rtc_opt_in():
     with tmpdir() as tmp:
         r = started(Rig(tmp, settings={'format': 1, 'values': {'shell:rtc': 1}}))

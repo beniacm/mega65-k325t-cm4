@@ -162,10 +162,14 @@ class Bridge:
 
 
 # ---------------------------------------------------------------- daemon
+DEFAULT_HZ = 10000000       # until m65io has published its rate (m65d may start first)
+
+
 class Daemon:
     def __init__(self, args):
         self.args = args
-        self.br = Bridge(args.hz)
+        self.spi_hz = args.hz or DEFAULT_HZ    # until m65io's rate is known (follow_rate)
+        self.br = Bridge(self.spi_hz)
         st = self.br.status()
         print("m65d: rk_bridge %s v%d" % ("found" if st["magic"] == b"Me" else "NOT found", st["ver"]),
               flush=True)
@@ -337,15 +341,34 @@ class Daemon:
     def rtc_schedule(self, delay=0.0):
         self.rtc_due = int(time.time() + delay) + 1
 
-    def bridge_down(self):
-        """m65io's count of status polls without the bridge (FPGA configuring, link problems)"""
+    def m65io_stat(self, key):
+        """one integer field of m65io's stats file (RAM, rewritten twice a second); None if unknown"""
         try:
             for f in open(self.args.stats).read().split():
-                if f.startswith("bridge_down="):
+                if f.startswith(key + "="):
                     return int(f.split("=")[1])
         except (OSError, ValueError):
             pass
         return None
+
+    def bridge_down(self):
+        """m65io's count of status polls without the bridge (FPGA configuring, link problems)"""
+        return self.m65io_stat("bridge_down")
+
+    def follow_rate(self, down):
+        """one SPI rate for the bridge: m65d uses the rate m65io has chosen for the loaded bitstream
+        (m65io probes it at start, after every outage = reconfiguration, steps down on repeated
+        dropouts and up again later, and publishes it as spi_hz in its stats file).  Taken only while
+        m65io sees the bridge (its outage counter did not move since the last look), so a rate it is
+        still trying out is never copied.  --hz fixes the rate instead (tests).  Called with the
+        core check, 4 x per second: one file read in RAM."""
+        if self.args.hz:
+            return
+        hz = self.m65io_stat("spi_hz")
+        if hz and hz != self.spi_hz and down is not None and down == self.last_down:
+            self.br.spi.max_speed_hz = hz
+            self.spi_hz = hz
+            print("m65d: SPI rate %d Hz (m65io's)" % hz, flush=True)
 
     def rtc_write(self, immediate=False):
         # immediate: right now, unaligned (a core just appeared: BASIC prints its banner from the
@@ -780,6 +803,7 @@ class Daemon:
                 self.rtc_schedule(2.0)
                 self.rtc_repeat = True
             reconf = down is not None and self.last_down is not None and down > self.last_down
+            self.follow_rate(down)
             if down is not None:
                 self.last_down = down
             self.lx_check(c, reconf)
@@ -853,7 +877,8 @@ def main():
     except (AttributeError, OSError):
         pass
     ap = argparse.ArgumentParser()
-    ap.add_argument("--hz", type=int, default=10000000)
+    ap.add_argument("--hz", type=int, default=0,
+                    help="fixed SPI rate (tests); default: m65io's rate for the loaded bitstream")
     ap.add_argument("--ctl-port", type=int, default=4511)
     ap.add_argument("--mon-port", type=int, default=4510, help="m65io monitor pipe (for temps)")
     ap.add_argument("--stats", default="/run/m65io.stats")   # m65io writes it twice a second: RAM
