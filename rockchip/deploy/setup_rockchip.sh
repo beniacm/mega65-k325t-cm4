@@ -84,6 +84,15 @@ FACTORY_SHA=bc8d2529492bab7dbf18632f6b1653acfbcc5e8632fb3da702e6c17fb9ea9531
 # Radxa CM3: SPI3 M0 CS0 overlay (pads GPIO4_A6 CS, B0 MISO, B2 MOSI, B3 CLK = BCM8..11)
 RADXA_SPI_OVL=rk3568-spi3-m0-cs0-spidev
 RADXA_SPI_PINS="134 136 138 139"
+# Radxa CM3, SPI3 receive sample delay (explicit, Radxa only): M65_SPI_RSD=<ns> install builds Radxa's own
+# SPI3 overlay (rockchip/cm3/$RADXA_SPI_OVL.dts) with rx-sample-delay-ns = <ns> and installs it only if it
+# differs from the board's (the board's file is kept once as $DEST/backup/$RADXA_SPI_OVL.dtbo.orig);
+# M65_SPI_RSD= (empty) puts Radxa's original back; unset = the file is left as it is.  49.5 MHz on the
+# link (M65IO_HZ=50000000) needs 5 on the Radxa rig (2026-11-13: without it every STATUS read failed).
+# check names the installed variant and reports a mismatch with M65_SPI_RSD, or a rate above 33 MHz
+# without a sample delay.  The kernel reads it at boot: reboot after a change.
+RSD_SET=${M65_SPI_RSD+set}
+RSD=${M65_SPI_RSD-}
 # Radxa CM3, AExp A1200 hard disk (opt-in: M65_HDD=1 install): the second SPI, spi0-m0 CS0 (pads GPIO0_B5
 # CLK, B6 MOSI, C5 MISO, C6 CS = BCM3, 2, 6, 13) for hddsrv; the attention line BCM7 = GPIO4_C5 is a plain
 # GPIO (gpiochip4 line 21).  Revert: mv the .dtbo back to .dtbo.disabled, u-boot-update, reboot.
@@ -125,6 +134,28 @@ dtbo_build() {
   DTBO_TMP=$(mktemp -d); trap 'rm -rf "$DTBO_TMP"' EXIT
   dtc -@ -q -I dts -O dtb -o "$DTBO_TMP/$RADXA_VIDEO_OVL.dtbo" "$HERE/cm3/$RADXA_VIDEO_OVL.dts" \
     || { echo "dtc failed on $HERE/cm3/$RADXA_VIDEO_OVL.dts (apt install device-tree-compiler)"; exit 2; }
+  spi3_build "" "$DTBO_TMP/spi3-orig.dtbo"
+}
+
+# Radxa's SPI3 overlay with rx-sample-delay-ns = $1 (empty: none, = Radxa's original) -> $2
+spi3_build() {
+  if [ -n "$1" ]; then
+    sed "/max-freq = /a\\			rx-sample-delay-ns = <$1>;" "$HERE/cm3/$RADXA_SPI_OVL.dts"
+  else cat "$HERE/cm3/$RADXA_SPI_OVL.dts"; fi | dtc -@ -q -I dts -O dtb -o "$2" - \
+    || { echo "dtc failed on $HERE/cm3/$RADXA_SPI_OVL.dts"; exit 2; }
+}
+
+# the sample delay of an installed SPI3 overlay (base64 of the .dtbo): "none", <ns>, or "unknown"
+# (not Radxa's overlay with at most that one property added)
+spi3_variant() {
+  local f="$DTBO_TMP/spi3-board.dtbo" ns
+  echo "$1" | base64 -d > "$f" 2>/dev/null || { echo unknown; return; }
+  cmp -s "$f" "$DTBO_TMP/spi3-orig.dtbo" && { echo none; return; }
+  ns=$(dtc -q -I dtb -O dts "$f" 2>/dev/null | sed -n 's/.*rx-sample-delay-ns = <0x\([0-9a-f]*\)>;.*/\1/p')
+  [ -n "$ns" ] || { echo unknown; return; }
+  ns=$((16#$ns))
+  spi3_build "$ns" "$DTBO_TMP/spi3-ns.dtbo"
+  cmp -s "$f" "$DTBO_TMP/spi3-ns.dtbo" && echo "$ns" || echo unknown
 }
 
 # luckfox | radxa-cm3 (anything that is not a Radxa CM3 keeps the Luckfox behaviour)
@@ -141,6 +172,7 @@ check() {
     if [ -e /dev/block/by-name/boot ]; then echo BOOT \$(head -c $BOOT_LEN /dev/block/by-name/boot | sha256sum | cut -d' ' -f1);
     echo FACT \$(sha256sum < /dev/block/by-name/boot | cut -d' ' -f1); fi;
     echo OVL \$(grep -m1 fdtoverlays /boot/extlinux/extlinux.conf 2>/dev/null);
+    echo SPI3OVL \$(base64 -w0 /boot/dtbo/$RADXA_SPI_OVL.dtbo 2>/dev/null);
     for f in /boot/dtbo/bt656*.dtbo; do [ -e \$f ] && echo DTBO \$(md5sum < \$f | cut -d' ' -f1) \$f; done;
     echo DPI \$(cat /sys/class/drm/card*-DPI-1/status 2>/dev/null);
     echo VP \$(grep -A4 'Video Port2' /sys/kernel/debug/dri/0/summary 2>/dev/null | grep -o -e ACTIVE -e 'bus_format\[[0-9a-f]*\]' -e 'Display mode: [0-9a-z]*' | tr ' ' _);
@@ -207,6 +239,16 @@ check() {
     # the Linux picture: overlay file = the repo's, enabled, and the display pipeline live
     local dt
     dtbo_build
+    local rsd hz; rsd=$(spi3_variant "$(echo "$out" | sed -n 's/^SPI3OVL *//p')")
+    hz=$(echo "$out" | sed -n 's/^IOHZ M65IO_HZ=\([0-9]*\).*/\1/p')
+    case "$rsd" in none) echo "ok    $RADXA_SPI_OVL.dtbo = Radxa's original (no rx-sample-delay)";;
+      unknown) echo "DIFF  $RADXA_SPI_OVL.dtbo is not Radxa's overlay (+ rx-sample-delay-ns)"; bad=1;;
+      *) echo "ok    $RADXA_SPI_OVL.dtbo = Radxa's + rx-sample-delay-ns = $rsd";; esac
+    if [ -n "$RSD_SET" ]; then
+      [ "$rsd" = "${RSD:-none}" ] || { echo "DIFF  SPI3 sample delay '$rsd' (M65_SPI_RSD wants '${RSD:-none}'; install, then reboot)"; bad=1; }
+    elif [ "$rsd" = none ] && [ "${hz:-0}" -gt 40000000 ]; then
+      echo "DIFF  M65IO_HZ=$hz without an SPI3 sample delay (the Radxa needs M65_SPI_RSD=5 above 33 MHz)"; bad=1
+    fi
     dt=$(echo "$out" | awk '$1=="DTBO" {print $3}' | tr '\n' ' ')
     if [ "$(echo "$out" | awk -v f=/boot/dtbo/$RADXA_VIDEO_OVL.dtbo '$1=="DTBO" && $3==f {print $2}')" = "$(md5l "$DTBO_TMP/$RADXA_VIDEO_OVL.dtbo")" ] \
        && [ "$dt" = "/boot/dtbo/$RADXA_VIDEO_OVL.dtbo " ]; then
@@ -272,7 +314,7 @@ check() {
   echo "$out" | grep -q "^CA65 ca65 V" && echo "ok    $(echo "$out" | sed -n 's/^CA65 //p')" \
     || echo "WARN  ca65 missing (run deploy/build_tools.sh on the Rockchip)"
   echo "$out" | grep -q "^LLVMMOS clang version" && echo "ok    llvm-mos: $(echo "$out" | sed -n 's/^LLVMMOS //p' | cut -c1-60)" \
-    || echo "WARN  llvm-mos missing (run deploy/build_llvm_mos.sh on the PC)"
+    || echo "WARN  llvm-mos missing (README \"C: llvm-mos\")"
   [ "$(echo "$out" | awk '/^TZ /{print $2}')" = "$TZ" ] && echo "ok    timezone $TZ" \
     || { echo "DIFF  timezone $(echo "$out" | awk '/^TZ /{print $2}') (want $TZ)"; bad=1; }
   # Ctrl+Alt+Del is the MEGA65 reset; with the keyboard released to Linux (view linux) it
@@ -292,20 +334,30 @@ install() {
   local vtar=""
   if [ $B = radxa-cm3 ]; then
     dtbo_build; vtar="-C $DTBO_TMP $RADXA_VIDEO_OVL.dtbo"
+    local rsdi=""
+    if [ -n "$RSD_SET" ]; then
+      spi3_build "$RSD" "$DTBO_TMP/spi3-new.dtbo"; vtar="$vtar spi3-new.dtbo"
+      # only a changed file is written (the board's own copy kept once); the overlay list is unchanged
+      rsdi="{ cmp -s spi3-new.dtbo /boot/dtbo/$RADXA_SPI_OVL.dtbo ||
+               { mkdir -p $DEST/backup && { [ -e $DEST/backup/$RADXA_SPI_OVL.dtbo.orig ] || cp /boot/dtbo/$RADXA_SPI_OVL.dtbo $DEST/backup/$RADXA_SPI_OVL.dtbo.orig; } &&
+                 install -m 644 spi3-new.dtbo /boot/dtbo/$RADXA_SPI_OVL.dtbo && echo 'SPI3 overlay: rx-sample-delay-ns ${RSD:-removed} (reboot)'; }; } && rm spi3-new.dtbo &&"
+    fi
     spi="{ python3 -c 'import spidev' 2>/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends python3-spidev python3-dev gcc libc6-dev make >/dev/null; } &&
          { command -v loadkeys >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends kbd >/dev/null; } &&
          { [ -f /boot/dtbo/$RADXA_SPI_OVL.dtbo ] || mv /boot/dtbo/$RADXA_SPI_OVL.dtbo.disabled /boot/dtbo/$RADXA_SPI_OVL.dtbo; } &&
+         $rsdi
          { [ '${M65_HDD:-0}' != 1 ] || [ -f /boot/dtbo/$RADXA_HDD_OVL.dtbo ] ||
            { mv /boot/dtbo/$RADXA_HDD_OVL.dtbo.disabled /boot/dtbo/$RADXA_HDD_OVL.dtbo && echo 'hard disk SPI overlay $RADXA_HDD_OVL enabled (reboot)'; }; } &&
-         { cmp -s $RADXA_VIDEO_OVL.dtbo /boot/dtbo/$RADXA_VIDEO_OVL.dtbo || echo 'BT.656 overlay $RADXA_VIDEO_OVL installed (reboot; the module HDMI goes off)'; } &&
-         for f in /boot/dtbo/bt656*.dtbo; do [ \$f = /boot/dtbo/$RADXA_VIDEO_OVL.dtbo ] || rm -f \$f; done &&
-         install -m 644 $RADXA_VIDEO_OVL.dtbo /boot/dtbo/$RADXA_VIDEO_OVL.dtbo && rm $RADXA_VIDEO_OVL.dtbo &&
+         { cmp -s $RADXA_VIDEO_OVL.dtbo /boot/dtbo/$RADXA_VIDEO_OVL.dtbo ||
+           { install -m 644 $RADXA_VIDEO_OVL.dtbo /boot/dtbo/$RADXA_VIDEO_OVL.dtbo && echo 'BT.656 overlay $RADXA_VIDEO_OVL installed (reboot; the module HDMI goes off)'; }; } &&
+         for f in /boot/dtbo/bt656*.dtbo; do [ \$f = /boot/dtbo/$RADXA_VIDEO_OVL.dtbo ] || rm -f \$f; done && rm $RADXA_VIDEO_OVL.dtbo &&
          install -m 755 m65-nm-ram.sh $RADXA_NMRAM_SH && install -m 644 $RADXA_NMRAM_UNIT /etc/systemd/system/$RADXA_NMRAM_UNIT &&
          { mountpoint -q /var/lib/NetworkManager || [ -d /var/lib/m65-nm ] ||
            { mkdir -m 700 /var/lib/m65-nm && cp -a /var/lib/NetworkManager/. /var/lib/m65-nm/ && echo 'NetworkManager state seeded to /var/lib/m65-nm (tmpfs after the reboot)'; }; } &&
          install -m 644 $RADXA_TMP_UNIT /etc/systemd/system/tmp.mount &&
          systemctl daemon-reload && systemctl enable -q $RADXA_NMRAM_UNIT tmp.mount &&
-         u-boot-update >/dev/null 2>&1 &&
+         { [ \"\$(grep -m1 fdtoverlays /boot/extlinux/extlinux.conf | tr ' ' '\\n' | grep '^/boot/dtbo/' | sort)\" = \"\$(ls /boot/dtbo/*.dtbo | sort)\" ] ||
+           { u-boot-update >/dev/null 2>&1 && echo 'extlinux.conf: overlay list updated'; }; } &&
          grep -q '/$RADXA_SPI_OVL.dtbo' /boot/extlinux/extlinux.conf && grep -q '/$RADXA_VIDEO_OVL.dtbo' /boot/extlinux/extlinux.conf &&
          { systemctl disable --now $(echo $RADXA_OFF) >/dev/null 2>&1; true; }"
   fi

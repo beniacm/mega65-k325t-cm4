@@ -1015,6 +1015,12 @@ card HYPPO on this core skips ONBOARD ("K325T: NO CONFIG, USING DEFAULTS"); the 
   24.75 / 33 / 49.5 MHz and the **"40 MHz" that m65io uses is really 33 MHz** (50 is capped by the
   overlay's spi-max-frequency).  `sdlinktest.py`: 0 mismatches, 298/300 read-cache hits.  C64
   core: 0 errors at 25/33.4/40 MHz requested.
+- 49.5 MHz for every core (2026-11-13): needs a 5 ns receive sample delay in the SPI3 overlay; without
+  it every STATUS read failed.  `M65_SPI_RSD=5 M65IO_HZ=50000000 rockchip/deploy/setup_rockchip.sh
+  install root@<radxa>` writes the overlay (only if it differs; the board's own copy is kept once in
+  `/root/m65/backup`) and the rate, then reboot; `check` names the installed variant and reports a
+  rate above 33 MHz without the delay.  `M65_SPI_RSD=` (empty) puts Radxa's overlay back.  The
+  Luckfox stays at 33 MHz (no such option there).
 - Regression, figures equal to the first board: `smoke_test.sh` SMOKE PASS, B65 SELFTEST 14/14,
   `board.py smoke` 34/34, `board_v3` 20/20, swarm2/bounce6/parallax6/jumper move; **GHZ** acts
   1500/3, 1556/0, 1401/14 frames/late, 0 one-frame glitches in 105 s.

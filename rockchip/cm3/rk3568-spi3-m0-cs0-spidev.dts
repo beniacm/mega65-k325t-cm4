@@ -1,0 +1,44 @@
+// Radxa's own overlay rk3568-spi3-m0-cs0-spidev.dtbo (Debian 12 image of the Radxa CM3), decompiled with
+// dtc 1.8.1; compiling it again gives the same bytes (md5 0a8d690d).  setup_rockchip.sh builds it, with
+// rx-sample-delay-ns added after max-freq when M65_SPI_RSD is set (5 ns: md5 edfa325f).
+/dts-v1/;
+/plugin/;
+
+/ {
+
+	metadata {
+		title = "Enable spidev on SPI3-M0 over CS0";
+		compatible = "radxa,cm3-io", "radxa,cm3-rpi-cm4-io", "radxa,cm3s-io", "radxa,radxa-cm3-sodimm-io";
+		category = "misc";
+		exclusive = "GPIO4_B0", "GPIO4_B2", "GPIO4_B3", "GPIO4_A6";
+		description = "Enable spidev on SPI3-M0 over CS0.";
+	};
+
+	fragment@0 {
+		target = <&spi3>;
+
+		__overlay__ {
+			status = "okay";
+			#address-cells = <0x01>;
+			#size-cells = <0x00>;
+			pinctrl-names = "default", "high_speed";
+			pinctrl-0 = <&spi3m0_cs0>, <&spi3m0_pins>;
+			pinctrl-1 = <&spi3m0_cs0>, <&spi3m0_pins_hs>;
+			max-freq = <0x2faf080>;
+
+			spidev@0 {
+				compatible = "rockchip,spidev";
+				status = "okay";
+				reg = <0x00>;
+				spi-max-frequency = <0x2faf080>;
+			};
+		};
+	};
+
+	__fixups__ {
+		spi3 = "/fragment@0:target:0";
+		spi3m0_cs0 = "/fragment@0/__overlay__:pinctrl-0:0", "/fragment@0/__overlay__:pinctrl-1:0";
+		spi3m0_pins = "/fragment@0/__overlay__:pinctrl-0:4";
+		spi3m0_pins_hs = "/fragment@0/__overlay__:pinctrl-1:4";
+	};
+};
