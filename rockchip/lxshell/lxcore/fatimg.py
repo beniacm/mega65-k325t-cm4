@@ -91,6 +91,10 @@ class FatImage:
                 continue
             short = e[0:8].decode('latin-1').rstrip()
             ext = e[8:11].decode('latin-1').rstrip()
+            if e[12] & 0x08:                    # NT case flags: base / extension stored lower case
+                short = short.lower()
+            if e[12] & 0x10:
+                ext = ext.lower()
             name = ''.join(lfn[k] for k in sorted(lfn)) if lfn else (short + ('.' + ext if ext else ''))
             lfn = {}
             hi = struct.unpack_from('<H', e, 20)[0] if self.kind == 32 else 0
