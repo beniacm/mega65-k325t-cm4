@@ -167,11 +167,27 @@ class HostBus:
             raise BusError('MARK echo %02x, expected %02x' % (tag, self.mark_tag))
 
     # ---- bursts.  addr = window * 0x1000 + offset (the master carries offset into the window)
+    def room(self, n):
+        """True when the PUT FIFO takes n more bytes (with what is queued): at most one STATUS read.
+        The iterators yield instead of waiting, so the caller's loop (m65d's input path) never waits
+        for the device to drain the FIFO, only for one chunk on the wire."""
+        n = min(n + len(self.out), MAX_PUT)
+        if self.credit >= n:
+            return True
+        self.status()
+        return self.credit >= n
+
     def write_bytes_iter(self, dev, addr, data, chunk=MAX_PUT - BURST_HDR):
-        """BW8 in chunks; yields after each chunk has been handed to the link"""
+        """BW8 in chunks; yields after each chunk has been handed to the link, and (the same
+        position) while the device has not yet made room for the next one"""
         pos = 0
         while pos < len(data):
             n = min(chunk, len(data) - pos)
+            t0 = time.monotonic()
+            while not self.room(n + BURST_HDR):
+                if time.monotonic() - t0 > self.timeout:
+                    raise BusError('PUT FIFO stays full')
+                yield pos
             a = addr + pos
             self.out += _burst(C_BW8, dev, a >> 12, a & 0xFFF, n) + bytes(data[pos:pos + n])
             self.flush()

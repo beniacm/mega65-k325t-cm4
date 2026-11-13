@@ -166,6 +166,44 @@ def test_cursor_highlight():
         assert e.value == model.start
 
 
+def test_write_yields_while_fifo_full():
+    """a device that drains slowly (the Kickstart port right after an M2M reset, found on the board):
+    the burst iterator yields at the same position instead of polling STATUS until there is room, so
+    m65d's input path waits for at most one STATUS + one chunk"""
+    from lxcore import bus
+
+    class SlowLink:
+        def __init__(self):
+            self.free, self.polls, self.sent = 0, 0, 0
+
+        def status(self):
+            self.polls += 1
+            raw = bytearray(bus.ST_LEN)
+            raw[0:2] = b'Me'
+            raw[bus.ST_VERSION] = 1
+            if self.polls % 4 == 0:             # room for one chunk every 4th poll
+                self.free = 4096
+            raw[bus.ST_PUT_FREE], raw[bus.ST_PUT_FREE + 1] = self.free >> 8, self.free & 0xFF
+            return bus.HostStatus(raw)
+
+        def put(self, data):
+            self.sent += len(data)
+            self.free = 0
+
+    link = SlowLink()
+    b = bus.HostBus(link)
+    data = bytes(3 * 4083)
+    steps, polls_per_step = [], []
+    p0 = 0
+    for pos in b.write_bytes_iter(0x100, 0, data):
+        steps.append(pos)
+        polls_per_step.append(link.polls - p0)
+        p0 = link.polls
+    assert link.sent == len(data) + 3 * bus.BURST_HDR
+    assert max(polls_per_step) <= 1, polls_per_step
+    assert steps.count(0) >= 3, steps            # waited for room by yielding, not by polling
+
+
 if __name__ == '__main__':
     bad = 0
     for n, f in sorted(globals().items()):
