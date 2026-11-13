@@ -31,8 +31,9 @@ Control: TCP port 4511, one text command per line, reply "ok ..."/"err ...":
     mouse off                  no mouse (POTs read $FF)
     pots <p1x> <p1y> <p2x> <p2y>   raw SID POT values in hex (paddles); "pots off" = back to mouse
     amiga [status|import]      the Amiga core's Linux shell (bitstreams with a host master: the
-                               M2M menu runs here instead of QNICE); import = copy kick.rom and
-                               the ADFs from card.img's /amiga to the module's Amiga directory
+                               M2M menu runs here instead of QNICE); import = copy the Kickstart
+                               files (*.rom), aexp_screen.cfg and the ADFs from card.img's /amiga
+                               to the module's Amiga directory (never overwriting)
     restore 0|1  capslock 0|1  sd emu|phys
     rtc                        set the MEGA65's clock now (also on core start and hourly)
     poweroff                   shut the Rockchip down safely (USB keyboard: Ctrl+Alt+End)
@@ -594,7 +595,7 @@ class Daemon:
             try:
                 for name, is_dir, size in img.list("/amiga"):
                     low = name.lower()
-                    if is_dir or not (low.endswith(".adf") or low in ("kick.rom", "aexp_screen.cfg")):
+                    if is_dir or not (low.endswith((".adf", ".rom")) or low == "aexp_screen.cfg"):
                         continue
                     target = os.path.join(dst, name)
                     if os.path.exists(target):
