@@ -357,7 +357,14 @@ def amiga_mega65_keyboard_mode():
         if shifted:
             ev(42, 1)
         ev(code, 1)
+        combo = mi.amiga_combo("mega65", code, shifted)
+        if shifted and mi.AMIGA_M65_KEYMAP[code][1] is not None:
+            # the PC Shift is dropped first, the key follows MOD_LEAD later (one update with Shift
+            # up and the key down reached the core as Shift + key: '_' as '`', ':' as '[')
+            got0 = decode(hub.matrix())
+            assert got0 <= {n for n in combo if n in mi.MOD_NAMES}, (ch, got0)
         time.sleep(mi.MOD_LEAD + 0.005)
+        hub.lead_pending()
         got = decode(hub.matrix())
         assert m65_mode_char(got) == ch, (ch, got)
         if shifted:

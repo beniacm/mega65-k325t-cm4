@@ -651,7 +651,14 @@ class InputHub:
                 if self.amiga and self.amiga_kbd == "mega65":
                     # the combo is chosen with the Shift state at the press and kept until the
                     # release: Shift let go first must not turn ':' into ';' while the key is down
-                    self.latched[code] = (names, self._m65_shifted(code))
+                    drop = self._m65_shifted(code)
+                    self.latched[code] = (names, drop)
+                    if drop:
+                        # the PC Shift goes first, the key MOD_LEAD later (only its own modifier,
+                        # MEGA for '{', comes at once): Shift up and the key down in one update
+                        # reached the core as Shift + key ('_' came out as '`', ':' as '[')
+                        self.lead[code] = time.time()
+                        self.held.pop(code, None)
                 if any(n in MOD_NAMES for n in names) and \
                    any(n not in MOD_NAMES for n in names):
                     self.lead[code] = time.time()
