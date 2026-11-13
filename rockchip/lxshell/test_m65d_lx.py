@@ -75,6 +75,11 @@ class StubInput:
     def set_linux_focus(self, on):
         self.linux_focus = on
 
+    amiga_kbd = 'amiga'
+
+    def set_amiga_keyboard(self, mode):
+        self.amiga_kbd = mode
+
 
 class Args:
     pass
@@ -147,6 +152,7 @@ def main():
         other_cores(m)
         view_refused(m)
         slot1_via_mega65(m)
+        amiga_mega65_keyboard_mode()
 
 
 def follow_rate():
@@ -296,6 +302,89 @@ def slot1_via_mega65(m):
         assert 'via the MEGA65 (flash 0x000000, then 0x800000)' in out.getvalue(), out.getvalue()
         assert out.getvalue().count('given up') == 1, out.getvalue()
     print('PASS slot 1 from another core: via the MEGA65 (IPROG 0, then its reconfig)')
+
+
+# AExp doc/keyboard.md, MEGA65 mode ("the cap is law"): the character a MEGA65 key gives alone, with
+# Shift, with MEGA -- written from the document's tables, independent of m65input's map
+M65_PLAIN = {",": ",", ".": ".", "/": "/", ":": ":", ";": ";", "=": "=", "@": "@", "LEFTARROW": "_",
+             "UPARROW": "^", "*": "*", "+": "+", "-": "-", "POUND": "\\", "SPACE": " ", "RETURN": "\n",
+             "TAB": "\t"}
+M65_SHIFT = {"1": "!", "2": '"', "3": "#", "4": "$", "5": "%", "6": "&", "7": "'", "8": "(", "9": ")",
+             ",": "<", ".": ">", "/": "?", ":": "[", ";": "]", "=": "_", "LEFTARROW": "`", "POUND": "|"}
+M65_MEGA = {",": "~", ".": "|", "/": "\\", ":": "{", ";": "}", "=": "_", "@": "@", "LEFTARROW": "`"}
+
+
+def m65_mode_char(names):
+    """the character the core types for a set of matrix key names in MEGA65 mode (None: none)"""
+    keys = [n for n in names if n not in ("LSHIFT", "RSHIFT", "MEGA")]
+    if len(keys) != 1:
+        return None
+    k = keys[0]
+    shift, mega = bool({"LSHIFT", "RSHIFT"} & set(names)), "MEGA" in names
+    if mega:
+        return M65_MEGA.get(k)
+    if len(k) == 1 and k.isalpha():
+        return k.upper() if shift else k.lower()
+    if len(k) == 1 and k.isdigit() and not shift:
+        return k
+    return (M65_SHIFT if shift else M65_PLAIN).get(k)
+
+
+def amiga_mega65_keyboard_mode():
+    """the Amiga core in its MEGA65 keyboard mode: every printable US character typed on a USB
+    keyboard (and by m65d's type) reaches the core as the MEGA65 keys that give that character; the
+    combo chosen at the press stays while the key is down, also when Shift is let go first"""
+    import types
+    import m65input as mi
+    names_of = {v: k for k, v in m65d.KEYPOS.items() if k in m65d.MATRIX[v[0]]}
+
+    def decode(cols):
+        return {names_of[(c, r)] for c in range(9) for r in range(8) if cols[c] >> r & 1}
+    bad = [(ch, mi.amiga_combo("mega65", *mi.US_CHARS[ch])) for ch in sorted(mi.US_CHARS)
+           if m65_mode_char(mi.amiga_combo("mega65", *mi.US_CHARS[ch])) != ch]
+    assert not bad, bad
+    hub = mi.InputHub(m65d.KEYPOS, log=lambda m: None)
+    hub.set_core(3)
+    hub.set_amiga_keyboard("mega65")
+    dev = types.SimpleNamespace(keys=set(), roles={"kbd"}, pad=None)
+    hub.devs = {999: dev}
+
+    def ev(code, val):
+        hub._kbd_key(dev, code, val)
+        hub._merge_keys()
+    for ch in sorted(c for c in mi.US_CHARS if c.isprintable()):
+        code, shifted = mi.US_CHARS[ch]
+        if shifted:
+            ev(42, 1)
+        ev(code, 1)
+        time.sleep(mi.MOD_LEAD + 0.005)
+        got = decode(hub.matrix())
+        assert m65_mode_char(got) == ch, (ch, got)
+        if shifted:
+            ev(42, 0)                       # Shift up first: a key with a combo of its own keeps it
+            got2 = decode(hub.matrix())     # (one that passes the PC Shift through just loses it)
+            own = mi.AMIGA_M65_KEYMAP[code][1] is not None
+            assert got2 == (got if own else got - {"LSHIFT"}), (ch, got, got2)
+        ev(code, 0)
+        hub.held.clear()
+        hub.lead.clear()
+        assert decode(hub.matrix()) == set(), ch
+    # positional mode (the menu's "Amiga" radio) keeps the old map: PC "-" -> the MEGA65 "+" key
+    hub.set_amiga_keyboard("amiga")
+    ev(12, 1)
+    assert decode(hub.matrix()) == {"+"}
+    ev(12, 0)
+    # m65d's type on the Amiga core: the same map (the C64-style matrix names would give "[" for ":")
+    d = m65d.Daemon.__new__(m65d.Daemon)
+    d.keyq, d.core, d.inp = [], 3, StubInput()
+    d.inp.amiga_kbd = 'mega65'
+    text = 'copy s:startup-sequence ram:x_1 ; echo "[ok]"'
+    assert d.command('type ' + text) == 'ok %d keys' % len(text)
+    got = ''.join(m65_mode_char(decode(cols)) for _, cols in d.keyq
+                  if m65_mode_char(decode(cols)) is not None)
+    assert got == text, got
+    print('PASS Amiga MEGA65 keyboard mode: all %d US characters, Shift released first keeps the combo; '
+          'm65d type' % len(mi.US_CHARS))
 
 
 def daemon(m, version, tmp):

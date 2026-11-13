@@ -192,6 +192,55 @@ AMIGA_KEYMAP.update({
     99: ["HELP"],                                           # PrtSc = Help
     55: [S, "8"], 74: ["+"], 78: [S, "-"], 98: ["/"], 83: ["."],   # keypad * - + / .
 })
+# Amiga core in its default "MEGA65" keyboard mode (OSM: Keyboard > MEGA65, AExp doc/keyboard.md: "the
+# cap is law": a key types its MEGA65 legend, Shift its upper legend, MEGA its front legend).  For each
+# PC key (US layout): (combo without Shift, combo with Shift or None).  None = the PC Shift goes
+# through with the unshifted combo (letters, ! # $ % , . /); a combo given for Shift replaces the
+# PC Shift (it carries LSHIFT itself where the MEGA65 legend needs it).  Lines: Caps Lock = the
+# MEGA65 CAPS LOCK (Amiga Caps Lock), Right Win / Menu = RESTORE (Right Amiga).  F1..F10 as on the
+# MEGA65 (Shift + F1/F3/F5/F7/F9 = F2..F10).  Home / End / PgUp / PgDn / Insert: nothing.
+AMIGA_M65_KEYMAP = {code: (names, None) for code, names in KEYMAP.items()
+                    if names and names[0] in "1234567890QWERTYUIOPASDFGHJKLZXCVBNM" + ",./" or
+                    code in (15, 28, 96, 57, 42, 54, 29, 97, 103, 105, 108, 106, 59, 60, 61, 62, 63, 64,
+                             65, 66, 67, 68, 87, 82, 79, 80, 81, 75, 76, 77, 71, 72, 73)}
+AMIGA_M65_KEYMAP.update({
+    1: (["ESC"], None), 14: (["INST"], None), 111: (["HOME"], None),   # Esc, Backspace, Delete
+    56: (["ALT"], None), 100: (["NOSCRL"], None),                     # Left Alt, AltGr = Right Alt
+    125: (["MEGA"], None), 99: (["HELP"], None),                      # Left Win = Left Amiga, PrtSc
+    3: (["2"], ["@"]), 7: (["6"], ["UPARROW"]), 8: (["7"], [S, "6"]),   # 2 @  6 ^  7 &
+    9: (["8"], ["*"]), 10: (["9"], [S, "8"]), 11: (["0"], [S, "9"]),    # 8 *  9 (  0 )
+    12: (["-"], ["LEFTARROW"]), 13: (["="], ["+"]),                   # - _  = +
+    26: ([S, ":"], ["MEGA", ":"]), 27: ([S, ";"], ["MEGA", ";"]),     # [ {  ] }
+    39: ([";"], [":"]), 40: ([S, "7"], [S, "2"]),                     # ; :  ' "
+    41: ([S, "LEFTARROW"], ["MEGA", ","]), 43: (["POUND"], [S, "POUND"]),   # ` ~  \ |
+    55: (["*"], None), 74: (["-"], None), 78: (["+"], None), 98: (["/"], None), 83: (["."], None),
+})
+AMIGA_M65_RIGHT_AMIGA = (126, 127)       # Right Win / Menu -> RESTORE line
+# character -> (PC keycode, Shift) on a US layout: m65d's "type" on the Amiga core goes through the
+# key map of the core's keyboard mode, like a USB keyboard
+US_CHARS = {c: (2 + i, False) for i, c in enumerate("1234567890")}
+US_CHARS.update({c: (2 + i, True) for i, c in enumerate("!@#$%^&*()")})
+for _row, _first in (("qwertyuiop", 16), ("asdfghjkl", 30), ("zxcvbnm", 44)):
+    for _i, _c in enumerate(_row):
+        US_CHARS[_c], US_CHARS[_c.upper()] = (_first + _i, False), (_first + _i, True)
+for _c, _k, _s in (("-", 12, 0), ("_", 12, 1), ("=", 13, 0), ("+", 13, 1), ("[", 26, 0), ("{", 26, 1),
+                   ("]", 27, 0), ("}", 27, 1), (";", 39, 0), (":", 39, 1), ("'", 40, 0), ('"', 40, 1),
+                   ("`", 41, 0), ("~", 41, 1), ("\\", 43, 0), ("|", 43, 1), (",", 51, 0), ("<", 51, 1),
+                   (".", 52, 0), (">", 52, 1), ("/", 53, 0), ("?", 53, 1), (" ", 57, 0), ("\n", 28, 0),
+                   ("\t", 15, 0)):
+    US_CHARS[_c] = (_k, bool(_s))
+
+
+def amiga_combo(mode, code, shifted):
+    """matrix key names for PC key code (+ Shift) on the Amiga core in keyboard mode "amiga" /
+    "mega65" (what m65input sends for that key)"""
+    if mode == "mega65":
+        e = AMIGA_M65_KEYMAP.get(code)
+        if not e:
+            return []
+        return e[1] if shifted and e[1] is not None else ([S] if shifted else []) + e[0]
+    names = AMIGA_KEYMAP.get(code, [])
+    return ([S] if shifted and names else []) + names
 KEY_CAPSLOCK, KEY_PAGEUP = 58, 104       # handled as lines, not matrix keys
 MOD_NAMES = {"LSHIFT", "RSHIFT", "CTRL", "MEGA", "ALT"}
 CURSOR_UP_LEFT = (103, 105)              # also sent as dedicated keys (ctrl_bits)
@@ -347,6 +396,9 @@ class InputHub:
         self.joy_swap = False
         self.matrix_cursor = True           # cursor up/left also as RSHIFT + cursor in the matrix
         self.amiga = False                  # Amiga core: AMIGA_KEYMAP, quadrature mouse (set_core)
+        self.amiga_kbd = "amiga"            # its keyboard mode (m65d from the shell): "amiga" =
+                                            # positional (AMIGA_KEYMAP), "mega65" = AMIGA_M65_KEYMAP
+        self.latched = {}                   # keycode -> (names, drops the PC Shift), MEGA65 mode
         self.actions = []                   # system-key actions for m65d (reset / core switch)
         self.linux_focus = False            # keyboards released to Linux (view linux)
         self.lead = {}                      # keycode -> press time (modifier-first combos)
@@ -579,7 +631,7 @@ class InputHub:
             if code in CTRL_KEYS or code in ALT_KEYS:
                 (dev.keys.add if val else dev.keys.discard)(code)
         elif code == KEY_CAPSLOCK:
-            if val == 1 and not self.amiga:
+            if val == 1 and (not self.amiga or self.amiga_kbd == "mega65"):
                 self.caps = not self.caps       # latching key, like the real one
         elif code == KEY_PAGEUP:
             self.restore = val != 0 and not self.amiga
@@ -594,7 +646,12 @@ class InputHub:
                 self.sys_held.discard(code)
         elif val:                               # 1 = press, 2 = autorepeat
             if val == 1 and code not in self.kbd_keys:
+                self.latched.pop(code, None)
                 names = self._names(code)
+                if self.amiga and self.amiga_kbd == "mega65":
+                    # the combo is chosen with the Shift state at the press and kept until the
+                    # release: Shift let go first must not turn ':' into ';' while the key is down
+                    self.latched[code] = (names, self._m65_shifted(code))
                 if any(n in MOD_NAMES for n in names) and \
                    any(n not in MOD_NAMES for n in names):
                     self.lead[code] = time.time()
@@ -658,8 +715,16 @@ class InputHub:
         now = time.time()
         # with the keyboard released to Linux the MEGA65 sees no keyboard keys at all
         # (the modifiers are still tracked, only for the view hotkey)
-        for code in (set() if self.linux_focus else set(self.kbd_keys) | set(self.held)):
-            k = self._names(code)
+        down = set() if self.linux_focus else set(self.kbd_keys) | set(self.held)
+        for code in list(self.latched):
+            if code not in down:
+                del self.latched[code]
+        # MEGA65 mode: a key whose shifted legend has its own combo replaces the PC Shift
+        no_shift = any(drop for _, drop in self.latched.values())
+        for code in down:
+            if no_shift and code in (42, 54):
+                continue
+            k = self.latched[code][0] if code in self.latched else self._names(code)
             if code in self.lead and now - self.lead[code] < MOD_LEAD:
                 k = [n for n in k if n in MOD_NAMES]        # modifier first
             names += k
@@ -672,10 +737,37 @@ class InputHub:
                 cols[c] |= 1 << r
         return cols
 
+    def _m65_shifted(self, code):
+        """MEGA65 keyboard mode: True if code has a combo of its own for the shifted legend and a
+        PC Shift is down (that combo replaces the Shift)"""
+        e = AMIGA_M65_KEYMAP.get(code)
+        return bool(e and e[1] is not None and self.kbd_keys & {42, 54})
+
     def _names(self, code):
         if code in CURSOR_UP_LEFT and not self.matrix_cursor:
             return []                     # dedicated key only (C64 / Amiga core)
+        if self.amiga and self.amiga_kbd == "mega65":
+            e = AMIGA_M65_KEYMAP.get(code)
+            if not e:
+                return []
+            return e[1] if self._m65_shifted(code) else e[0]
         return (AMIGA_KEYMAP if self.amiga else KEYMAP).get(code, [])
+
+    def set_amiga_keyboard(self, mode):
+        """the Amiga core's keyboard mode from its menu ("amiga" positional / "mega65" legends);
+        held keys are let go (the next press uses the new map, as on the core)"""
+        if mode not in ("amiga", "mega65") or mode == self.amiga_kbd:
+            return
+        self.amiga_kbd = mode
+        self.caps = False
+        for dev in self.devs.values():
+            dev.keys.clear()
+        self.lead.clear()
+        self.held.clear()
+        self.latched.clear()
+        self._merge_keys()
+        self.log("m65input: Amiga keyboard mode %s (%s map)" % (
+            mode, "positional" if mode == "amiga" else "MEGA65 legends"))
 
     def set_core(self, core_id):
         """the running core (rk_bridge core id): 2 C64 and 3 Amiga read the cursor up/left keys
@@ -738,7 +830,9 @@ class InputHub:
         # b1 RESTORE, b2 CAPS LOCK, b4 / b5 cursor up / left: the MEGA65 keyboard's dedicated
         # keys (MEGA65 core keyup/keyleft, C64 core keyboard keys 73/74); the matrix gets
         # RIGHT SHIFT + DOWN / RIGHT as well (KEYMAP), as from a real MEGA65 keyboard
-        if self.amiga:                      # AltGr = RESTORE (Right Alt), F3 = CAPS LOCK (F3)
+        if self.amiga and self.amiga_kbd == "mega65":   # Right Win = RESTORE (Right Amiga)
+            restore, caps = bool(self.kbd_keys & set(AMIGA_M65_RIGHT_AMIGA)), self.caps
+        elif self.amiga:                    # AltGr = RESTORE (Right Alt), F3 = CAPS LOCK (F3)
             restore, caps = 100 in self.kbd_keys, 61 in self.kbd_keys
         else:
             restore, caps = self.restore, self.caps

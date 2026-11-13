@@ -383,6 +383,14 @@ class AmigaShell(Runner):
         """menu item index of a config.vhd line (the shell section shifts the lines after it)"""
         return next(n for n, it in enumerate(self.mdef.items) if it.cfm_bit == line)
 
+    def keyboard_mode(self):
+        """the core's keyboard mode from the CFM words: "amiga" (positional) or "mega65" (the
+        legends, the factory default); None without menu data (m65input keeps its map)"""
+        n = (self.mdef.data['c_menu'] if self.mdef else {}).get('KBD_AMIGA')
+        if n is None or not getattr(self, 'cfm', None):
+            return None
+        return 'amiga' if self.cfm[n // 16] >> (n % 16) & 1 else 'mega65'
+
     def show_menu_window(self):
         d = self.mdef
         self.show_window(d.x, d.y, d.dx, d.dy)

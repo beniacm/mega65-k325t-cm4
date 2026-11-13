@@ -18,7 +18,8 @@ Control: TCP port 4511, one text command per line, reply "ok ..."/"err ...":
     reset                      pulse the CPU reset (200 ms)
     hold_reset 0|1
     type <text>                type text via the keyboard matrix (\\n = RETURN); letters unshifted
-                               (uppercase on the C64/C65 BASIC screen)
+                               (uppercase on the C64/C65 BASIC screen); on the Amiga core every
+                               character as on a US keyboard, through its keyboard mode's map
     typecase <text>            case-sensitive: capitals typed with SHIFT (ASCII apps, e.g. FDISK)
     key <NAME> [ms]            tap one key (RETURN, SPACE, F1, RUNSTOP, ...)
     keys <c0> .. <c8>          raw matrix state, 9 hex bytes (bit = row, 1 = down)
@@ -671,6 +672,10 @@ class Daemon:
             ctrl = self.ctrl | self.inp.ctrl_bits()
             self.lx.keys(cols, ctrl, time.monotonic())
             wait = self.lx.poll(time.monotonic())
+            mode = self.lx.keyboard_mode()          # the menu's Keyboard radio -> m65input's map
+            if mode and mode != self.inp.amiga_kbd:
+                self.inp.set_amiga_keyboard(mode)
+                self.input_dirty = True
             if self.lx.kbd_to_core != self.lx_kbd:     # menu opened / closed: re-push the keyboard
                 self.lx_kbd = self.lx.kbd_to_core
                 self.input_dirty = True
@@ -819,6 +824,21 @@ class Daemon:
         if cmd in ("type", "typecase"):
             text = rest.replace("\\n", "\n")
             combos = []
+            if self.core == 3:
+                # the Amiga core: through the key map of its keyboard mode, as a US keyboard would
+                # type it (the MEGA65 matrix names below mean other characters there)
+                mode = getattr(self.inp, "amiga_kbd", "amiga")
+                for ch in text:
+                    if cmd == "type" and ch.isalpha():
+                        ch = ch.lower()
+                    if ch not in m65input.US_CHARS:
+                        return "err no key for %r" % ch
+                    names = m65input.amiga_combo(mode, *m65input.US_CHARS[ch])
+                    if not names:
+                        return "err no key for %r (Amiga keyboard mode %s)" % (ch, mode)
+                    combos.append([KEYPOS[n] for n in names])
+                self.queue_keys(combos)
+                return "ok %d keys" % len(text)
             try:
                 for ch in text:
                     c = key_combo(ch)
