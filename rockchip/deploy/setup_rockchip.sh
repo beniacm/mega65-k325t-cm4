@@ -136,6 +136,7 @@ check() {
     echo VP \$(grep -A4 'Video Port2' /sys/kernel/debug/dri/0/summary 2>/dev/null | grep -o -e ACTIVE -e 'bus_format\[[0-9a-f]*\]' -e 'Display mode: [0-9a-z]*' | tr ' ' _);
     echo DCLK \$(awk '\$1==\"dclk_vop2\" {print \$5}' /sys/kernel/debug/clk/clk_summary 2>/dev/null);
     echo ENV \$(grep -m1 '^M65_PLUG_HOST=' $DEST/m65d.env 2>/dev/null);
+    echo HDD \$(systemctl is-enabled m65hdd 2>/dev/null || echo not-installed) \$(systemctl is-active m65hdd 2>/dev/null) image \$(ls -s --block-size=M $DEST/hdd/aexp.hdf 2>/dev/null || echo none);
     echo LOADKEYS \$(command -v loadkeys);
     for u in $(echo $RADXA_OFF); do [ \"\$(systemctl is-enabled \$u 2>/dev/null)\" = enabled ] && echo ON \$u; done;
     for p in $RADXA_SPI_PINS $RADXA_VIDEO_PINS; do echo PIN \$(grep \"^pin \$p \" /sys/kernel/debug/pinctrl/pinctrl-rockchip-pinctrl/pinmux-pins 2>/dev/null); done;
@@ -184,6 +185,7 @@ check() {
       *) echo "DIFF  overlay $RADXA_SPI_OVL not in extlinux.conf ($ovl)"; bad=1;; esac
     case "$ovl" in *"/$RADXA_HDD_OVL.dtbo"*) echo "ok    overlay $RADXA_HDD_OVL in extlinux.conf (AExp hard disk SPI, opt-in)";;
       *) echo "ok    overlay $RADXA_HDD_OVL off (AExp hard disk SPI; M65_HDD=1 install enables it)";; esac
+    echo "info  m65hdd.service: $(echo "$out" | sed -n 's/^HDD *//p')"
     # the Linux picture: overlay file = the repo's, enabled, and the display pipeline live
     local dt
     dtbo_build
@@ -307,6 +309,15 @@ install() {
          timedatectl set-timezone $TZ && echo $TZ > /etc/timezone &&
          ln -sfn /dev/null /etc/systemd/system/ctrl-alt-del.target &&    # mask (the image links it to reboot.target)
          systemctl daemon-reload && systemctl enable $ENABLE" || { echo "install FAILED"; exit 1; }
+  if [ "${M65_HDD:-0}" = 1 ] && [ $B = radxa-cm3 ]; then
+    # the AExp hard disk service (never on the Luckfox: no hard disk link there): m65hdd.py + the unit
+    # from this repo, hddsrv's sources from the core repo (built on the module at the service start)
+    local hsrc=${M65_HDDSRV:-$HOME/projects/mega65/aexp-lx/K325T/hddsrv}
+    tar -cf - -C "$HERE/hdd" m65hdd.py -C "$HERE" m65hdd.service -C "$hsrc" hddsrv_core.c hddsrv_core.h hddsrv_linux.c | \
+      rsh "mkdir -p $DEST/hdd && tar -C $DEST/hdd -xf - && install -m 644 $DEST/hdd/m65hdd.service /etc/systemd/system/m65hdd.service &&
+           rm $DEST/hdd/m65hdd.service && rm -f $DEST/hdd/hddsrv && systemctl daemon-reload && systemctl enable -q m65hdd.service &&
+           echo 'm65hdd.service installed and enabled (it runs once $DEST/hdd/aexp.hdf exists)'" || { echo "hdd install FAILED"; exit 1; }
+  fi
   echo "installed; m65io built.  Reboot the Rockchip (or: ssh ... sh $DEST/m65d_restart.sh), then: $0 check $HOST"
 }
 
