@@ -739,7 +739,9 @@ the C64 port: DDR3 for the HyperRAM, bridge, keyboard emulator, SD emulator).  B
 `aexp/K325T/build.sh radxacm3` → `K325T/bin/aexp_k325t_cm4_radxacm3.bit` (`build.sh` alone = Luckfox
 pins).  Chip/slow RAM and Kickstart stay in block RAM as upstream, so the Amiga is cycle-for-cycle
 the upstream core (`K325T/PORTING.md`).  Bridge core id **3**; m65d then maps a PC keyboard for
-AExp's "Amiga" keyboard mode and sends the USB mouse as position counters that `amiga_mouse.vhd`
+AExp's keyboard mode (host-master builds: the menu's Keyboard radio, read by the Linux shell --
+"MEGA65" = the legends, PC keys typed as printed; "Amiga" = positional; QNICE builds: positional)
+and sends the USB mouse as position counters that `amiga_mouse.vhd`
 turns into quadrature on port 1 (pads: first pad on port 2).  Flash slot 1 holds either the C64 or
 the Amiga core: `M65_SLOT1=amiga|c64` in `/root/m65/m65d.env` tells m65d which (Ctrl+Alt+F2 /
 `m65ctl core slot1`); both bitstreams are kept in `/root/m65/bit/`.  On the Radxa CM3 board slot 1
