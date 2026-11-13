@@ -196,6 +196,7 @@ class Daemon:
         self.lx_kbd = None
         self.lx_core = None
         self.lx_probed = False
+        self.lx_settle = 0.0
         self.ctl_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.ctl_srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.ctl_srv.bind(("0.0.0.0", args.ctl_port))
@@ -533,12 +534,14 @@ class Daemon:
         if reconfigured or core != self.lx_core:
             self.lx_core = core
             self.lx_probed = False
+            self.lx_settle = time.time() + 1.0   # m65io's reconfiguration count lags (0.5 s stats)
         if self.lx is not None and (core != 3 or reconfigured):
             self.lx.detach()
             self.lx = None
             print("m65d: lxshell detached (%s)" % ("FPGA reconfigured" if reconfigured else "other core"),
                   flush=True)
-        if core != 3 or self.lx is not None or self.lx_probed or time.time() < self.lx_retry:
+        if core != 3 or self.lx is not None or self.lx_probed or time.time() < self.lx_retry \
+                or time.time() < self.lx_settle:
             return
         self.lx_retry = time.time() + 2.0
         try:

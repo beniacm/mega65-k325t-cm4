@@ -103,6 +103,8 @@ class AmigaShell(Runner):
                 return img.read(name)
             finally:
                 img.close()
+        except FileNotFoundError:
+            return None
         except (OSError, Exception) as e:            # a broken image must not stop the start
             self.log('lxshell: card image %s: %s' % (name, e))
             return None

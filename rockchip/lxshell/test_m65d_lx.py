@@ -92,7 +92,7 @@ def main():
         d.ctrl, d.ja, d.jb, d.cols = 0, 0, 0, [0] * 9
         d.input_dirty, d.pots_override, d.sent, d.lat = True, None, None, []
         d.lx, d.lx_retry, d.lx_kbd, d.core = None, 0.0, None, 3
-        d.lx_core, d.lx_probed = None, False
+        d.lx_core, d.lx_probed, d.lx_settle = None, False, 0.0
 
         def spin(seconds):
             end = time.monotonic() + seconds
@@ -101,6 +101,8 @@ def main():
                 d.push_input()
                 time.sleep(0.002)
 
+        d.lx_check(3, False)
+        time.sleep(1.05)                                # the settle time after a core change
         d.lx_check(3, False)
         assert d.lx is not None, 'not attached'
         spin(1.0)
@@ -148,7 +150,7 @@ def daemon(m, version, tmp):
     d.ctrl, d.ja, d.jb, d.cols = 0, 0, 0, [0] * 9
     d.input_dirty, d.pots_override, d.sent, d.lat = True, None, None, []
     d.lx, d.lx_retry, d.lx_kbd, d.core = None, 0.0, None, None
-    d.lx_core, d.lx_probed = None, False
+    d.lx_core, d.lx_probed, d.lx_settle = None, False, 0.0
     return d
 
 
@@ -172,9 +174,11 @@ def other_cores(m):
         d = daemon(m, 0, tmp)
         for _ in range(5):
             d.lx_check(3, False)
-            d.lx_retry = 0.0                            # even with the retry timer run out
+            d.lx_retry = d.lx_settle = 0.0              # even with the timers run out
         assert d.lx is None and d.br.spi.ops == [0x01], d.br.spi.ops
         d.lx_check(3, True)                             # reconfigured: probed once more
+        d.lx_settle = 0.0
+        d.lx_check(3, False)
         assert d.br.spi.ops == [0x01, 0x01], d.br.spi.ops
     print('PASS other cores: no attach, no extra SPI traffic (QNICE Amiga: one STATUS per configuration)')
 
