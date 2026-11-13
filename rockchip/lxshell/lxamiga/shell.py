@@ -138,10 +138,15 @@ class AmigaShell(Runner):
         except OSError:
             data = self.read_card('/amiga/kick.rom')
             src = 'card image /amiga/kick.rom'
+        w = self.scr.dx - 4                     # message lines: inside the frame, after a space
+
+        def fit(t):
+            return t if len(t) <= w else '...' + t[-(w - 3):]
         if data is None:
-            return None, 'Kickstart missing:\\n %s' % p
+            return None, 'Kickstart missing:\\n %s' % fit(p)
         if len(data) not in KICK_SIZES:
-            return None, 'Kickstart %s: %d bytes\\n(256 KB or 512 KB expected).' % (src, len(data))
+            return None, 'Kickstart of the wrong size:\\n %s\\n %d bytes (256 or 512 KB expected).' % (
+                fit(src), len(data))
         return data, src
 
     def load_values(self):
@@ -236,6 +241,8 @@ class AmigaShell(Runner):
                 self.log('lxshell: CFM read-back still differs after 30 s: going on')
             csr = b.rd(hb.CSR)
             b.wr(hb.CSR, csr | hb.CSR_RESET)
+            # overlay cells flushed meanwhile were dropped too: send the whole screen again
+            self.scr.invalidate()
         self.cfm = words
         self.update_open_key()
         # Kickstart: wait for it with the core held
@@ -246,7 +253,7 @@ class AmigaShell(Runner):
                 break
             if not shown:
                 self.log('lxshell: ' + info.replace('\\n', ' '))
-                message(self.scr, '\\n ' + info + '\\n\\n The core starts as soon as the file is there.')
+                message(self.scr, '\\n ' + info + '\\n\\n The core starts as soon as the file\\n is there.')
                 self.show_full()
                 shown = True
             yield ('sleep', 1.0)

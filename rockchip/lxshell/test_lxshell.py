@@ -168,6 +168,28 @@ def test_start_waits_for_kickstart():
         assert not r.m.held() and not r.m.csr & hb.CSR_OSM
 
 
+def test_overlay_after_held_reset():
+    """what the shell believes is in the overlay RAM must be what is there: cells it flushes while
+    a long press is still held are dropped by the master (found on the board: a menu highlight
+    stayed in the 'Kickstart missing' screen)"""
+    with tmpdir() as tmp:
+        r = started(Rig(tmp))
+        r.key(r.HELP)                               # the menu with its highlight in the overlay RAM
+        r.key(r.HELP)
+        r.sh.scr.clr()                              # a restarted m65d (adopt): a fresh screen,
+        r.sh.scr.invalidate()                       # nothing known about the overlay RAM
+        os.rename(os.path.join(r.dir, 'kick.rom'), os.path.join(r.dir, 'kick.away'))
+        r.m.long_press(held_ms=1500)
+        r.run(4.0)
+        assert r.m.held() and any('Kickstart missing' in row for row in r.screen())
+        assert r.m.vram[0] == r.sh.scr.ch and r.m.vram[1] == r.sh.scr.at
+        rows = r.screen()
+        assert all(row[0] == rows[1][0] and row[44] == rows[1][0] for row in rows[1:35]), rows[:8]
+        os.rename(os.path.join(r.dir, 'kick.away'), os.path.join(r.dir, 'kick.rom'))
+        r.run(2.0)
+        assert not r.m.held()
+
+
 def test_menu_draw_and_close():
     with tmpdir() as tmp:
         r = started(Rig(tmp))
