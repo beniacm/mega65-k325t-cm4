@@ -45,10 +45,13 @@ SCR_NOSIG = 200
 SCR_DEBOUNCE = 3
 SCR_UNKNOWN = 4
 
+# m2m-rom.asm WRN_ADF_SIZE; the shell prints "Error code: 0001", a new line, this, a new line and
+# STR_SPACE (shell.asm _HM_SDMOUNTED5 / 5S: hence the two "press space" lines, as today)
 WRN_ADF_SIZE = ("\\n\\nThis is not a valid ADF disk image:\\n"
                 "the file size must be 901,120 bytes\\n"
                 "(880 KB standard ADF; 81..83-track over-\\n"
-                "dumps up to 934,912 bytes are accepted).")
+                "dumps up to 934,912 bytes are accepted)."
+                "\\n\\nPress SPACE to continue.\\n")
 STR_SPACE = "Press Space to continue."
 
 
@@ -127,7 +130,8 @@ class AmigaShell:
                 continue
             if zlib.crc32(raw) & 0xFFFFFFFF == self.menu_id:
                 self.log('lxshell: menu data %s (id %08X)' % (p, self.menu_id))
-                return ui.MenuDef(json.loads(raw.decode('ascii'))), None
+                return ui.MenuDef(json.loads(raw.decode('ascii')),
+                                  shell_section=getattr(self, 'shell_section', True)), None
         return None, 'no menu data for this core (id %08X)' % self.menu_id
 
     def kickstart(self):
@@ -292,6 +296,10 @@ class AmigaShell:
     def start_seq(self, why):
         b = self.bus
         self.log('lxshell: %s' % why)
+        # a QNICE restart started the menu and the file browser afresh (OPTM_INIT, FB_INIT)
+        if self.mdef:
+            self.menu = ui.Menu(self.mdef, self.scr)
+        self.__dict__.pop('browser', None)
         self.holding = True
         self.kbd_to_core = False
         csr = b.rd(hb.CSR)
@@ -575,7 +583,8 @@ class AmigaShell:
         if not hasattr(self, 'browser'):
             def hide(name, is_dir):
                 return not is_dir and not name.endswith('.ADF')
-            self.browser = ui.Browser(self.dir, s, hide)
+            self.browser = ui.Browser(getattr(self, 'browse_root', None) or self.dir, s, hide,
+                                      start=self.dir)
         while True:
             path = yield from self.browser.run()
             if path is None:                    # Run/Stop: back, the menu shows the old state
@@ -589,7 +598,7 @@ class AmigaShell:
                 m.set_item(n, True)
                 break
             s.clrinner()
-            s.printstr(err + '\\n\\n' + STR_SPACE)
+            s.printstr(err + '\\n' + STR_SPACE)
             while (yield ui.KEY) != ui.KEY_SPACE:
                 pass
             s.clrinner()
@@ -613,7 +622,7 @@ class AmigaShell:
             return 'Error: %s' % e.strerror
         with f:
             if not ADF_MIN <= size <= ADF_MAX:
-                return 'Error code: 0001' + WRN_ADF_SIZE
+                return 'Error code: 0001\\n' + WRN_ADF_SIZE
             data = f.read()
         # progress bar on the bottom frame line, like LOAD_IMAGE
         w = ui.DX - 6

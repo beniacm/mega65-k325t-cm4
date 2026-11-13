@@ -256,7 +256,7 @@ SHELL_SECTION = [
 
 
 class MenuDef:
-    def __init__(self, data):
+    def __init__(self, data, shell_section=True):
         self.data = data
         self.core_groups = {v: k for k, v in data['core_groups'].items()}
         self.items = []
@@ -266,9 +266,9 @@ class MenuDef:
         # the shell section goes in front of the first help item's separator line
         help_at = next(i for i, it in enumerate(self.items) if it.help)
         at = help_at - 1 if help_at and self.items[help_at - 1].line else help_at
-        shell = [Item(t, raw, shell=name) for t, raw, name in SHELL_SECTION]
+        shell = [Item(t, raw, shell=name) for t, raw, name in SHELL_SECTION] if shell_section else []
         self.items[at:at] = shell
-        self.n_shell_main = 2                   # main-menu lines the section adds (line + headline)
+        self.n_shell_main = 2 if shell_section else 0   # main-menu lines (line + headline)
         for it in self.items:
             it.key = self._key(it)
         self.dx = data['optm_dx'] + 2
@@ -554,9 +554,9 @@ def _sort_key_cmp(a, b):
 
 
 class Browser:
-    def __init__(self, root, screen, file_filter):
+    def __init__(self, root, screen, file_filter, start=None):
         self.root = os.path.realpath(root)
-        self.cwd = self.root
+        self.cwd = os.path.realpath(start) if start else self.root
         self.scr = screen
         self.filter = file_filter       # name (upper case), is_dir -> True = hide
         self.cursor = 0                 # absolute index of the selected entry (kept between calls)
