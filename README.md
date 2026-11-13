@@ -764,6 +764,13 @@ user's Kickstarts `/amiga/kick13.rom`, `kick204.rom`, `kick31.rom` (copy one to 
 `sysinfo.adf` (`aexp/K325T/tools/mk_sysinfo_adf.py`: Kickstart version, chipset ids, memory list,
 CPU timing, fast RAM test; `--decode` reads a capture).
 
+**Since 2026-11-13 14:05 flash slot 1 holds the host-master build with the Linux menu** (`build_lx1_radxa`,
+md5 bd793b32..., kept as `/root/m65/bit/aexp_lx1_k325t_cm4_radxacm3.bit`): QNICE is not in the bitstream, the
+M2M menu runs in m65d (`rockchip/lxshell/`, branch amiga-lxshell), the menu data file lives in
+`/root/m65/menus/`, Kickstart / ADFs / `amiga.settings` in `/root/m65/amiga/`.  The previous QNICE build is
+still `/root/m65/bit/aexp_k325t_cm4_radxacm3.bit` (the way back: `m65flash.py write 1` with it, and harness
+main's m65d).
+
 ## Standalone: both cores in flash, switched from the Rockchip
 
 No PC or JTAG is needed in normal use:
