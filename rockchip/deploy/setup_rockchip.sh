@@ -86,6 +86,10 @@ RADXA_VIDEO_OVL=${M65_BT656:-bt656-576p50}
 case "$RADXA_VIDEO_OVL" in bt656-576i50) RADXA_DCLK=27000000;; *) RADXA_DCLK=54000000;; esac
 # Ctrl+Alt+End power-off: plugd on the PC with the smart plug (README "Real-time clock and safe power-off")
 PLUG_HOST=${M65_PLUG_HOST-192.168.1.133:4530}
+# the bridge's SPI rate for m65io (m65d follows it): M65IO_HZ=<Hz> install writes it into m65d.env,
+# M65IO_HZ= (empty) removes it (default 40000000 = 33 MHz on the wire); unset = left as it is
+IO_HZ_SET=${M65IO_HZ+set}
+IO_HZ=${M65IO_HZ-}
 # Radxa CM3: NetworkManager state in RAM (unit, script -> installed path)
 RADXA_NMRAM_UNIT=m65-nm-ram.service
 RADXA_NMRAM_SH=/usr/local/sbin/m65-nm-ram
@@ -132,6 +136,7 @@ check() {
     echo VP \$(grep -A4 'Video Port2' /sys/kernel/debug/dri/0/summary 2>/dev/null | grep -o -e ACTIVE -e 'bus_format\[[0-9a-f]*\]' -e 'Display mode: [0-9a-z]*' | tr ' ' _);
     echo DCLK \$(awk '\$1==\"dclk_vop2\" {print \$5}' /sys/kernel/debug/clk/clk_summary 2>/dev/null);
     echo ENV \$(grep -m1 '^M65_PLUG_HOST=' $DEST/m65d.env 2>/dev/null);
+    echo IOHZ \$(grep -m1 '^M65IO_HZ=' $DEST/m65d.env 2>/dev/null) \$(tr ' ' '\\n' < /run/m65io.stats 2>/dev/null | grep '^spi_hz=');
     echo LOADKEYS \$(command -v loadkeys);
     for u in $(echo $RADXA_OFF); do [ \"\$(systemctl is-enabled \$u 2>/dev/null)\" = enabled ] && echo ON \$u; done;
     for p in $RADXA_SPI_PINS $RADXA_VIDEO_PINS; do echo PIN \$(grep \"^pin \$p \" /sys/kernel/debug/pinctrl/pinctrl-rockchip-pinctrl/pinmux-pins 2>/dev/null); done;
@@ -230,6 +235,7 @@ check() {
   echo "$out" | grep -q "^GCC /" && echo "ok    gcc" || { echo "DIFF  gcc missing (apt install gcc)"; bad=1; }
   # m65d voids Ctrl+Alt+Insert in the console keymap with loadkeys when the picture goes to Linux
   echo "$out" | grep -q "^LOADKEYS /" && echo "ok    loadkeys" || { echo "DIFF  loadkeys missing (apt install kbd)"; bad=1; }
+  echo "info  SPI rate: $(echo "$out" | sed -n 's/^IOHZ *//p') (m65d.env M65IO_HZ / what m65io uses now; m65d follows m65io)"
   local env; env=$(echo "$out" | sed -n 's/^ENV *//p')
   if [ -n "$PLUG_HOST" ]; then
     [ "$env" = "M65_PLUG_HOST=$PLUG_HOST" ] && echo "ok    $DEST/m65d.env $env (plugd)" \
@@ -282,6 +288,7 @@ install() {
   fi
   # m65d.env: only the M65_PLUG_HOST line is ours
   local penv="{ grep -v '^M65_PLUG_HOST=' m65d.env 2>/dev/null; [ -z '$PLUG_HOST' ] || echo 'M65_PLUG_HOST=$PLUG_HOST'; } > m65d.env.new && mv m65d.env.new m65d.env && { [ -s m65d.env ] || rm m65d.env; }"
+  [ -z "$IO_HZ_SET" ] || penv="$penv && { grep -v '^M65IO_HZ=' m65d.env 2>/dev/null; [ -z '$IO_HZ' ] || echo 'M65IO_HZ=$IO_HZ'; } > m65d.env.new && mv m65d.env.new m65d.env && { [ -s m65d.env ] || rm m65d.env; }"
   echo "copying to $HOST:$DEST"
   tar -C "$HERE" -cf - $FILES $UNITS deploy/config.txt ide m65-safe.shutdown journald-m65.conf tmpfiles-m65.conf timesyncd-m65.conf m65-nm-ram.sh $RADXA_NMRAM_UNIT $RADXA_TMP_UNIT $vtar | \
     rsh "mkdir -p $DEST && tar -C $DEST -xf - && cd $DEST && chmod 644 $(echo $FILES) && rm -f /usr/local/bin/m65run && install -m 755 m65run /usr/local/bin/m65run && rm -f m65io &&

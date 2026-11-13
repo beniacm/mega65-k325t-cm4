@@ -14,8 +14,14 @@ ExecStartPre=/bin/sh -c '[ m65io -nt m65io.c ] || gcc -O2 -Wall -o m65io m65io.c
 ExecStartPre=-/bin/mv -f /run/m65/m65io.log /run/m65/m65io.log.1
 # the stats file is rewritten twice a second: it lives in RAM, the old path is a link to it
 ExecStartPre=-/bin/ln -sfn /run/m65io.stats /root/m65/m65io.stats
-# extra arguments until the next reboot: m65d_restart.sh <args> (systemctl set-environment)
-ExecStart=/root/m65/m65io $M65IO_ARGS
+# the bridge's SPI rate (requested; m65io steps down to the fastest clean one: 33.3, 25, 16.7, 10 MHz
+# and up again; m65d follows m65io).  Per rig in /root/m65/m65d.env (M65IO_HZ=, setup_rockchip.sh
+# M65IO_HZ=... install), e.g. 50000000 = 49.5 MHz on the RK3566's 198 MHz SPI clock
+Environment=M65IO_HZ=40000000
+EnvironmentFile=-/root/m65/m65d.env
+# extra arguments until the next reboot: m65d_restart.sh <args> (systemctl set-environment); a -s
+# there wins over M65IO_HZ
+ExecStart=/root/m65/m65io -s $M65IO_HZ $M65IO_ARGS
 StandardOutput=append:/run/m65/m65io.log
 StandardError=inherit
 Restart=always
