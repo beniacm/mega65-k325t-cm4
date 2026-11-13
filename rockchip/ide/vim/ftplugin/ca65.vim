@@ -20,3 +20,5 @@ nnoremap <buffer> <silent> <F8> :cnext<CR>
 nnoremap <buffer> <silent> <F9> :cprevious<CR>
 inoremap <buffer> <silent> <F5> <Esc>:call M65Make('run')<CR>
 inoremap <buffer> <silent> <F7> <Esc>:call M65Make('')<CR>
+
+let b:undo_ftplugin = 'setl makeprg< errorformat< keywordprg< commentstring< iskeyword< | silent! nunmap <buffer> <F5> | silent! nunmap <buffer> <F7> | silent! nunmap <buffer> <F8> | silent! nunmap <buffer> <F9> | silent! iunmap <buffer> <F5> | silent! iunmap <buffer> <F7>'
