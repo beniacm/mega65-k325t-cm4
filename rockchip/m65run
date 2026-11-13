@@ -15,6 +15,7 @@ Writes the PRG through the serial monitor (binary load, ~190 KB/s) and starts it
     set the PC to the stub's SYS address, run (the start code sets up the rest itself).
   * a BASIC-style program after a C program (or with the CPU parked): BASIC is broken, so the
     MEGA65 core is reset first and m65run waits for READY. (leaving the start menu with '/').
+    The same when the start menu system is on the screen (power-on, a core switch).
     The kind of the last program is kept in /tmp/m65run.last.
 Afterwards the HDMI output and the keyboard are switched to the MEGA65 (m65d 'view mega65').
 Back to the Linux picture (vim, the shell): Ctrl+Alt+Insert."""
@@ -97,9 +98,9 @@ class Monitor:
         size = (r[0x58] | r[0x59] << 8) * (r[0x7B] + 1)
         return self.read(ptr, min(size, 8192))
 
-    def reset_to_basic(self, timeout=40):
+    def reset_to_basic(self, timeout=40, why="BASIC is not usable after the last program"):
         """reset the MEGA65 core and wait for BASIC's READY. (leave the start menu with '/')"""
-        print("m65run: resetting the MEGA65 (BASIC is not usable after the last program)")
+        print("m65run: resetting the MEGA65 (%s)" % why)
         # Blank the screen memory first: after the reset the KERNAL points the VIC-IV back to
         # $0800, which may still hold a READY. from before the last program -- seen at once, the
         # PRG was then loaded over the starting menu system (?SYNTAX ERROR IN 670, "RUN" -> "UN").
@@ -183,9 +184,14 @@ def main():
         last = open(LAST).read().strip()
     except OSError:
         last = ""
+    # The MEGA65's start menu system (after power-on or a core switch) is a BASIC program: the
+    # typed RUN / SYS went into it (?UNDEFINED STATEMENT ERROR IN 730).  Seen on its screen: reset
+    # to BASIC first, leaving the menu with '/' (2026-11-13, F5 right after a core switch)
+    menu = "--load" not in a and not mon.parked() and scr_codes("MENU SYSTEM") in mon.screen()
     # an explicit --reset always resets (B65 BASIC's stub also starts with BANK 0, like llvm-mos's)
-    if "--load" not in a and ("--reset" in a or not is_c and (last == "c" or mon.parked())):
-        if not mon.reset_to_basic():
+    if "--load" not in a and ("--reset" in a or menu or not is_c and (last == "c" or mon.parked())):
+        if not mon.reset_to_basic(why="the start menu system is on the screen" if menu else
+                                  "BASIC is not usable after the last program"):
             sys.exit("m65run: no READY. after the reset (check the MEGA65 screen)")
     try:
         open(LAST, "w").write("c" if is_c else "basic")

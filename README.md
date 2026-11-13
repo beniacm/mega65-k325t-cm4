@@ -298,12 +298,11 @@ any more, so `m65run` resets the MEGA65 core first and waits for `READY.` in scr
 the start menu with `/`); `--reset` forces that. Tested: C program, then `m65new` asm project →
 reset → `HELLO MEGA65` + `READY.` Tested: hello world with
 printf and `VICIV.bordercol` run twice in a row without a reset.
-Radxa CM3 (Debian 12): llvm-mos is not installed there (2026-11-13; `m65new -c` says so).  The
-Luckfox's tree was built against glibc 2.28 / GCC 8's libstdc++, which Debian 12 (glibc 2.36,
-libstdc++ 6.0.30) should still satisfy (not verified on the board: after the copy,
-`ldd /opt/llvm-mos/bin/clang-*` must find every library), so it can be copied as it is (PC, both modules up):
-`ssh root@192.168.1.143 'tar -C /opt -cf - llvm-mos' | ssh root@<radxa> 'tar -C /opt -xf - && echo
-"export PATH=/opt/llvm-mos/bin:\$PATH" > /etc/profile.d/llvm-mos.sh'` (log in again for the PATH).
+Radxa CM3 (Debian 12): the Luckfox's tree was copied as it is (2026-11-13; 310 MB, nothing
+downloaded or rebuilt): `ssh root@192.168.1.143 'tar -C /opt -cf - llvm-mos' | ssh root@<radxa>
+'tar -C /opt -xf - && echo "export PATH=/opt/llvm-mos/bin:\$PATH" > /etc/profile.d/llvm-mos.sh'`.
+Built against glibc 2.28 / GCC 8's libstdc++, it runs on Debian 12 (glibc 2.36, libstdc++ 6.0.30):
+`ldd` resolves every ELF in `/opt/llvm-mos/bin`; `m65new -c` + F5 in vim prints `HELLO MEGA65 FROM C`.
 `build_llvm_mos.sh` itself reads a Debian 10 sysroot (gcc 8 paths) and is not meant for the Radxa.
 
 **Assembler IDE in vim** (`rockchip/ide/`, installed by `setup_rockchip.sh`):
