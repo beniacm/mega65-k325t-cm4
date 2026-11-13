@@ -193,6 +193,8 @@ class Daemon:
         self.lx = None          # the Amiga core's Linux shell (lxshell/shell.py), when attached
         self.lx_retry = 0.0
         self.lx_kbd = None
+        self.lx_core = None
+        self.lx_probed = False
         self.ctl_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.ctl_srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.ctl_srv.bind(("0.0.0.0", args.ctl_port))
@@ -524,12 +526,18 @@ class Daemon:
 
     # ---- the Amiga core's Linux shell (host-master bitstreams; QNICE bitstreams: nothing changes)
     def lx_check(self, core, reconfigured):
+        # Any core other than the Amiga (id 3): nothing at all, not one extra SPI transfer.  The
+        # Amiga: one STATUS read per FPGA configuration tells a host-master build (byte 72 != 0)
+        # from a QNICE build; a QNICE build is then left alone until the next configuration.
+        if reconfigured or core != self.lx_core:
+            self.lx_core = core
+            self.lx_probed = False
         if self.lx is not None and (core != 3 or reconfigured):
             self.lx.detach()
             self.lx = None
             print("m65d: lxshell detached (%s)" % ("FPGA reconfigured" if reconfigured else "other core"),
                   flush=True)
-        if core != 3 or self.lx is not None or time.time() < self.lx_retry:
+        if core != 3 or self.lx is not None or self.lx_probed or time.time() < self.lx_retry:
             return
         self.lx_retry = time.time() + 2.0
         try:
@@ -538,7 +546,8 @@ class Daemon:
             from lxamiga.shell import AmigaShell
             link = SpiLink(self.br.spi)
             if link.status().version == 0:
-                return                  # a QNICE bitstream: the firmware serves the menu
+                self.lx_probed = True   # a QNICE bitstream: the firmware serves the menu
+                return
             lx = AmigaShell(m2m.M2MBus(link), self.args.amiga_menus, self.args.amiga_dir,
                                     card_img=self.args.card, state_path=self.args.amiga_state,
                                     log=lambda m: print("m65d: " + m, flush=True))
