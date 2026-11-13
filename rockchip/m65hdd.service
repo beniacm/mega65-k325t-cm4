@@ -1,0 +1,25 @@
+[Unit]
+Description=AExp A1200 hard disk: hddsrv on the image in RAM (stored on the module, changed blocks written back when the service stops)
+# no image, no service (and the Luckfox never gets this unit: M65_HDD=1 install on the Radxa only)
+ConditionPathExists=/root/m65/hdd/aexp.hdf
+ConditionPathExists=/dev/spidev0.0
+
+[Service]
+Type=simple
+WorkingDirectory=/root/m65/hdd
+ExecStartPre=/bin/sh -c '[ hddsrv -nt hddsrv_core.c ] && [ hddsrv -nt hddsrv_linux.c ] || gcc -O2 -Wall -o hddsrv hddsrv_linux.c hddsrv_core.c'
+ExecStartPre=/usr/bin/python3 /root/m65/hdd/m65hdd.py load
+# hddsrv waits for the core (any core may be loaded) and survives core switches by itself
+ExecStart=/root/m65/hdd/hddsrv /dev/shm/aexp.hdf
+ExecReload=/usr/bin/python3 /root/m65/hdd/m65hdd.py save
+# after hddsrv has stopped: a clean shutdown (Ctrl+Alt+End, m65ctl poweroff) stops the service before
+# the file systems go read-only
+ExecStopPost=/usr/bin/python3 /root/m65/hdd/m65hdd.py save
+StandardOutput=append:/run/m65/hddsrv.log
+StandardError=inherit
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
