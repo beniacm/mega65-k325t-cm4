@@ -761,6 +761,45 @@ def test_legacy_import_95():
     assert hb.import_legacy(mnew, bytes(96)) is None
 
 
+def test_unknown_key_kept():
+    """decision (lxcore/settings.py): a key the running menu does not have is kept.  A profile with
+    "Fast 68020" on, loaded under the old menu: the old menu's items are exactly as without the key, a
+    change through the menu saves the file with the key still on; the new menu then starts with the
+    fast CPU on (and shows it)"""
+    old, new = harness_menu(OLD_ID), harness_menu(NEW_ID)
+    base = {'CHIPSET:AGA Chipset': 1, 'CPU:68020 CPU': 1, 'FAST:4 MB Fast RAM': 1, 'FILTER:Smooth': 1}
+    with tmpdir() as tmp:
+        os.makedirs(os.path.join(tmp, 'ref'))
+        ref = started(Rig(os.path.join(tmp, 'ref'), menu=old, settings={'format': 1, 'values': base}))
+        ref_words = [e for e in ref.m.events if e[0] == 'release'][0][1]
+        r = started(Rig(tmp, menu=old, settings={'format': 1, 'values': dict(base, **{FAST_KEY: 1})}))
+        assert [e for e in r.m.events if e[0] == 'release'][0][1] == ref_words
+        r.key(r.HELP)
+        ref.key(ref.HELP)
+        assert r.screen() == ref.screen()
+        nav_to(r, 'RAM:')
+        r.key(r.RETURN)
+        nav_to(r, '2 MB Fast RAM')
+        r.key(r.RETURN)
+        r.key(r.RUNSTOP)
+        r.key(r.HELP)
+        r.run(0.5)
+        with open(os.path.join(r.dir, 'amiga.settings')) as f:
+            saved = json.load(f)
+        assert saved['menu_id'] == OLD_ID
+        assert saved['values'][FAST_KEY] == 1 and saved['values']['FAST:2 MB Fast RAM'] == 1
+        assert saved['values']['FAST:4 MB Fast RAM'] == 0
+        # the new bitstream with the same profile: the fast CPU is on from the first release
+        r2 = started(Rig(tmp, menu=new, model=mdl.ModelMaster(menu_id=new[1], defaults=new[2])))
+        rel = [e for e in r2.m.events if e[0] == 'release'][0][1]
+        c = json.loads(new[0])['c_menu']
+        assert bit(rel, FAST_LINE) and bit(rel, c['FAST_2M']) and bit(rel, c['CHIPSET_AGA'])
+        r2.key(r2.HELP)
+        nav_to(r2, 'RAM:')
+        r2.key(r2.RETURN)
+        assert any(row[20:45] == '|=Fast 68020            |' for row in r2.screen()), r2.screen()
+
+
 def test_aga_memory_summary_new_menu():
     """the AGA summary hook with the "Fast 68020" line in the submenu"""
     aga_memory_summary(harness_menu(NEW_ID))

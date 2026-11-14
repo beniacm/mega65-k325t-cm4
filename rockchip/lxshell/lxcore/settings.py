@@ -5,6 +5,10 @@
 Every setting (radio and toggle items with a key) is stored under its name, both on and off, so a
 later menu with more items keeps every setting it still has: an item the file does not name gets
 its default; in a radio group the file does not name at all, the default member is chosen.
+A name the running menu does not have (an item of a newer or other bitstream, e.g. "CPUFAST:Fast
+68020" under a menu without that line) is kept on purpose: it does not touch the menu's items and it
+is written back with the next save, so the setting is in effect again when a bitstream with that item
+runs (a setting belongs to the user's profile, not to one bitstream).
 Written only when a setting changed, via a temporary file + rename (a power cut leaves the old or
 the new file, never half of one).  Nothing periodic.
 """
