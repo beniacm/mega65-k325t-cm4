@@ -509,9 +509,14 @@ class AmigaShell(Runner):
         return
         yield
 
+    # the machine-changing groups: a change holds the core, writes and releases (one cold boot).
+    # CPUFAST = "Fast 68020" (the second CPU on its own clock, AA719CD5 and later menus): the core
+    # cold-boots on a change of the line anyway; the shell treats it like the other machine lines
+    TOPOLOGY_GROUPS = ('MEM', 'CHIPSET', 'FAST', 'CPU', 'IDE', 'CPUFAST')
+
     def topology_mask(self):
         mask = [0] * 16
-        names = ('MEM', 'CHIPSET', 'FAST', 'CPU', 'IDE')
+        names = self.TOPOLOGY_GROUPS
         gids = {self.mdef.data['core_groups'][n] for n in names if n in self.mdef.data['core_groups']}
         for it in self.mdef.items:
             if it.cfm_bit is not None and it.g in gids:

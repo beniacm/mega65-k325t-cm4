@@ -683,6 +683,48 @@ def test_installer_ships_menus():
     assert '"--amiga-menus", default=os.environ.get("M65_AMIGA_MENUS", "/root/m65/menus")' in m65d
 
 
+def test_fast_cpu_toggle_cold_boots_once():
+    """the "Fast 68020" line is machine topology: each change holds the core, writes the CFM word, releases
+    = exactly one cold boot, nothing written while the core runs; on, off, on; the setting is stored and in
+    effect at the next start"""
+    menu = harness_menu(NEW_ID)
+    with tmpdir() as tmp:
+        r = started(Rig(tmp, menu=menu))
+        assert not bit(r.m.cfm, FAST_LINE)
+        r.key(r.HELP)
+        nav_to(r, 'RAM:')
+        r.key(r.RETURN)
+        r.show('Amiga Hardware with Fast 68020')
+        rows = r.screen()
+        assert any(row[20:45] == '| Fast 68020            |' for row in rows), rows
+        nav_to(r, 'Fast 68020')
+        y = next(y for y in range(36) if 'Fast 68020' in rows[y])
+        for want in (1, 0, 1):
+            n0, l0 = len(r.m.events), len(r.logs)
+            r.key(r.RETURN)
+            ev = r.m.events[n0:]
+            assert [e[0] for e in ev] == ['hold', 'release'], ev
+            before, after = ev[0][1], ev[1][1]
+            assert [a ^ b for a, b in zip(before, after)] == [(1 << FAST_LINE % 16) if w == FAST_LINE // 16 else 0
+                                                              for w in range(16)], (before, after)
+            assert bit(after, FAST_LINE) == want and bit(r.m.cfm, FAST_LINE) == want
+            assert [l for l in r.logs[l0:] if 'machine change' in l] == [
+                'lxshell: machine change: hold, write, release (one cold boot)']
+            assert r.screen()[y][21] == ('=' if want else ' '), r.screen()[y]
+            assert not r.m.held()
+        r.key(r.RUNSTOP)
+        r.key(r.HELP)
+        r.run(0.5)
+        v = st.load(os.path.join(r.dir, 'amiga.settings'))
+        assert v[FAST_KEY] == 1
+        with open(os.path.join(r.dir, 'amiga.settings')) as f:
+            assert json.load(f)['menu_id'] == NEW_ID
+        r2 = started(Rig(tmp, menu=menu, model=mdl.ModelMaster(menu_id=menu[1], defaults=menu[2])))
+        rel = [e for e in r2.m.events if e[0] == 'release']
+        assert len(rel) == 1 and bit(rel[0][1], FAST_LINE)
+        assert not [e for e in r.m.events + r2.m.events if e[0] == 'cfm_while_running']
+
+
 def test_aga_memory_summary_new_menu():
     """the AGA summary hook with the "Fast 68020" line in the submenu"""
     aga_memory_summary(harness_menu(NEW_ID))
