@@ -816,6 +816,15 @@ M2M menu runs in m65d (`rockchip/lxshell/`, branch amiga-lxshell), the menu data
 still `/root/m65/bit/aexp_k325t_cm4_radxacm3.bit` (the way back: `m65flash.py write 1` with it, and harness
 main's m65d).
 
+Menu data files: `rockchip/lxshell/menus/aexp_<id>.menu`, one per menu id (= CRC-32 of the file, the id the
+bitstream reports; `menu_gen.py` writes the file next to each build); `setup_rockchip.sh install` copies all of
+them to `/root/m65/menus/` (other files there are kept), `check` compares them.  `aexp_E6132EE0.menu` = the
+Linux-menu builds (lx1, ...); `aexp_AA719CD5.menu` = the same menu plus **"Fast 68020"** (line 88, Amiga Hardware
+submenu, settings key `CPUFAST:Fast 68020`): the second CPU on its own clock (aexp a1200-fastclk, fc6 and later).
+That line changes the machine like RAM / chipset / CPU / IDE: the shell holds the core, writes, releases = one
+cold boot.  A settings key the running menu does not have (e.g. "Fast 68020" under the older menu) is kept and
+written back, so the setting is in effect again under a bitstream that has the line.
+
 ## Standalone: both cores in flash, switched from the Rockchip
 
 No PC or JTAG is needed in normal use:

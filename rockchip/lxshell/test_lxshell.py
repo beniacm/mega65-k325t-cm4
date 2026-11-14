@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import tempfile
+import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -39,8 +40,9 @@ def menu_data():
 class Rig:
     """model + bus + shell + files, with a fake clock"""
 
-    def __init__(self, tmp, kick=True, menu_ok=True, settings=None, model=None, adf_files=('Workbench.adf',)):
-        data, mid, defaults = menu_data()
+    def __init__(self, tmp, kick=True, menu_ok=True, settings=None, model=None, adf_files=('Workbench.adf',),
+                 menu=None):
+        data, mid, defaults = menu or menu_data()
         self.tmp = tmp
         self.menu_path = os.path.join(tmp, 'aexp.menu')
         with open(self.menu_path, 'wb') as f:
@@ -259,8 +261,12 @@ def test_topology_change_holds_the_core():
 def test_aga_memory_summary():
     """with the AGA chipset the RAM summary shows what the core runs (2 MB chip, no slow RAM), not
     the memory radio's choice; the choice itself stays stored; back to ECS: the choice again"""
+    aga_memory_summary()
+
+
+def aga_memory_summary(menu=None):
     with tmpdir() as tmp:
-        r = started(Rig(tmp))
+        r = started(Rig(tmp, menu=menu))
         r.key(r.HELP)
         ram = [row for row in r.screen() if 'RAM:' in row]
         assert ram and 'RAM: 512K+512K Slow' in ram[0], ram
@@ -574,6 +580,112 @@ def test_key_word():
     assert keys.m65_keys(cols, 0, 61, 63, True) == keys.KEY_HELP
     cols[7] = 1 << 7
     assert keys.m65_keys(cols, 0, 61, 63, True) == keys.KEY_RUNSTOP
+
+
+# ------------------------------------------------------------- the menu files the harness installs
+
+OLD_ID, NEW_ID = 'E6132EE0', 'AA719CD5'         # the Linux-menu builds (lx1..); + "Fast 68020" (fc6..)
+FAST_KEY = 'CPUFAST:Fast 68020'
+FAST_LINE = 88
+
+
+def harness_menu(mid):
+    """(data, id, defaults) of rockchip/lxshell/menus/aexp_<id>.menu (setup_rockchip.sh installs them)"""
+    with open(os.path.join(HERE, 'menus', 'aexp_%s.menu' % mid), 'rb') as f:
+        data = f.read()
+    crc = zlib.crc32(data) & 0xFFFFFFFF
+    assert '%08X' % crc == mid, 'menus/aexp_%s.menu has the id %08X' % (mid, crc)
+    return data, crc, json.loads(data)['defaults']
+
+
+def bit(words, n):
+    return words[n // 16] >> (n % 16) & 1
+
+
+def walk_menu(r):
+    """every selectable item highlighted once by keys: DOWN through the main menu, into each submenu,
+    DOWN through it, back (Run/Stop); returns the set of item indices the cursor was on"""
+    m, d = r.sh.menu, r.sh.mdef
+    seen = set()
+
+    def down_all():
+        for _ in range(len(d.items)):
+            seen.add(m.cur)
+            r.key(r.DOWN)
+    down_all()
+    for s in [n for n, it in enumerate(d.items) if it.submenu and it.g != 0xFF and m.struct()[1][n]]:
+        for _ in range(len(d.items)):
+            if m.cur == s:
+                break
+            r.key(r.DOWN)
+        r.key(r.RETURN)
+        down_all()
+        r.key(r.RUNSTOP)
+    return seen
+
+
+def test_harness_menus():
+    """both menu files: named by their id; the new one = the old one + line 88 "Fast 68020" (a toggle of
+    its own group CPUFAST, default off), every other line the same; in the model every selectable item
+    of both menus is reached by keys, and a settings round trip (save, restart) gives the same CFM words"""
+    old, new = harness_menu(OLD_ID), harness_menu(NEW_ID)
+    jo, jn = json.loads(old[0]), json.loads(new[0])
+    assert jo['size'] == 94 and jn['size'] == 95 and old[2] == new[2]
+    assert jn['items'][:FAST_LINE] + jn['items'][FAST_LINE + 1:] == jo['items']
+    assert jn['groups'][:FAST_LINE] + jn['groups'][FAST_LINE + 1:] == jo['groups']
+    assert jn['items'][FAST_LINE] == ' Fast 68020' and jn['groups'][FAST_LINE] == 0x8000 | jn['core_groups']['CPUFAST']
+    assert 'CPUFAST' not in jo['core_groups'] and jn['c_menu']['CPU_FAST'] == FAST_LINE
+    for menu in (old, new):
+        with tmpdir() as tmp:
+            r = started(Rig(tmp, menu=menu))
+            r.key(r.HELP)
+            seen = walk_menu(r)
+            m = r.sh.menu
+            miss = [r.sh.mdef.items[n].text for n in range(len(r.sh.mdef.items)) if m.selectable(n) and n not in seen]
+            assert not miss, miss
+            r.key(r.HELP)
+            r.run(0.5)
+            # a profile with every group off its default, saved through the menu, restarted
+            r.key(r.HELP)
+            for text in ('HDMI: 720p', '576p 50 Hz 5:4', None, 'HDMI: Lanczos', 'Scanlines', None,
+                         'RAM:', 'AGA Chipset', '8 MB Fast RAM', '68020 CPU', 'IDE Hard Disk',
+                         'Fast 68020' if menu is new else 'IDE Hard Disk', None,
+                         'Linux Module', 'Real-time clock', None):
+                if text is None:
+                    r.key(r.RUNSTOP)
+                    continue
+                nav_to(r, text)
+                r.key(r.RETURN)
+            r.key(r.HELP)
+            r.run(0.5)
+            words = list(r.m.cfm)
+            v = st.load(os.path.join(r.dir, 'amiga.settings'))
+            assert v['CHIPSET:AGA Chipset'] == 1 and v['shell:rtc'] == 1 and v['FILTER:Scanlines'] == 1
+            assert v.get(FAST_KEY) == (1 if menu is new else None), v.get(FAST_KEY)
+            r2 = started(Rig(tmp, menu=menu, model=mdl.ModelMaster(menu_id=menu[1], defaults=menu[2])))
+            assert [e for e in r2.m.events if e[0] == 'release'][0][1] == words
+            assert r2.sh.rtc_on() and bit(words, FAST_LINE) == (menu is new)
+
+
+def test_installer_ships_menus():
+    """setup_rockchip.sh install copies every menu file of rockchip/lxshell/menus/ (each named by its id)
+    to the directory m65d reads by default; check compares them"""
+    names = sorted(os.listdir(os.path.join(HERE, 'menus')))
+    assert names == ['aexp_%s.menu' % i for i in sorted((NEW_ID, OLD_ID))], names
+    for n in names:
+        harness_menu(n[5:13])
+    src = open(os.path.join(os.path.dirname(HERE), 'deploy', 'setup_rockchip.sh')).read()
+    assert 'DEST=/root/m65\n' in src and 'MENU_DIR=$DEST/menus\n' in src
+    assert 'MENUS=$(cd "$HERE/lxshell/menus" && ls *.menu)' in src
+    assert 'tar -C "$HERE/lxshell/menus" -cf - $MENUS | rsh "mkdir -p $MENU_DIR' in src
+    assert 'echo MENU ' in src and '"ok    $MENU_DIR/$f"' in src
+    m65d = open(os.path.join(os.path.dirname(HERE), 'm65d.py')).read()
+    assert '"--amiga-menus", default=os.environ.get("M65_AMIGA_MENUS", "/root/m65/menus")' in m65d
+
+
+def test_aga_memory_summary_new_menu():
+    """the AGA summary hook with the "Fast 68020" line in the submenu"""
+    aga_memory_summary(harness_menu(NEW_ID))
 
 
 if __name__ == '__main__':

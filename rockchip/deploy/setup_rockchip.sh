@@ -30,6 +30,8 @@
 # stack is left as it is.
 # Radxa CM3: /tmp in RAM (tmp-m65.mount -> /etc/systemd/system/tmp.mount, 256 MB); the Luckfox keeps
 # its /tmp.
+# The Amiga shell's menu data files (rockchip/lxshell/menus/*.menu) go to $DEST/menus (install adds or
+# replaces them, keeps other files there); check compares them.
 # card.img is not created either (README "SD card image").  install does not restart anything;
 # reboot afterwards.
 set -u
@@ -53,6 +55,13 @@ UNITS="m65d.service m65io.service m65-bootreset.service"
 AEXP_SRC=${M65_AEXP:-$HOME/projects/mega65/aexp-lx}
 PRESETS="aexp_screen.cfg_4_3 aexp_screen.cfg_16_9"
 PRESET_DIR=$DEST/lxshell/lxamiga/presets
+# the Amiga shell's menu data files, one per menu id (rockchip/lxshell/menus/aexp_<id>.menu = the .menu
+# that menu_gen.py writes next to each bitstream; m65d picks the one whose CRC-32 is the FPGA's menu id):
+# every one the harness carries is installed to $MENU_DIR, so each Amiga bitstream the harness supports
+# finds its menu (E6132EE0 = the Linux-menu builds lx1.., AA719CD5 = + "Fast 68020"); other files there
+# (copied by hand) are kept
+MENU_DIR=$DEST/menus
+MENUS=$(cd "$HERE/lxshell/menus" && ls *.menu)
 ENABLE="m65d.service m65-bootreset.service"   # m65io.service comes with m65d (Wants)
 # removed from the deployment (install takes them off the board)
 GONE_UNITS="m65term.service"
@@ -197,6 +206,7 @@ check() {
     echo NMRAM \$(md5sum 2>/dev/null < /etc/systemd/system/$RADXA_NMRAM_UNIT | cut -d' ' -f1) \$(md5sum 2>/dev/null < $RADXA_NMRAM_SH | cut -d' ' -f1) \$(systemctl is-enabled $RADXA_NMRAM_UNIT 2>/dev/null) \$(systemctl is-active $RADXA_NMRAM_UNIT 2>/dev/null) \$(findmnt -n -o FSTYPE /var/lib/NetworkManager) \$(cmp -s /var/lib/NetworkManager/secret_key /var/lib/m65-nm/secret_key && echo key-same);
     echo TMPFS \$(md5sum 2>/dev/null < /etc/systemd/system/tmp.mount | cut -d' ' -f1) \$(systemctl is-enabled tmp.mount 2>/dev/null) \$(findmnt -n -o FSTYPE /tmp);
     for f in $PRESETS; do echo PRESET \$(md5sum 2>/dev/null < $PRESET_DIR/\$f | cut -d' ' -f1) \$f; done;
+    for f in $(echo $MENUS); do echo MENU \$(md5sum 2>/dev/null < $MENU_DIR/\$f | cut -d' ' -f1) \$f; done;
     echo CARD \$(stat -c %s $DEST/card.img 2>/dev/null)") || { echo "cannot reach $HOST"; exit 2; }
   for f in $FILES; do
     if echo "$out" | grep -q "^$(md5l "$HERE/$f")  $f\$"; then echo "ok    $DEST/$f"; else echo "DIFF  $DEST/$f"; bad=1; fi
@@ -206,6 +216,10 @@ check() {
     if [ ! -f "$AEXP_SRC/$f" ]; then echo "info  $PRESET_DIR/$f ${pm:+present}${pm:-missing} (no $AEXP_SRC/$f to compare: M65_AEXP=<core repo>)"
     elif [ "$pm" = "$(md5l "$AEXP_SRC/$f")" ]; then echo "ok    $PRESET_DIR/$f"
     else echo "DIFF  $PRESET_DIR/$f (want $AEXP_SRC/$f)"; bad=1; fi
+  done
+  for f in $MENUS; do
+    if [ "$(echo "$out" | awk -v f=$f '$1=="MENU" && $3==f {print $2}')" = "$(md5l "$HERE/lxshell/menus/$f")" ]; then
+      echo "ok    $MENU_DIR/$f"; else echo "DIFF  $MENU_DIR/$f"; bad=1; fi
   done
   if [ $B = luckfox ]; then
   [ "$(echo "$out" | awk '/^CFG/{print $2}')" = "$(md5l "$HERE/deploy/config.txt")" ] \
@@ -387,6 +401,8 @@ install() {
   else
     echo "WARN  no screen presets in $AEXP_SRC (M65_AEXP=<core repo>): the Amiga picture stays uncropped without aexp_screen.cfg"
   fi
+  tar -C "$HERE/lxshell/menus" -cf - $MENUS | rsh "mkdir -p $MENU_DIR && tar -C $MENU_DIR --no-same-owner -xf - && cd $MENU_DIR && chmod 644 $(echo $MENUS)" \
+    && echo "Amiga menu data installed to $MENU_DIR:" $MENUS || { echo "menu install FAILED"; exit 1; }
   if [ "${M65_HDD:-0}" = 1 ] && [ $B = radxa-cm3 ]; then
     # the AExp hard disk service (never on the Luckfox: no hard disk link there): m65hdd.py + the unit
     # from this repo, hddsrv's sources from the core repo (built on the module at the service start)
