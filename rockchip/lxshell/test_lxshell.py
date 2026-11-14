@@ -725,6 +725,42 @@ def test_fast_cpu_toggle_cold_boots_once():
         assert not [e for e in r.m.events + r2.m.events if e[0] == 'cfm_while_running']
 
 
+def test_legacy_import_95():
+    """the QNICE settings file of the fast-CPU builds (95 bytes, line 88 = Fast 68020) and the older
+    94 / 93-byte files, each under the new and the old menu: the lines line up by meaning"""
+    mnew = hb.menu_from_m2m(json.loads(harness_menu(NEW_ID)[0]))
+    mold = hb.menu_from_m2m(json.loads(harness_menu(OLD_ID)[0]))
+    defaults = harness_menu(NEW_ID)[2]
+    c = mnew.data['c_menu']
+    b95 = [bit(defaults, n) for n in range(95)]
+    b95[c['FAST_NONE']], b95[c['FAST_4M']], b95[c['CHIPSET_OCS']], b95[c['CHIPSET_AGA']] = 0, 1, 0, 1
+    b95[c['CPU_68020'] - 1], b95[c['CPU_68020']], b95[c['IDE']], b95[FAST_LINE] = 0, 1, 1, 1
+
+    def words_of(mdef, bits):
+        return hb.cfm_words(mdef, [bool(bits[it.cfm_bit]) if it.cfm_bit is not None else False
+                                   for it in mdef.items])
+
+    def cfm_of(mdef, v):
+        return hb.cfm_words(mdef, st.selection_from_values(mdef, v))
+    v = hb.import_legacy(mnew, bytes(b95))                       # 95 under the new menu: as it is
+    assert v[FAST_KEY] == 1 and v['IDE:IDE Hard Disk'] == 1 and cfm_of(mnew, v) == words_of(mnew, b95)
+    b94 = b95[:FAST_LINE] + b95[FAST_LINE + 1:]                  # 94: no Fast line yet -> off
+    v = hb.import_legacy(mnew, bytes(b94))
+    assert v[FAST_KEY] == 0 and v['FAST:4 MB Fast RAM'] == 1 and v['IDE:IDE Hard Disk'] == 1
+    assert cfm_of(mnew, v) == words_of(mnew, b95[:FAST_LINE] + [0] + b95[FAST_LINE + 1:])
+    b93 = b94[:87] + b94[88:]                                    # 93: no IDE line either
+    v = hb.import_legacy(mnew, bytes(b93))
+    assert v[FAST_KEY] == 0 and v['IDE:IDE Hard Disk'] == 0 and v['CHIPSET:AGA Chipset'] == 1
+    assert cfm_of(mnew, v) == words_of(mnew, b93[:87] + [0, 0] + b93[87:])
+    v = hb.import_legacy(mold, bytes(b95))                       # 95 under the old menu: line 88 taken
+    assert cfm_of(mold, v) == words_of(mold, b94)                # out, its value kept under its key
+    assert v[FAST_KEY] == 1 and v['IDE:IDE Hard Disk'] == 1
+    v = hb.import_legacy(mold, bytes(b94))
+    assert FAST_KEY not in v and cfm_of(mold, v) == words_of(mold, b94)
+    assert hb.import_legacy(mnew, bytes([2] * 95)) is None and hb.import_legacy(mnew, b'\xff' + bytes(94)) is None
+    assert hb.import_legacy(mnew, bytes(96)) is None
+
+
 def test_aga_memory_summary_new_menu():
     """the AGA summary hook with the "Fast 68020" line in the submenu"""
     aga_memory_summary(harness_menu(NEW_ID))

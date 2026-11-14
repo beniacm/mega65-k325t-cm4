@@ -1,6 +1,6 @@
 """lxamiga/m2m.py -- the Amiga core's MiSTer2MEGA65 side: the host master's QNICE register map,
 the M2M overlay as the display port, the menu from config.vhd (the .menu file of menu_gen.py) with
-the shell's own section, CFM bits, the 94-byte settings file of the QNICE builds."""
+the shell's own section, CFM bits, the 93..95-byte settings file of the QNICE builds."""
 
 import os
 
@@ -35,7 +35,11 @@ DEV_SYS_INFO = 0x00FF
 DEV_KICK = 0x0100
 DEV_ADF = 0x0103
 
-LEGACY_SIZES = (94, 93)         # 93 = the builds before the IDE line (87) was added
+# the QNICE builds' settings file has one byte per menu line (OPTM_SIZE bytes); the lines added over
+# time, oldest first: (file size with the line, its line number, its settings key).  93 = the builds
+# before the IDE line, 94 = before the "Fast 68020" line (CPUFAST, the fast-CPU builds: 95)
+LEGACY_LINES = ((94, 87, 'IDE:IDE Hard Disk'), (95, 88, 'CPUFAST:Fast 68020'))
+LEGACY_SIZES = (95, 94, 93)
 
 
 class M2MBus(HostBus):
@@ -103,8 +107,8 @@ class Overlay:
 
 
 # the shell-owned section (lead 2026-11-13), a hand-written menu description (lxcore.menu format):
-# inserted before the "About & Help" block, so the core's 94 lines and their CFM bits stay exactly
-# as config.vhd defines them
+# inserted before the "About & Help" block, so the core's lines (94, or 95 with "Fast 68020") and their
+# CFM bits stay exactly as config.vhd defines them
 SHELL_SECTION = [
     {'type': 'line'},
     {'type': 'submenu', 'text': ' Linux Module'},
@@ -169,18 +173,29 @@ def menu_from_m2m(data, shell_section=True, screen_dx=45):
 
 
 def import_legacy(mdef, raw):
-    """the 94-byte (or the older 93-byte) QNICE settings file -> values, or None (defaults).
-    Like the firmware: wrong size or first byte 0xFF = defaults; a byte other than 0/1 = corrupt."""
+    """a QNICE settings file of 95, 94 or 93 bytes -> values, or None (defaults).
+    Like the firmware: wrong size or first byte 0xFF = defaults; a byte other than 0/1 = corrupt.
+    The file's lines are moved to the running menu's layout (LEGACY_LINES): a line the file is too
+    old for is off; a line the running menu is too old for is not in the menu, its value is kept
+    under its key (like an unknown key of amiga.settings: a later bitstream with the line uses it)."""
     if len(raw) not in LEGACY_SIZES or raw[0] == 0xFF or any(b > 1 for b in raw):
         return None
     bits = list(raw)
-    if len(raw) == 93:
-        bits.insert(87, 0)                      # no IDE line yet: off
+    size = mdef.data.get('size', len(mdef.data['items']))
+    extra = {}
+    for with_line, line, key in LEGACY_LINES:
+        if len(raw) < with_line <= size:
+            bits.insert(line, 0)                # the file has no such line yet: off
+    for with_line, line, key in reversed(LEGACY_LINES):
+        if size < with_line <= len(raw):
+            extra[key] = bits.pop(line)         # the menu has no such line (yet)
     sel = settings.factory(mdef)
     for n, it in enumerate(mdef.items):
         if it.cfm_bit is not None and it.cfm_bit < len(bits):
             sel[n] = bool(bits[it.cfm_bit])
-    return settings.values_from_selection(mdef, sel)
+    values = settings.values_from_selection(mdef, sel)
+    values.update(extra)
+    return values
 
 
 def cfm_words(mdef, sel, base=None):
